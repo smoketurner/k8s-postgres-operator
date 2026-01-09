@@ -71,9 +71,18 @@ mod patroni_statefulset_tests {
         let sts = patroni::generate_patroni_statefulset(&cluster);
 
         let labels = sts.metadata.labels.as_ref().unwrap();
-        assert_eq!(labels.get("app.kubernetes.io/name"), Some(&"my-cluster".to_string()));
-        assert_eq!(labels.get("postgres.example.com/ha-mode"), Some(&"patroni".to_string()));
-        assert_eq!(labels.get("app.kubernetes.io/managed-by"), Some(&"postgres-operator".to_string()));
+        assert_eq!(
+            labels.get("app.kubernetes.io/name"),
+            Some(&"my-cluster".to_string())
+        );
+        assert_eq!(
+            labels.get("postgres.example.com/ha-mode"),
+            Some(&"patroni".to_string())
+        );
+        assert_eq!(
+            labels.get("app.kubernetes.io/managed-by"),
+            Some(&"postgres-operator".to_string())
+        );
     }
 
     #[test]
@@ -105,7 +114,10 @@ mod patroni_statefulset_tests {
 
         let spec = sts.spec.as_ref().unwrap();
         let pod_spec = spec.template.spec.as_ref().unwrap();
-        assert_eq!(pod_spec.service_account_name, Some("my-cluster-patroni".to_string()));
+        assert_eq!(
+            pod_spec.service_account_name,
+            Some("my-cluster-patroni".to_string())
+        );
     }
 
     #[test]
@@ -113,7 +125,15 @@ mod patroni_statefulset_tests {
         let cluster = create_test_cluster("my-cluster", "default", 1);
         let sts = patroni::generate_patroni_statefulset(&cluster);
 
-        let containers = &sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap().containers;
+        let containers = &sts
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers;
         let ports = containers[0].ports.as_ref().unwrap();
 
         // Should have PostgreSQL and Patroni ports
@@ -129,7 +149,15 @@ mod patroni_statefulset_tests {
         let cluster = create_test_cluster("my-cluster", "default", 1);
         let sts = patroni::generate_patroni_statefulset(&cluster);
 
-        let container = &sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap().containers[0];
+        let container = &sts
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0];
 
         // Patroni uses HTTP probes against its REST API
         let readiness = container.readiness_probe.as_ref().unwrap();
@@ -236,7 +264,10 @@ mod service_tests {
         let selector = svc.spec.as_ref().unwrap().selector.as_ref().unwrap();
         // Patroni uses spilo-role label
         assert_eq!(selector.get("spilo-role"), Some(&"master".to_string()));
-        assert_eq!(selector.get("postgres.example.com/cluster"), Some(&"my-cluster".to_string()));
+        assert_eq!(
+            selector.get("postgres.example.com/cluster"),
+            Some(&"my-cluster".to_string())
+        );
     }
 
     #[test]
@@ -334,7 +365,10 @@ mod pdb_tests {
 
         let spec = pdb_resource.spec.as_ref().unwrap();
         // Single replica: min_available = 0 (allow disruption)
-        assert_eq!(spec.min_available, Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(0)));
+        assert_eq!(
+            spec.min_available,
+            Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(0))
+        );
     }
 
     #[test]
@@ -344,7 +378,10 @@ mod pdb_tests {
 
         let spec = pdb_resource.spec.as_ref().unwrap();
         // Two replicas: min_available = 1
-        assert_eq!(spec.min_available, Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(1)));
+        assert_eq!(
+            spec.min_available,
+            Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(1))
+        );
     }
 
     #[test]
@@ -354,7 +391,10 @@ mod pdb_tests {
 
         let spec = pdb_resource.spec.as_ref().unwrap();
         // Three replicas: min_available = 2 (n-1)
-        assert_eq!(spec.min_available, Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(2)));
+        assert_eq!(
+            spec.min_available,
+            Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(2))
+        );
     }
 
     #[test]

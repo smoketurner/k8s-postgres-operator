@@ -143,13 +143,9 @@ impl ResourceAssertions {
         let api: Api<ConfigMap> = Api::namespaced(self.client.clone(), &self.namespace);
         let cm = api.get(name).await?;
 
-        let content = cm
-            .data
-            .as_ref()
-            .and_then(|d| d.get(key))
-            .ok_or_else(|| {
-                AssertionError::ConfigMapContentMissing(format!("Key '{}' not found", key))
-            })?;
+        let content = cm.data.as_ref().and_then(|d| d.get(key)).ok_or_else(|| {
+            AssertionError::ConfigMapContentMissing(format!("Key '{}' not found", key))
+        })?;
 
         if !content.contains(expected_content) {
             return Err(AssertionError::ConfigMapContentMissing(format!(

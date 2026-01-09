@@ -63,7 +63,6 @@ fn default_replicas() -> i32 {
     1
 }
 
-
 /// Storage configuration for PostgreSQL data volumes
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -252,10 +251,26 @@ pub struct PostgresClusterStatus {
     /// Kubernetes-style conditions
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
+
+    /// Current retry count for exponential backoff
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_count: Option<i32>,
+
+    /// Last error message encountered during reconciliation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+
+    /// Timestamp of the last error
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error_time: Option<String>,
+
+    /// Previous replica count (used for tracking scaling operations)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_replicas: Option<i32>,
 }
 
 /// Cluster lifecycle phase
-#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, Default, PartialEq, Eq, Hash)]
 pub enum ClusterPhase {
     /// Cluster is waiting to be created
     #[default]
@@ -264,8 +279,14 @@ pub enum ClusterPhase {
     Creating,
     /// Cluster is running and healthy
     Running,
-    /// Cluster is being updated
+    /// Cluster is being updated (non-scaling spec change)
     Updating,
+    /// Cluster is scaling (replica count change)
+    Scaling,
+    /// Cluster is running but in a degraded state (some replicas not ready)
+    Degraded,
+    /// Cluster is recovering from a failed state
+    Recovering,
     /// Cluster is in a failed state
     Failed,
     /// Cluster is being deleted
@@ -279,6 +300,9 @@ impl std::fmt::Display for ClusterPhase {
             ClusterPhase::Creating => write!(f, "Creating"),
             ClusterPhase::Running => write!(f, "Running"),
             ClusterPhase::Updating => write!(f, "Updating"),
+            ClusterPhase::Scaling => write!(f, "Scaling"),
+            ClusterPhase::Degraded => write!(f, "Degraded"),
+            ClusterPhase::Recovering => write!(f, "Recovering"),
             ClusterPhase::Failed => write!(f, "Failed"),
             ClusterPhase::Deleting => write!(f, "Deleting"),
         }

@@ -75,7 +75,7 @@ pub async fn ensure_crd_installed(cluster: &SharedTestCluster) -> Result<(), Crd
         .get_or_try_init(|| async {
             let client = cluster.new_client().await.map_err(|e| {
                 CrdError::KubeError(kube::Error::Service(
-                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string()).into(),
+                    std::io::Error::other(e.to_string()).into(),
                 ))
             })?;
             crate::install_crd(client).await

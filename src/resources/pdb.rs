@@ -7,25 +7,14 @@
 //! dynamic role assignment using spilo-role labels.
 
 use k8s_openapi::api::policy::v1::{PodDisruptionBudget, PodDisruptionBudgetSpec};
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, OwnerReference};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-use kube::core::ObjectMeta;
 use kube::ResourceExt;
+use kube::core::ObjectMeta;
 use std::collections::BTreeMap;
 
 use crate::crd::PostgresCluster;
-
-/// Generate owner reference for the cluster
-fn owner_reference(cluster: &PostgresCluster) -> OwnerReference {
-    OwnerReference {
-        api_version: "postgres.example.com/v1alpha1".to_string(),
-        kind: "PostgresCluster".to_string(),
-        name: cluster.name_any(),
-        uid: cluster.metadata.uid.clone().unwrap_or_default(),
-        controller: Some(true),
-        block_owner_deletion: Some(true),
-    }
-}
+use crate::resources::common::{owner_reference, standard_labels};
 
 /// Generate a PodDisruptionBudget for the cluster
 ///
@@ -42,12 +31,7 @@ pub fn generate_pdb(cluster: &PostgresCluster) -> PodDisruptionBudget {
     let ns = cluster.namespace();
     let replicas = cluster.spec.replicas;
 
-    let labels = BTreeMap::from([
-        ("app.kubernetes.io/name".to_string(), cluster_name.clone()),
-        ("app.kubernetes.io/component".to_string(), "postgresql".to_string()),
-        ("app.kubernetes.io/managed-by".to_string(), "postgres-operator".to_string()),
-        ("postgres.example.com/cluster".to_string(), cluster_name.clone()),
-    ]);
+    let labels = standard_labels(&cluster_name);
 
     // Match all pods in the Patroni cluster (both master and replicas)
     let match_labels = BTreeMap::from([
@@ -57,9 +41,9 @@ pub fn generate_pdb(cluster: &PostgresCluster) -> PodDisruptionBudget {
 
     // Calculate min_available based on replica count
     let min_available = match replicas {
-        1 => 0,                    // Single instance - allow disruption (causes downtime)
-        2 => 1,                    // Two instances - keep at least one running
-        n => n - 1,                // 3+ instances - allow one disruption at a time
+        1 => 0,     // Single instance - allow disruption (causes downtime)
+        2 => 1,     // Two instances - keep at least one running
+        n => n - 1, // 3+ instances - allow one disruption at a time
     };
 
     PodDisruptionBudget {

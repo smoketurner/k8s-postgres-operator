@@ -20,13 +20,16 @@ use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::{ConfigMap, Secret, Service, ServiceAccount};
 use k8s_openapi::api::policy::v1::PodDisruptionBudget;
 use k8s_openapi::api::rbac::v1::{Role, RoleBinding};
+use kube::Api;
 use kube::api::{DeleteParams, Patch, PatchParams, PostParams};
 use kube::runtime::wait::await_condition;
-use kube::Api;
 use postgres_operator::crd::{ClusterPhase, PostgresCluster};
 use std::time::Duration;
 
-use crate::{ensure_crd_installed, ensure_operator_running, PostgresClusterBuilder, ScopedOperator, SharedTestCluster, TestNamespace};
+use crate::{
+    PostgresClusterBuilder, ScopedOperator, SharedTestCluster, TestNamespace, ensure_crd_installed,
+    ensure_operator_running,
+};
 
 /// Short timeout - we're testing operator logic, not pod readiness
 const FAST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -143,7 +146,9 @@ async fn test_single_creates_resources() {
         .build();
 
     let api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
-    api.create(&PostParams::default(), &pg).await.expect("create");
+    api.create(&PostParams::default(), &pg)
+        .await
+        .expect("create");
 
     // Wait for operator to fully process (has observedGeneration = reconciled spec)
     wait_for(&api, "test-sa", has_observed_generation(), FAST_TIMEOUT)
@@ -218,7 +223,9 @@ async fn test_finalizer_added() {
         .build();
 
     let api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
-    api.create(&PostParams::default(), &pg).await.expect("create");
+    api.create(&PostParams::default(), &pg)
+        .await
+        .expect("create");
 
     // Wait for finalizer
     wait_for(&api, "test-fin", has_finalizer(), FAST_TIMEOUT)
@@ -249,7 +256,9 @@ async fn test_owner_references() {
         .build();
 
     let api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
-    api.create(&PostParams::default(), &pg).await.expect("create");
+    api.create(&PostParams::default(), &pg)
+        .await
+        .expect("create");
 
     wait_for(&api, "test-own", has_observed_generation(), FAST_TIMEOUT)
         .await
@@ -260,25 +269,38 @@ async fn test_owner_references() {
     let sts = wait_for_resource(&sts_api, "test-own", FAST_TIMEOUT)
         .await
         .expect("get sts");
-    let owner_refs = sts.metadata.owner_references.as_ref().expect("should have owner refs");
-    let has_owner = owner_refs.iter().any(|r| {
-        r.kind == "PostgresCluster" && r.name == "test-own" && r.controller == Some(true)
-    });
-    assert!(has_owner, "StatefulSet should have PostgresCluster as controller owner");
+    let owner_refs = sts
+        .metadata
+        .owner_references
+        .as_ref()
+        .expect("should have owner refs");
+    let has_owner = owner_refs
+        .iter()
+        .any(|r| r.kind == "PostgresCluster" && r.name == "test-own" && r.controller == Some(true));
+    assert!(
+        has_owner,
+        "StatefulSet should have PostgresCluster as controller owner"
+    );
 
     // Check Service owner reference
     let svc_api: Api<Service> = Api::namespaced(client.clone(), ns.name());
     let svc = wait_for_resource(&svc_api, "test-own", FAST_TIMEOUT)
         .await
         .expect("get svc");
-    assert!(svc.metadata.owner_references.is_some(), "Service should have owner refs");
+    assert!(
+        svc.metadata.owner_references.is_some(),
+        "Service should have owner refs"
+    );
 
     // Check ConfigMap owner reference
     let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), ns.name());
     let cm = wait_for_resource(&cm_api, "test-own-patroni-config", FAST_TIMEOUT)
         .await
         .expect("get cm");
-    assert!(cm.metadata.owner_references.is_some(), "ConfigMap should have owner refs");
+    assert!(
+        cm.metadata.owner_references.is_some(),
+        "ConfigMap should have owner refs"
+    );
 
     api.delete("test-own", &DeleteParams::default()).await.ok();
     ns.cleanup().await.ok();
@@ -300,7 +322,9 @@ async fn test_status_observed_generation() {
         .build();
 
     let api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
-    api.create(&PostParams::default(), &pg).await.expect("create");
+    api.create(&PostParams::default(), &pg)
+        .await
+        .expect("create");
 
     wait_for(&api, "test-gen", has_observed_generation(), FAST_TIMEOUT)
         .await
@@ -310,10 +334,12 @@ async fn test_status_observed_generation() {
     let status = cluster.status.as_ref().expect("should have status");
 
     // observedGeneration should match metadata.generation
-    assert!(status.observed_generation.is_some(), "observedGeneration should be set");
+    assert!(
+        status.observed_generation.is_some(),
+        "observedGeneration should be set"
+    );
     assert_eq!(
-        status.observed_generation,
-        cluster.metadata.generation,
+        status.observed_generation, cluster.metadata.generation,
         "observedGeneration should match generation"
     );
 
@@ -342,7 +368,9 @@ async fn test_ha_creates_patroni_resources() {
         .build();
 
     let api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
-    api.create(&PostParams::default(), &pg).await.expect("create");
+    api.create(&PostParams::default(), &pg)
+        .await
+        .expect("create");
 
     wait_for(&api, "test-ha", has_observed_generation(), FAST_TIMEOUT)
         .await
@@ -400,7 +428,9 @@ async fn test_scale_updates_statefulset() {
         .build();
 
     let api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
-    api.create(&PostParams::default(), &pg).await.expect("create");
+    api.create(&PostParams::default(), &pg)
+        .await
+        .expect("create");
 
     wait_for(&api, "test-scale", has_observed_generation(), FAST_TIMEOUT)
         .await
@@ -421,9 +451,13 @@ async fn test_scale_updates_statefulset() {
     let patch = serde_json::json!({
         "spec": { "replicas": 4 }
     });
-    api.patch("test-scale", &PatchParams::apply("test"), &Patch::Merge(&patch))
-        .await
-        .expect("patch");
+    api.patch(
+        "test-scale",
+        &PatchParams::apply("test"),
+        &Patch::Merge(&patch),
+    )
+    .await
+    .expect("patch");
 
     // Wait for new generation to be observed
     let new_gen_observed = |obj: Option<&PostgresCluster>| {
@@ -444,7 +478,9 @@ async fn test_scale_updates_statefulset() {
         "StatefulSet should be scaled to 4"
     );
 
-    api.delete("test-scale", &DeleteParams::default()).await.ok();
+    api.delete("test-scale", &DeleteParams::default())
+        .await
+        .ok();
     ns.cleanup().await.ok();
 }
 
@@ -467,7 +503,9 @@ async fn test_config_change_updates_configmap() {
         .build();
 
     let api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
-    api.create(&PostParams::default(), &pg).await.expect("create");
+    api.create(&PostParams::default(), &pg)
+        .await
+        .expect("create");
 
     wait_for(&api, "test-cfg", has_observed_generation(), FAST_TIMEOUT)
         .await
@@ -478,7 +516,9 @@ async fn test_config_change_updates_configmap() {
     let initial_cm = wait_for_resource(&cm_api, "test-cfg-patroni-config", FAST_TIMEOUT)
         .await
         .expect("get configmap");
-    let initial_content = initial_cm.data.as_ref()
+    let initial_content = initial_cm
+        .data
+        .as_ref()
         .and_then(|d| d.get("patroni.yml"))
         .cloned()
         .unwrap_or_default();
@@ -496,9 +536,13 @@ async fn test_config_change_updates_configmap() {
             }
         }
     });
-    api.patch("test-cfg", &PatchParams::apply("test"), &Patch::Merge(&patch))
-        .await
-        .expect("patch");
+    api.patch(
+        "test-cfg",
+        &PatchParams::apply("test"),
+        &Patch::Merge(&patch),
+    )
+    .await
+    .expect("patch");
 
     // Wait for new generation to be observed
     let new_gen_observed = |obj: Option<&PostgresCluster>| {
@@ -512,15 +556,26 @@ async fn test_config_change_updates_configmap() {
         .expect("new generation observed");
 
     // Get new ConfigMap content
-    let updated_cm = cm_api.get("test-cfg-patroni-config").await.expect("get configmap");
-    let updated_content = updated_cm.data.as_ref()
+    let updated_cm = cm_api
+        .get("test-cfg-patroni-config")
+        .await
+        .expect("get configmap");
+    let updated_content = updated_cm
+        .data
+        .as_ref()
         .and_then(|d| d.get("patroni.yml"))
         .cloned()
         .unwrap_or_default();
 
     // Verify config changed and contains new values
-    assert_ne!(initial_content, updated_content, "ConfigMap content should change");
-    assert!(updated_content.contains("max_connections"), "Should contain max_connections param");
+    assert_ne!(
+        initial_content, updated_content,
+        "ConfigMap content should change"
+    );
+    assert!(
+        updated_content.contains("max_connections"),
+        "Should contain max_connections param"
+    );
 
     api.delete("test-cfg", &DeleteParams::default()).await.ok();
     ns.cleanup().await.ok();
@@ -546,7 +601,9 @@ async fn test_deletion_removes_finalizer() {
         .build();
 
     let api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
-    api.create(&PostParams::default(), &pg).await.expect("create");
+    api.create(&PostParams::default(), &pg)
+        .await
+        .expect("create");
 
     // Wait for finalizer to be added
     wait_for(&api, "test-del", has_finalizer(), FAST_TIMEOUT)
@@ -570,7 +627,10 @@ async fn test_deletion_removes_finalizer() {
     })
     .await;
 
-    assert!(deleted.is_ok(), "Cluster should be deleted (finalizer removed)");
+    assert!(
+        deleted.is_ok(),
+        "Cluster should be deleted (finalizer removed)"
+    );
 
     ns.cleanup().await.ok();
 }
@@ -595,7 +655,9 @@ async fn test_invalid_storage_class_still_creates_resources() {
         .build();
 
     let api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
-    api.create(&PostParams::default(), &pg).await.expect("create");
+    api.create(&PostParams::default(), &pg)
+        .await
+        .expect("create");
 
     // Operator should still process and create resources
     wait_for(&api, "test-bad", has_observed_generation(), FAST_TIMEOUT)

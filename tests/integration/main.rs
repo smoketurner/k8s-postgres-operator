@@ -19,6 +19,7 @@ mod operator;
 mod wait;
 
 // Test modules
+mod slow_tests;
 mod tests;
 
 // Re-export common test utilities

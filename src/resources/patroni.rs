@@ -20,74 +20,85 @@ use k8s_openapi::api::core::v1::{
 };
 use k8s_openapi::api::rbac::v1::{Role, RoleBinding, RoleRef, Subject};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, LabelSelectorRequirement, OwnerReference};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, LabelSelectorRequirement};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-use kube::core::ObjectMeta;
 use kube::ResourceExt;
+use kube::core::ObjectMeta;
 use std::collections::BTreeMap;
 
 use crate::crd::PostgresCluster;
+use crate::resources::common::{owner_reference, patroni_labels};
 
 /// Default Patroni/Spilo image (Zalando's production-ready PostgreSQL + Patroni image)
 /// This can be overridden in the CRD
 const DEFAULT_SPILO_IMAGE: &str = "ghcr.io/zalando/spilo-16:3.3-p1";
 
-/// Labels for Patroni resources
-fn labels(cluster_name: &str) -> BTreeMap<String, String> {
-    BTreeMap::from([
-        ("app.kubernetes.io/name".to_string(), cluster_name.to_string()),
-        ("app.kubernetes.io/component".to_string(), "postgresql".to_string()),
-        ("app.kubernetes.io/managed-by".to_string(), "postgres-operator".to_string()),
-        ("postgres.example.com/cluster".to_string(), cluster_name.to_string()),
-        ("postgres.example.com/ha-mode".to_string(), "patroni".to_string()),
-    ])
-}
-
-/// Generate owner reference
-fn owner_reference(cluster: &PostgresCluster) -> OwnerReference {
-    OwnerReference {
-        api_version: "postgres.example.com/v1alpha1".to_string(),
-        kind: "PostgresCluster".to_string(),
-        name: cluster.name_any(),
-        uid: cluster.metadata.uid.clone().unwrap_or_default(),
-        controller: Some(true),
-        block_owner_deletion: Some(true),
-    }
-}
-
 /// Generate the Patroni configuration as a ConfigMap
 ///
-/// Patroni reads its configuration from environment variables and/or a YAML file.
-/// We use environment variables for most settings, but provide a bootstrap config
-/// for initial cluster setup.
+/// This ConfigMap stores the effective Patroni configuration for auditing/debugging.
+/// The actual config is passed to Spilo via SPILO_CONFIGURATION env var.
 pub fn generate_patroni_config(cluster: &PostgresCluster) -> ConfigMap {
     let name = format!("{}-patroni-config", cluster.name_any());
     let cluster_name = cluster.name_any();
     let ns = cluster.namespace();
 
-    // Patroni bootstrap configuration
+    // Store both the Spilo config (what's actually used) and the full patroni.yml (for reference)
+    let spilo_config = generate_spilo_config(cluster);
     let patroni_config = generate_patroni_yaml(cluster);
 
     ConfigMap {
         metadata: ObjectMeta {
             name: Some(name),
             namespace: ns,
-            labels: Some(labels(&cluster_name)),
+            labels: Some(patroni_labels(&cluster_name)),
             owner_references: Some(vec![owner_reference(cluster)]),
             ..Default::default()
         },
         data: Some(BTreeMap::from([
+            ("spilo-config.yml".to_string(), spilo_config),
             ("patroni.yml".to_string(), patroni_config),
         ])),
         ..Default::default()
     }
 }
 
-/// Generate Patroni YAML configuration
+/// Generate Spilo configuration (YAML format)
+///
+/// This is passed via SPILO_CONFIGURATION env var and merged with Spilo's
+/// auto-generated Patroni config. We use this to customize PostgreSQL parameters.
+fn generate_spilo_config(cluster: &PostgresCluster) -> String {
+    let mut params: BTreeMap<String, String> = BTreeMap::new();
+
+    // Default parameters for HA operation
+    params.insert("max_connections".to_string(), "100".to_string());
+    params.insert("shared_buffers".to_string(), "128MB".to_string());
+    params.insert("wal_level".to_string(), "replica".to_string());
+    params.insert("hot_standby".to_string(), "on".to_string());
+    params.insert("max_wal_senders".to_string(), "10".to_string());
+    params.insert("max_replication_slots".to_string(), "10".to_string());
+    params.insert("wal_keep_size".to_string(), "1GB".to_string());
+    params.insert("hot_standby_feedback".to_string(), "on".to_string());
+
+    // Override with user-defined parameters
+    for (key, value) in &cluster.spec.postgresql_params {
+        params.insert(key.clone(), value.clone());
+    }
+
+    // Format as YAML for SPILO_CONFIGURATION
+    // Spilo expects this structure to be merged into its generated config
+    let params_yaml: Vec<String> = params
+        .iter()
+        .map(|(k, v)| format!("    {}: {}", k, v))
+        .collect();
+
+    format!("postgresql:\n  parameters:\n{}", params_yaml.join("\n"))
+}
+
+/// Generate Patroni YAML configuration for ConfigMap
 fn generate_patroni_yaml(cluster: &PostgresCluster) -> String {
     let cluster_name = cluster.name_any();
     let ns = cluster.namespace().unwrap_or_else(|| "default".to_string());
-    
+
     let mut postgresql_params = vec![
         "max_connections: 100".to_string(),
         "shared_buffers: 128MB".to_string(),
@@ -104,7 +115,8 @@ fn generate_patroni_yaml(cluster: &PostgresCluster) -> String {
         postgresql_params.push(format!("{}: {}", key, value));
     }
 
-    format!(r#"
+    format!(
+        r#"
 scope: {cluster_name}
 namespace: {ns}
 
@@ -171,7 +183,8 @@ tags:
 "#,
         cluster_name = cluster_name,
         ns = ns,
-        params = postgresql_params.iter()
+        params = postgresql_params
+            .iter()
             .map(|p| format!("        {}", p))
             .collect::<Vec<_>>()
             .join("\n"),
@@ -190,7 +203,7 @@ pub fn generate_service_account(cluster: &PostgresCluster) -> ServiceAccount {
         metadata: ObjectMeta {
             name: Some(name),
             namespace: ns,
-            labels: Some(labels(&cluster_name)),
+            labels: Some(patroni_labels(&cluster_name)),
             owner_references: Some(vec![owner_reference(cluster)]),
             ..Default::default()
         },
@@ -208,7 +221,7 @@ pub fn generate_patroni_role(cluster: &PostgresCluster) -> Role {
         metadata: ObjectMeta {
             name: Some(name),
             namespace: ns,
-            labels: Some(labels(&cluster_name)),
+            labels: Some(patroni_labels(&cluster_name)),
             owner_references: Some(vec![owner_reference(cluster)]),
             ..Default::default()
         },
@@ -247,11 +260,7 @@ pub fn generate_patroni_role(cluster: &PostgresCluster) -> Role {
             k8s_openapi::api::rbac::v1::PolicyRule {
                 api_groups: Some(vec!["".to_string()]),
                 resources: Some(vec!["pods".to_string()]),
-                verbs: vec![
-                    "get".to_string(),
-                    "list".to_string(),
-                    "watch".to_string(),
-                ],
+                verbs: vec!["get".to_string(), "list".to_string(), "watch".to_string()],
                 ..Default::default()
             },
             // Patroni needs to update its own pod labels
@@ -275,7 +284,7 @@ pub fn generate_patroni_role_binding(cluster: &PostgresCluster) -> RoleBinding {
         metadata: ObjectMeta {
             name: Some(name.clone()),
             namespace: ns.clone(),
-            labels: Some(labels(&cluster_name)),
+            labels: Some(patroni_labels(&cluster_name)),
             owner_references: Some(vec![owner_reference(cluster)]),
             ..Default::default()
         },
@@ -302,13 +311,11 @@ fn generate_anti_affinity(cluster_name: &str) -> Affinity {
                     weight: 100,
                     pod_affinity_term: PodAffinityTerm {
                         label_selector: Some(LabelSelector {
-                            match_expressions: Some(vec![
-                                LabelSelectorRequirement {
-                                    key: "postgres.example.com/cluster".to_string(),
-                                    operator: "In".to_string(),
-                                    values: Some(vec![cluster_name.to_string()]),
-                                },
-                            ]),
+                            match_expressions: Some(vec![LabelSelectorRequirement {
+                                key: "postgres.example.com/cluster".to_string(),
+                                operator: "In".to_string(),
+                                values: Some(vec![cluster_name.to_string()]),
+                            }]),
                             ..Default::default()
                         }),
                         topology_key: "kubernetes.io/hostname".to_string(),
@@ -319,13 +326,11 @@ fn generate_anti_affinity(cluster_name: &str) -> Affinity {
                     weight: 50,
                     pod_affinity_term: PodAffinityTerm {
                         label_selector: Some(LabelSelector {
-                            match_expressions: Some(vec![
-                                LabelSelectorRequirement {
-                                    key: "postgres.example.com/cluster".to_string(),
-                                    operator: "In".to_string(),
-                                    values: Some(vec![cluster_name.to_string()]),
-                                },
-                            ]),
+                            match_expressions: Some(vec![LabelSelectorRequirement {
+                                key: "postgres.example.com/cluster".to_string(),
+                                operator: "In".to_string(),
+                                values: Some(vec![cluster_name.to_string()]),
+                            }]),
                             ..Default::default()
                         }),
                         topology_key: "topology.kubernetes.io/zone".to_string(),
@@ -346,13 +351,12 @@ fn generate_anti_affinity(cluster_name: &str) -> Affinity {
 pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
     let name = cluster.name_any();
     let ns = cluster.namespace();
-    let labels = labels(&name);
+    let labels = patroni_labels(&name);
     let replicas = cluster.spec.replicas;
 
     // Use Spilo image (Zalando's PostgreSQL + Patroni) or custom image
     let image = DEFAULT_SPILO_IMAGE.to_string();
     let secret_name = format!("{}-credentials", name);
-    let config_name = format!("{}-patroni-config", name);
     let sa_name = format!("{}-patroni", name);
 
     // Environment variables for Patroni
@@ -399,12 +403,6 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
             }),
             ..Default::default()
         },
-        // Patroni configuration file
-        EnvVar {
-            name: "PATRONI_CONFIGURATION".to_string(),
-            value: Some("/etc/patroni/patroni.yml".to_string()),
-            ..Default::default()
-        },
         // PostgreSQL superuser password
         EnvVar {
             name: "POSTGRES_PASSWORD".to_string(),
@@ -431,6 +429,13 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
             }),
             ..Default::default()
         },
+        // Spilo configuration - pass entire Patroni config as YAML
+        // This is the Spilo-native way to configure Patroni
+        EnvVar {
+            name: "SPILO_CONFIGURATION".to_string(),
+            value: Some(generate_spilo_config(cluster)),
+            ..Default::default()
+        },
         // Data directory
         EnvVar {
             name: "PGDATA".to_string(),
@@ -446,38 +451,23 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
         // Labels for Patroni to manage
         EnvVar {
             name: "PATRONI_KUBERNETES_LABELS".to_string(),
-            value: Some(format!("{{app.kubernetes.io/name: {}, postgres.example.com/cluster: {}}}", name, name)),
+            value: Some(format!(
+                "{{app.kubernetes.io/name: {}, postgres.example.com/cluster: {}}}",
+                name, name
+            )),
             ..Default::default()
         },
     ];
 
-    // Volume mounts
-    let volume_mounts = vec![
-        VolumeMount {
-            name: "data".to_string(),
-            mount_path: "/var/lib/postgresql/data".to_string(),
-            ..Default::default()
-        },
-        VolumeMount {
-            name: "patroni-config".to_string(),
-            mount_path: "/etc/patroni".to_string(),
-            read_only: Some(true),
-            ..Default::default()
-        },
-    ];
+    // Volume mounts - only data volume needed, Spilo config is via env vars
+    let volume_mounts = vec![VolumeMount {
+        name: "data".to_string(),
+        mount_path: "/var/lib/postgresql/data".to_string(),
+        ..Default::default()
+    }];
 
-    // Volumes
-    let volumes = vec![
-        Volume {
-            name: "patroni-config".to_string(),
-            config_map: Some(k8s_openapi::api::core::v1::ConfigMapVolumeSource {
-                name: config_name,
-                default_mode: Some(0o644),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-    ];
+    // No additional volumes needed - Spilo generates its config from env vars
+    let volumes: Vec<Volume> = vec![];
 
     // Startup probe - Patroni REST API
     let startup_probe = Probe {
@@ -547,35 +537,39 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
         ]),
         env: Some(env_vars),
         volume_mounts: Some(volume_mounts),
-        resources: cluster.spec.resources.as_ref().map(|r| ResourceRequirements {
-            limits: r.limits.as_ref().map(|l| {
-                let mut map = BTreeMap::new();
-                if let Some(cpu) = &l.cpu {
-                    map.insert("cpu".to_string(), Quantity(cpu.clone()));
-                }
-                if let Some(memory) = &l.memory {
-                    map.insert("memory".to_string(), Quantity(memory.clone()));
-                }
-                map
+        resources: cluster
+            .spec
+            .resources
+            .as_ref()
+            .map(|r| ResourceRequirements {
+                limits: r.limits.as_ref().map(|l| {
+                    let mut map = BTreeMap::new();
+                    if let Some(cpu) = &l.cpu {
+                        map.insert("cpu".to_string(), Quantity(cpu.clone()));
+                    }
+                    if let Some(memory) = &l.memory {
+                        map.insert("memory".to_string(), Quantity(memory.clone()));
+                    }
+                    map
+                }),
+                requests: r.requests.as_ref().map(|req| {
+                    let mut map = BTreeMap::new();
+                    if let Some(cpu) = &req.cpu {
+                        map.insert("cpu".to_string(), Quantity(cpu.clone()));
+                    }
+                    if let Some(memory) = &req.memory {
+                        map.insert("memory".to_string(), Quantity(memory.clone()));
+                    }
+                    map
+                }),
+                ..Default::default()
             }),
-            requests: r.requests.as_ref().map(|req| {
-                let mut map = BTreeMap::new();
-                if let Some(cpu) = &req.cpu {
-                    map.insert("cpu".to_string(), Quantity(cpu.clone()));
-                }
-                if let Some(memory) = &req.memory {
-                    map.insert("memory".to_string(), Quantity(memory.clone()));
-                }
-                map
-            }),
-            ..Default::default()
-        }),
         startup_probe: Some(startup_probe),
         readiness_probe: Some(readiness_probe),
         liveness_probe: Some(liveness_probe),
         security_context: Some(SecurityContext {
-            run_as_user: Some(101),    // Spilo uses uid 101
-            run_as_group: Some(103),   // postgres group
+            run_as_user: Some(101),  // Spilo uses uid 101
+            run_as_group: Some(103), // postgres group
             allow_privilege_escalation: Some(false),
             ..Default::default()
         }),

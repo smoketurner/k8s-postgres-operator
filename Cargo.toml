@@ -2,14 +2,14 @@
 name = "postgres-operator"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.92"
 description = "A Kubernetes operator for managing PostgreSQL clusters"
 license = "MIT"
 
 [dependencies]
 # Kubernetes - using latest available k8s-openapi with latest supported K8s version
 # Note: v1_35 will be available when k8s-openapi is updated
-kube = { version = "2", features = ["runtime", "derive", "client"] }
+kube = { version = "2", default-features = false, features = ["runtime", "derive", "client", "rustls-tls"] }
 k8s-openapi = { version = "0.26", features = ["v1_34"] }
 
 # Async runtime
@@ -23,17 +23,27 @@ schemars = "1"
 
 # Error handling
 thiserror = "2"
-anyhow = "1"
 
 # Logging/Tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# HTTP server for health endpoints and metrics
+axum = "0.8"
+prometheus-client = "0.24"
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.9"
 sha2 = "0.10"
 base64 = "0.22"
+
+# TLS crypto backend for rustls
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
+
+# Leader election
+kube-leader-election = "0.42"
+hostname = "0.4"
 
 [dev-dependencies]
 tokio-test = "0.4"

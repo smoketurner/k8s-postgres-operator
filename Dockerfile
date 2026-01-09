@@ -1,44 +1,35 @@
-# Build stage
-FROM rust:1.83-slim-bookworm AS builder
+# Build stage - using Alpine for musl toolchain
+FROM public.ecr.aws/docker/library/rust:1.92-alpine AS builder
 
 WORKDIR /app
 
-# Install dependencies for building
-RUN apt-get update && apt-get install -y \
-    pkg-config \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Install build dependencies (cmake, perl, go needed for aws-lc-rs)
+RUN apk add --no-cache musl-dev cmake make perl go clang
 
-# Copy manifests
-COPY Cargo.toml Cargo.lock* ./
+COPY Cargo.toml Cargo.lock ./
 
-# Create a dummy main.rs to cache dependencies
+# Cache dependencies - create dummy src matching project structure
 RUN mkdir src && \
     echo "fn main() {}" > src/main.rs && \
+    echo "// dummy" > src/lib.rs && \
     cargo build --release && \
     rm -rf src
 
-# Copy actual source
 COPY src ./src
 
-# Build the actual application
-RUN touch src/main.rs && cargo build --release
+# Build the actual application (touch to invalidate cache)
+RUN touch src/main.rs src/lib.rs && cargo build --release
 
-# Runtime stage
-FROM debian:bookworm-slim
+# Runtime stage - scratch for minimal image
+FROM scratch
 
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    libssl3 \
-    && rm -rf /var/lib/apt/lists/*
+# Copy CA certificates for TLS
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
-WORKDIR /app
+# Copy the statically-linked binary
+COPY --from=builder /app/target/release/postgres-operator /postgres-operator
 
-# Copy the binary from builder
-COPY --from=builder /app/target/release/postgres-operator /app/postgres-operator
+# Run as non-root (numeric UID since scratch has no /etc/passwd)
+USER 1000:1000
 
-# Create non-root user
-RUN useradd -r -u 1000 operator
-USER operator
-
-ENTRYPOINT ["/app/postgres-operator"]
+ENTRYPOINT ["/postgres-operator"]

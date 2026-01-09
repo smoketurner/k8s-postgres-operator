@@ -1,7 +1,7 @@
 //! Wait condition helpers for PostgresCluster resources
 
-use kube::runtime::wait::{await_condition, Condition};
 use kube::Api;
+use kube::runtime::wait::{Condition, await_condition};
 use postgres_operator::crd::{ClusterPhase, PostgresCluster};
 use std::time::Duration;
 use thiserror::Error;

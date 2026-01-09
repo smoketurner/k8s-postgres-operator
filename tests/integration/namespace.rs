@@ -32,10 +32,7 @@ impl TestNamespace {
         let name = format!("{}-{}", prefix, suffix);
 
         let labels = BTreeMap::from([
-            (
-                "postgres-operator.test".to_string(),
-                "true".to_string(),
-            ),
+            ("postgres-operator.test".to_string(), "true".to_string()),
             ("test-prefix".to_string(), prefix.to_string()),
         ]);
 
@@ -81,7 +78,7 @@ impl TestNamespace {
             propagation_policy: Some(kube::api::PropagationPolicy::Background),
             ..Default::default()
         };
-        
+
         match namespaces.delete(&self.name, &dp).await {
             Ok(_) => {}
             Err(kube::Error::Api(e)) if e.code == 404 => {

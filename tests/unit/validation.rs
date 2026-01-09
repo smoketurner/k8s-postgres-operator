@@ -1,7 +1,7 @@
 //! Unit tests for validation logic
 
 use postgres_operator::controller::validation::{
-    validate_spec, validate_spec_change, validate_version_upgrade, MAX_REPLICAS, MIN_REPLICAS,
+    MAX_REPLICAS, MIN_REPLICAS, validate_spec, validate_spec_change, validate_version_upgrade,
 };
 use postgres_operator::crd::{PostgresCluster, PostgresClusterSpec, StorageSpec};
 
@@ -95,7 +95,11 @@ mod validate_spec_tests {
     fn test_valid_versions() {
         for version in ["10", "11", "12", "13", "14", "15", "16", "17"] {
             let cluster = create_test_cluster("test", "default", 1, version);
-            assert!(validate_spec(&cluster).is_ok(), "Version {} should be valid", version);
+            assert!(
+                validate_spec(&cluster).is_ok(),
+                "Version {} should be valid",
+                version
+            );
         }
     }
 
@@ -104,7 +108,11 @@ mod validate_spec_tests {
         for size in ["1Gi", "10Gi", "100Gi", "1Ti", "500Mi"] {
             let mut cluster = create_test_cluster("test", "default", 1, "16");
             cluster.spec.storage.size = size.to_string();
-            assert!(validate_spec(&cluster).is_ok(), "Size {} should be valid", size);
+            assert!(
+                validate_spec(&cluster).is_ok(),
+                "Size {} should be valid",
+                size
+            );
         }
     }
 

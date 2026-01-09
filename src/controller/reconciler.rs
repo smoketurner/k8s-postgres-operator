@@ -2,6 +2,10 @@
 //!
 //! This module contains the main reconciliation loop that ensures
 //! PostgresCluster resources are in their desired state.
+//!
+//! The reconciler uses a formal finite state machine (FSM) to manage
+//! cluster lifecycle transitions. See `state_machine.rs` for the
+//! transition table and guards.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +20,10 @@ use tracing::{debug, error, info, instrument, warn};
 
 use crate::controller::context::Context;
 use crate::controller::error::{BackoffConfig, Error, Result};
-use crate::controller::status::{spec_changed, StatusManager};
+use crate::controller::state_machine::{
+    ClusterEvent, ClusterStateMachine, TransitionContext, TransitionResult, determine_event,
+};
+use crate::controller::status::{StatusManager, spec_changed};
 use crate::crd::{ClusterPhase, PostgresCluster};
 use crate::resources::{patroni, pdb, secret, service};
 
@@ -31,6 +38,7 @@ fn default_backoff() -> BackoffConfig {
 /// Main reconciliation function
 #[instrument(skip(cluster, ctx), fields(name = %cluster.name_any(), namespace = cluster.namespace().unwrap_or_default()))]
 pub async fn reconcile(cluster: Arc<PostgresCluster>, ctx: Arc<Context>) -> Result<Action> {
+    let start_time = std::time::Instant::now();
     let ns = cluster.namespace().unwrap_or_default();
     let name = cluster.name_any();
 
@@ -50,11 +58,7 @@ pub async fn reconcile(cluster: Arc<PostgresCluster>, ctx: Arc<Context>) -> Resu
     // Check if spec has changed using observed generation
     // This optimization prevents unnecessary reconciliations when only status changed
     let is_spec_changed = spec_changed(&cluster);
-    let current_phase = cluster
-        .status
-        .as_ref()
-        .map(|s| s.phase.clone())
-        .unwrap_or_default();
+    let current_phase = cluster.status.as_ref().map(|s| s.phase).unwrap_or_default();
 
     // Skip full reconciliation if spec hasn't changed and cluster is running
     if !is_spec_changed && current_phase == ClusterPhase::Running {
@@ -80,16 +84,40 @@ pub async fn reconcile(cluster: Arc<PostgresCluster>, ctx: Arc<Context>) -> Resu
     // All clusters use Patroni for consistent management
     let result = reconcile_cluster(&cluster, &ctx, &ns).await;
 
+    // Record metrics
+    let duration_secs = start_time.elapsed().as_secs_f64();
+
     match result {
         Ok(action) => {
-            info!("Reconciliation completed successfully");
+            ctx.record_reconcile(&ns, &name, duration_secs);
+            info!(
+                "Reconciliation completed successfully in {:.3}s",
+                duration_secs
+            );
             Ok(action)
         }
         Err(e) => {
-            error!("Reconciliation failed: {}", e);
+            ctx.record_error(&ns, &name);
+            error!("Reconciliation failed after {:.3}s: {}", duration_secs, e);
             // Update status to failed with error details
             let status_manager = StatusManager::new(&cluster, &ctx, &ns);
-            let _ = status_manager.set_failed("ReconciliationFailed", &e.to_string()).await;
+            if let Err(status_err) = status_manager
+                .set_failed("ReconciliationFailed", &e.to_string())
+                .await
+            {
+                warn!(
+                    "Failed to update status after reconciliation error: {}",
+                    status_err
+                );
+            }
+            // Emit warning event for the failure
+            ctx.publish_warning_event(
+                &cluster,
+                "ReconciliationFailed",
+                "Reconcile",
+                Some(format!("Reconciliation failed: {}", e)),
+            )
+            .await;
             Err(e)
         }
     }
@@ -100,21 +128,24 @@ pub fn error_policy(cluster: Arc<PostgresCluster>, error: &Error, _ctx: Arc<Cont
     let name = cluster.name_any();
     let backoff = default_backoff();
 
-    // Get retry count from status or default to 0
-    // In a production system, you'd track this in a separate store or annotation
-    let retry_count = 0u32; // Simplified - would need proper tracking
+    // Get retry count from status for proper exponential backoff
+    let retry_count = cluster
+        .status
+        .as_ref()
+        .and_then(|s| s.retry_count)
+        .unwrap_or(0) as u32;
 
     let delay = backoff.delay_for_error(error, retry_count);
 
     if error.is_retryable() {
         warn!(
-            "Retryable error for {}: {:?}, requeuing in {:?}",
-            name, error, delay
+            "Retryable error for {} (retry #{}): {:?}, requeuing in {:?}",
+            name, retry_count, error, delay
         );
     } else {
         error!(
-            "Non-retryable error for {}: {:?}, requeuing in {:?} for manual intervention",
-            name, error, delay
+            "Non-retryable error for {} (retry #{}): {:?}, requeuing in {:?} for manual intervention",
+            name, retry_count, error, delay
         );
     }
 
@@ -129,6 +160,7 @@ async fn check_and_update_status(
 ) -> Result<Action> {
     let name = cluster.name_any();
     let status_manager = StatusManager::new(cluster, ctx, ns);
+    let state_machine = ClusterStateMachine::new();
 
     // Check StatefulSet status (Patroni uses cluster name directly)
     let sts_api: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), ns);
@@ -140,7 +172,30 @@ async fn check_and_update_status(
     let primary_pod = get_patroni_leader(&pods_api, &name).await;
     let replica_pods = get_patroni_replicas(&pods_api, &name).await;
 
-    if ready_replicas >= cluster.spec.replicas {
+    let current_phase = cluster.status.as_ref().map(|s| s.phase).unwrap_or_default();
+
+    // Build transition context for potential state changes
+    let transition_ctx = TransitionContext::new(ready_replicas, cluster.spec.replicas);
+
+    // Check if cluster has become degraded while running
+    if current_phase == ClusterPhase::Running && transition_ctx.is_degraded() {
+        let event = ClusterEvent::ReplicasDegraded;
+        if let TransitionResult::Success {
+            to, description, ..
+        } = state_machine.transition(&current_phase, event, &transition_ctx)
+        {
+            info!("Cluster {} transitioned to {:?}: {}", name, to, description);
+            // Update to degraded state
+            status_manager
+                .set_updating(
+                    ready_replicas,
+                    cluster.spec.replicas,
+                    primary_pod,
+                    replica_pods,
+                )
+                .await?;
+        }
+    } else if ready_replicas >= cluster.spec.replicas {
         status_manager
             .set_running(
                 ready_replicas,
@@ -151,7 +206,14 @@ async fn check_and_update_status(
             .await?;
     }
 
-    Ok(Action::requeue(Duration::from_secs(30)))
+    // Requeue based on phase - running clusters need less frequent checks
+    let requeue_duration = match current_phase {
+        ClusterPhase::Running => Duration::from_secs(60),
+        ClusterPhase::Degraded => Duration::from_secs(15),
+        _ => Duration::from_secs(30),
+    };
+
+    Ok(Action::requeue(requeue_duration))
 }
 
 /// Reconcile a PostgreSQL cluster using Patroni
@@ -168,32 +230,21 @@ async fn check_and_update_status(
 /// - Split-brain prevention
 ///
 /// Reference: https://github.com/patroni/patroni
-async fn reconcile_cluster(
-    cluster: &PostgresCluster,
-    ctx: &Context,
-    ns: &str,
-) -> Result<Action> {
+async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -> Result<Action> {
     let name = cluster.name_any();
     let status_manager = StatusManager::new(cluster, ctx, ns);
+    let state_machine = ClusterStateMachine::new();
 
-    info!("Reconciling PostgreSQL cluster with Patroni ({} replicas)", cluster.spec.replicas);
+    info!(
+        "Reconciling PostgreSQL cluster with Patroni ({} replicas)",
+        cluster.spec.replicas
+    );
 
-    // Update status to Creating if pending
-    let current_phase = cluster
-        .status
-        .as_ref()
-        .map(|s| s.phase.clone())
-        .unwrap_or_default();
+    // Get current phase and status info
+    let current_phase = cluster.status.as_ref().map(|s| s.phase).unwrap_or_default();
 
-    if current_phase == ClusterPhase::Pending {
-        status_manager
-            .set_creating(0, cluster.spec.replicas, None)
-            .await?;
-    } else if spec_changed(cluster) && current_phase == ClusterPhase::Running {
-        status_manager
-            .set_updating(0, cluster.spec.replicas, None, vec![])
-            .await?;
-    }
+    let previous_replicas = cluster.status.as_ref().and_then(|s| s.previous_replicas);
+    let is_spec_changed = spec_changed(cluster);
 
     // Ensure Secret exists (credentials)
     let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
@@ -247,22 +298,137 @@ async fn reconcile_cluster(
     let primary_pod = get_patroni_leader(&pods_api, &name).await;
     let replica_pods = get_patroni_replicas(&pods_api, &name).await;
 
-    if ready_replicas >= cluster.spec.replicas {
-        status_manager
-            .set_running(
-                ready_replicas,
-                cluster.spec.replicas,
-                primary_pod,
-                replica_pods,
-            )
-            .await?;
-    } else {
-        status_manager
-            .set_creating(ready_replicas, cluster.spec.replicas, primary_pod)
-            .await?;
+    // Build transition context
+    let mut transition_ctx = TransitionContext::new(ready_replicas, cluster.spec.replicas);
+    transition_ctx.spec_changed = is_spec_changed;
+    transition_ctx.retry_count = cluster
+        .status
+        .as_ref()
+        .and_then(|s| s.retry_count)
+        .unwrap_or(0);
+
+    // Determine the event based on current state
+    let event = determine_event(&current_phase, &transition_ctx, false, previous_replicas);
+
+    // Attempt state transition using FSM
+    let transition_result =
+        state_machine.transition(&current_phase, event.clone(), &transition_ctx);
+
+    // Handle the transition result
+    match transition_result {
+        TransitionResult::Success {
+            from,
+            to,
+            description,
+            ..
+        } => {
+            info!("State transition: {:?} -> {:?} ({})", from, to, description);
+
+            // Emit Kubernetes event for the state transition
+            emit_state_transition_event(cluster, ctx, from, to, description).await;
+
+            // Update status based on new state
+            match to {
+                ClusterPhase::Creating => {
+                    status_manager
+                        .set_creating(ready_replicas, cluster.spec.replicas, primary_pod)
+                        .await?;
+                }
+                ClusterPhase::Running => {
+                    status_manager
+                        .set_running(
+                            ready_replicas,
+                            cluster.spec.replicas,
+                            primary_pod,
+                            replica_pods,
+                        )
+                        .await?;
+                }
+                ClusterPhase::Updating | ClusterPhase::Scaling => {
+                    status_manager
+                        .set_updating(
+                            ready_replicas,
+                            cluster.spec.replicas,
+                            primary_pod,
+                            replica_pods,
+                        )
+                        .await?;
+                }
+                ClusterPhase::Degraded | ClusterPhase::Recovering => {
+                    // For degraded/recovering, still update with current replica info
+                    status_manager
+                        .set_updating(
+                            ready_replicas,
+                            cluster.spec.replicas,
+                            primary_pod,
+                            replica_pods,
+                        )
+                        .await?;
+                }
+                ClusterPhase::Failed => {
+                    status_manager
+                        .set_failed("ReconciliationFailed", "Cluster entered failed state")
+                        .await?;
+                }
+                ClusterPhase::Pending | ClusterPhase::Deleting => {
+                    // These are handled elsewhere (initial state / deletion handler)
+                }
+            }
+        }
+        TransitionResult::InvalidTransition { current, event } => {
+            debug!(
+                "No state transition needed: {:?} + {:?} event (staying in current state)",
+                current, event
+            );
+
+            // Update status with current replica counts even if no state change
+            match current_phase {
+                ClusterPhase::Creating => {
+                    status_manager
+                        .set_creating(ready_replicas, cluster.spec.replicas, primary_pod)
+                        .await?;
+                }
+                ClusterPhase::Running => {
+                    status_manager
+                        .set_running(
+                            ready_replicas,
+                            cluster.spec.replicas,
+                            primary_pod,
+                            replica_pods,
+                        )
+                        .await?;
+                }
+                _ => {}
+            }
+        }
+        TransitionResult::GuardFailed {
+            from, to, reason, ..
+        } => {
+            debug!(
+                "State transition {:?} -> {:?} blocked by guard: {}",
+                from, to, reason
+            );
+
+            // Update status with current info
+            if current_phase == ClusterPhase::Creating {
+                status_manager
+                    .set_creating(ready_replicas, cluster.spec.replicas, primary_pod)
+                    .await?;
+            }
+        }
     }
 
-    Ok(Action::requeue(Duration::from_secs(30)))
+    // Requeue interval based on current phase
+    let requeue_duration = match current_phase {
+        ClusterPhase::Creating | ClusterPhase::Recovering => Duration::from_secs(5),
+        ClusterPhase::Updating | ClusterPhase::Scaling => Duration::from_secs(10),
+        ClusterPhase::Degraded => Duration::from_secs(15),
+        ClusterPhase::Running => Duration::from_secs(60),
+        ClusterPhase::Failed => Duration::from_secs(30),
+        ClusterPhase::Pending | ClusterPhase::Deleting => Duration::from_secs(5),
+    };
+
+    Ok(Action::requeue(requeue_duration))
 }
 
 /// Get the Patroni leader pod name
@@ -272,11 +438,11 @@ async fn get_patroni_leader(api: &Api<Pod>, cluster_name: &str) -> Option<String
         cluster_name
     );
 
-    match api.list(&ListParams::default().labels(&label_selector)).await {
-        Ok(pods) => pods
-            .items
-            .first()
-            .and_then(|p| p.metadata.name.clone()),
+    match api
+        .list(&ListParams::default().labels(&label_selector))
+        .await
+    {
+        Ok(pods) => pods.items.first().and_then(|p| p.metadata.name.clone()),
         Err(_) => None,
     }
 }
@@ -288,7 +454,10 @@ async fn get_patroni_replicas(api: &Api<Pod>, cluster_name: &str) -> Vec<String>
         cluster_name
     );
 
-    match api.list(&ListParams::default().labels(&label_selector)).await {
+    match api
+        .list(&ListParams::default().labels(&label_selector))
+        .await
+    {
         Ok(pods) => pods
             .items
             .iter()
@@ -299,7 +468,11 @@ async fn get_patroni_replicas(api: &Api<Pod>, cluster_name: &str) -> Vec<String>
 }
 
 /// Apply a Role using server-side apply
-async fn apply_role(ctx: &Context, ns: &str, resource: &k8s_openapi::api::rbac::v1::Role) -> Result<()> {
+async fn apply_role(
+    ctx: &Context,
+    ns: &str,
+    resource: &k8s_openapi::api::rbac::v1::Role,
+) -> Result<()> {
     let api: Api<k8s_openapi::api::rbac::v1::Role> = Api::namespaced(ctx.client.clone(), ns);
     let name = resource.metadata.name.as_ref().unwrap();
 
@@ -313,7 +486,11 @@ async fn apply_role(ctx: &Context, ns: &str, resource: &k8s_openapi::api::rbac::
 }
 
 /// Apply a RoleBinding using server-side apply
-async fn apply_role_binding(ctx: &Context, ns: &str, resource: &k8s_openapi::api::rbac::v1::RoleBinding) -> Result<()> {
+async fn apply_role_binding(
+    ctx: &Context,
+    ns: &str,
+    resource: &k8s_openapi::api::rbac::v1::RoleBinding,
+) -> Result<()> {
     let api: Api<k8s_openapi::api::rbac::v1::RoleBinding> = Api::namespaced(ctx.client.clone(), ns);
     let name = resource.metadata.name.as_ref().unwrap();
 
@@ -327,10 +504,7 @@ async fn apply_role_binding(ctx: &Context, ns: &str, resource: &k8s_openapi::api
 }
 
 /// Get StatefulSet status information
-async fn get_statefulset_status(
-    api: &Api<StatefulSet>,
-    name: &str,
-) -> (i32, i32, Option<String>) {
+async fn get_statefulset_status(api: &Api<StatefulSet>, name: &str) -> (i32, i32, Option<String>) {
     match api.get(name).await {
         Ok(sts) => {
             let ready = sts
@@ -411,7 +585,18 @@ async fn handle_deletion(cluster: &PostgresCluster, ctx: &Context, ns: &str) -> 
 
     // Update status to Deleting
     let status_manager = StatusManager::new(cluster, ctx, ns);
-    let _ = status_manager.set_deleting().await;
+    if let Err(e) = status_manager.set_deleting().await {
+        warn!("Failed to update status to Deleting: {}", e);
+    }
+
+    // Emit event for deletion
+    ctx.publish_normal_event(
+        cluster,
+        "ClusterDeleting",
+        "Delete",
+        Some(format!("Cluster {} is being deleted", name)),
+    )
+    .await;
 
     // Kubernetes will garbage collect owned resources via owner references
     // Just remove the finalizer to allow deletion to proceed
@@ -436,4 +621,42 @@ async fn handle_deletion(cluster: &PostgresCluster, ctx: &Context, ns: &str) -> 
     }
 
     Ok(Action::await_change())
+}
+
+/// Emit a Kubernetes Event for a state transition
+async fn emit_state_transition_event(
+    cluster: &PostgresCluster,
+    ctx: &Context,
+    from: ClusterPhase,
+    to: ClusterPhase,
+    description: &str,
+) {
+    // Determine if this is a normal or warning event
+    let is_warning = matches!(to, ClusterPhase::Failed | ClusterPhase::Degraded);
+
+    // Create reason based on transition
+    let reason = match to {
+        ClusterPhase::Creating => "ClusterCreating",
+        ClusterPhase::Running => "ClusterReady",
+        ClusterPhase::Updating => "ClusterUpdating",
+        ClusterPhase::Scaling => "ClusterScaling",
+        ClusterPhase::Degraded => "ClusterDegraded",
+        ClusterPhase::Recovering => "ClusterRecovering",
+        ClusterPhase::Failed => "ClusterFailed",
+        ClusterPhase::Deleting => "ClusterDeleting",
+        ClusterPhase::Pending => "ClusterPending",
+    };
+
+    let note = Some(format!(
+        "State changed from {:?} to {:?}: {}",
+        from, to, description
+    ));
+
+    if is_warning {
+        ctx.publish_warning_event(cluster, reason, "StateTransition", note)
+            .await;
+    } else {
+        ctx.publish_normal_event(cluster, reason, "StateTransition", note)
+            .await;
+    }
 }

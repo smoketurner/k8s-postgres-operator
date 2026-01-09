@@ -79,9 +79,9 @@ fn validate_storage(cluster: &PostgresCluster) -> Result<()> {
 
     // Parse numeric value
     let num_str = size.trim_end_matches(char::is_alphabetic);
-    let _num: u64 = num_str.parse().map_err(|_| {
-        Error::ValidationError(format!("invalid storage size number: {}", size))
-    })?;
+    let _num: u64 = num_str
+        .parse()
+        .map_err(|_| Error::ValidationError(format!("invalid storage size number: {}", size)))?;
 
     Ok(())
 }
@@ -129,10 +129,7 @@ impl SpecDiff {
 }
 
 /// Validate spec changes between old and new cluster specs
-pub fn validate_spec_change(
-    old: &PostgresCluster,
-    new: &PostgresCluster,
-) -> Result<SpecDiff> {
+pub fn validate_spec_change(old: &PostgresCluster, new: &PostgresCluster) -> Result<SpecDiff> {
     let old_spec = &old.spec;
     let new_spec = &new.spec;
 

@@ -4,41 +4,24 @@
 //! for routing traffic to the correct pods.
 
 use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-use kube::core::ObjectMeta;
 use kube::ResourceExt;
+use kube::core::ObjectMeta;
 use std::collections::BTreeMap;
 
 use crate::crd::PostgresCluster;
-
-/// Generate owner reference for the cluster
-fn owner_reference(cluster: &PostgresCluster) -> OwnerReference {
-    OwnerReference {
-        api_version: "postgres.example.com/v1alpha1".to_string(),
-        kind: "PostgresCluster".to_string(),
-        name: cluster.name_any(),
-        uid: cluster.metadata.uid.clone().unwrap_or_default(),
-        controller: Some(true),
-        block_owner_deletion: Some(true),
-    }
-}
+use crate::resources::common::{owner_reference, standard_labels};
 
 /// Generate the primary (read-write) service
 ///
 /// This service routes traffic to the current Patroni leader.
 /// Patroni updates the pod labels to indicate the current role (master/replica).
 pub fn generate_primary_service(cluster: &PostgresCluster) -> Service {
-    let name = format!("{}", cluster.name_any()); // Just the cluster name for primary
+    let name = cluster.name_any(); // Just the cluster name for primary
     let cluster_name = cluster.name_any();
     let ns = cluster.namespace();
 
-    let labels = BTreeMap::from([
-        ("app.kubernetes.io/name".to_string(), cluster_name.clone()),
-        ("app.kubernetes.io/component".to_string(), "postgresql".to_string()),
-        ("app.kubernetes.io/managed-by".to_string(), "postgres-operator".to_string()),
-        ("postgres.example.com/cluster".to_string(), cluster_name.clone()),
-    ]);
+    let labels = standard_labels(&cluster_name);
 
     // Patroni sets this label on the leader pod
     let selector = BTreeMap::from([
@@ -79,12 +62,7 @@ pub fn generate_replicas_service(cluster: &PostgresCluster) -> Service {
     let cluster_name = cluster.name_any();
     let ns = cluster.namespace();
 
-    let labels = BTreeMap::from([
-        ("app.kubernetes.io/name".to_string(), cluster_name.clone()),
-        ("app.kubernetes.io/component".to_string(), "postgresql".to_string()),
-        ("app.kubernetes.io/managed-by".to_string(), "postgres-operator".to_string()),
-        ("postgres.example.com/cluster".to_string(), cluster_name.clone()),
-    ]);
+    let labels = standard_labels(&cluster_name);
 
     // Patroni sets this label on replica pods
     let selector = BTreeMap::from([
@@ -125,12 +103,7 @@ pub fn generate_headless_service(cluster: &PostgresCluster) -> Service {
     let cluster_name = cluster.name_any();
     let ns = cluster.namespace();
 
-    let labels = BTreeMap::from([
-        ("app.kubernetes.io/name".to_string(), cluster_name.clone()),
-        ("app.kubernetes.io/component".to_string(), "postgresql".to_string()),
-        ("app.kubernetes.io/managed-by".to_string(), "postgres-operator".to_string()),
-        ("postgres.example.com/cluster".to_string(), cluster_name.clone()),
-    ]);
+    let labels = standard_labels(&cluster_name);
 
     let selector = BTreeMap::from([
         ("app.kubernetes.io/name".to_string(), cluster_name.clone()),

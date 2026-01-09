@@ -1,24 +1,13 @@
-use k8s_openapi::api::core::v1::Secret;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
-use kube::core::ObjectMeta;
-use kube::ResourceExt;
-use rand::Rng;
 use std::collections::BTreeMap;
+
+use k8s_openapi::api::core::v1::Secret;
+use kube::ResourceExt;
+use kube::core::ObjectMeta;
+use rand::Rng;
 
 use crate::controller::error::Result;
 use crate::crd::PostgresCluster;
-
-/// Generate owner reference for the cluster
-fn owner_reference(cluster: &PostgresCluster) -> OwnerReference {
-    OwnerReference {
-        api_version: "postgres.example.com/v1alpha1".to_string(),
-        kind: "PostgresCluster".to_string(),
-        name: cluster.name_any(),
-        uid: cluster.metadata.uid.clone().unwrap_or_default(),
-        controller: Some(true),
-        block_owner_deletion: Some(true),
-    }
-}
+use crate::resources::common::{owner_reference, standard_labels};
 
 /// Generate a secure random password
 fn generate_password(len: usize) -> String {
@@ -35,12 +24,7 @@ pub fn generate_credentials_secret(cluster: &PostgresCluster) -> Result<Secret> 
     let cluster_name = cluster.name_any();
     let ns = cluster.namespace();
 
-    let labels = BTreeMap::from([
-        ("app.kubernetes.io/name".to_string(), cluster_name.clone()),
-        ("app.kubernetes.io/component".to_string(), "postgresql".to_string()),
-        ("app.kubernetes.io/managed-by".to_string(), "postgres-operator".to_string()),
-        ("postgres.example.com/cluster".to_string(), cluster_name),
-    ]);
+    let labels = standard_labels(&cluster_name);
 
     // Generate passwords
     let superuser_password = generate_password(32);

@@ -38,7 +38,10 @@ impl ScopedOperator {
         // Give the controller a moment to start watching
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        Self { handle, shutdown_tx: Some(shutdown_tx) }
+        Self {
+            handle,
+            shutdown_tx: Some(shutdown_tx),
+        }
     }
 }
 
@@ -59,13 +62,13 @@ async fn run_operator(client: Client) {
     use k8s_openapi::api::apps::v1::StatefulSet;
     use k8s_openapi::api::core::v1::{ConfigMap, Secret, Service};
     use k8s_openapi::api::policy::v1::PodDisruptionBudget;
-    use kube::runtime::watcher::Config as WatcherConfig;
-    use kube::runtime::Controller;
     use kube::Api;
+    use kube::runtime::Controller;
+    use kube::runtime::watcher::Config as WatcherConfig;
     use postgres_operator::crd::PostgresCluster;
-    use postgres_operator::{error_policy, reconcile, Context};
+    use postgres_operator::{Context, error_policy, reconcile};
 
-    let ctx = Arc::new(Context::new(client.clone()));
+    let ctx = Arc::new(Context::new(client.clone(), None));
 
     let clusters: Api<PostgresCluster> = Api::all(client.clone());
     let statefulsets: Api<StatefulSet> = Api::all(client.clone());

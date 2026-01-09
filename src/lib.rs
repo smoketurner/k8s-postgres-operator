@@ -1,10 +1,12 @@
 pub mod controller;
 pub mod crd;
+pub mod health;
 pub mod postgres;
 pub mod resources;
 
-pub use controller::{error_policy, reconcile, BackoffConfig, Context, Error, Result, FINALIZER};
+pub use controller::{BackoffConfig, Context, Error, FINALIZER, Result, error_policy, reconcile};
 pub use crd::PostgresCluster;
+pub use health::{HealthState, Metrics};
 
 use std::sync::Arc;
 
@@ -12,8 +14,8 @@ use futures::StreamExt;
 use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::{ConfigMap, Secret, Service};
 use k8s_openapi::api::policy::v1::PodDisruptionBudget;
-use kube::runtime::watcher::Config as WatcherConfig;
 use kube::runtime::Controller;
+use kube::runtime::watcher::Config as WatcherConfig;
 use kube::{Api, Client};
 
 /// Run the operator controller
@@ -21,10 +23,17 @@ use kube::{Api, Client};
 /// This is the main controller loop that watches PostgresCluster resources
 /// and reconciles them. It can be called from main.rs or spawned as a
 /// background task during integration tests.
-pub async fn run_controller(client: Client) {
+///
+/// If health_state is provided, metrics will be recorded for reconciliations.
+pub async fn run_controller(client: Client, health_state: Option<Arc<HealthState>>) {
     tracing::info!("Starting controller for PostgresCluster resources");
 
-    let ctx = Arc::new(Context::new(client.clone()));
+    // Mark as ready once we start the controller
+    if let Some(ref state) = health_state {
+        state.set_ready(true).await;
+    }
+
+    let ctx = Arc::new(Context::new(client.clone(), health_state));
 
     // Set up APIs for the controller
     let clusters: Api<PostgresCluster> = Api::all(client.clone());
@@ -58,7 +67,7 @@ pub async fn run_controller(client: Client) {
             }
         })
         .await;
-    
+
     // This should never complete in normal operation
     tracing::error!("Controller stream ended unexpectedly");
 }
