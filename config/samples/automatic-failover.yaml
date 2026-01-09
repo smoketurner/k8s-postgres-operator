@@ -1,0 +1,37 @@
+# Highly available PostgreSQL cluster
+# 3+ replicas for production workloads with automatic failover
+apiVersion: postgres.example.com/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: pg-ha
+  namespace: default
+spec:
+  version: "16"
+  replicas: 3  # Primary + 2 read replicas (quorum for HA)
+  storage:
+    storageClass: fast-ssd
+    size: 100Gi
+  resources:
+    requests:
+      cpu: "1"
+      memory: "2Gi"
+    limits:
+      cpu: "4"
+      memory: "8Gi"
+  postgresqlParams:
+    max_connections: "1000"
+    shared_buffers: "2GB"
+    effective_cache_size: "6GB"
+    work_mem: "32MB"
+    maintenance_work_mem: "512MB"
+  # Backup configuration (Phase 0.2)
+  # backup:
+  #   schedule: "0 2 * * *"
+  #   retention:
+  #     count: 7
+  #     maxAge: "30d"
+  #   destination:
+  #     type: S3
+  #     bucket: my-postgres-backups
+  #     region: us-east-1
+  #     credentialsSecret: aws-backup-credentials

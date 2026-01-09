@@ -1,0 +1,25 @@
+# Primary + read replica configuration
+# Provides a read replica for scaling reads and basic failover capability
+apiVersion: postgres.example.com/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: pg-replicated
+  namespace: default
+spec:
+  version: "16"
+  replicas: 2  # Primary + 1 read replica
+  storage:
+    storageClass: standard
+    size: 50Gi
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+  postgresqlParams:
+    max_connections: "500"
+    shared_buffers: "1GB"
+    effective_cache_size: "3GB"
+    work_mem: "16MB"

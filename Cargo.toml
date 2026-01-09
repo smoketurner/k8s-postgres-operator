@@ -1,0 +1,49 @@
+[package]
+name = "postgres-operator"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "A Kubernetes operator for managing PostgreSQL clusters"
+license = "MIT"
+
+[dependencies]
+# Kubernetes - using latest available k8s-openapi with latest supported K8s version
+# Note: v1_35 will be available when k8s-openapi is updated
+kube = { version = "2", features = ["runtime", "derive", "client"] }
+k8s-openapi = { version = "0.26", features = ["v1_34"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging/Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.9"
+sha2 = "0.10"
+base64 = "0.22"
+
+[dev-dependencies]
+tokio-test = "0.4"
+uuid = { version = "1", features = ["v4"] }
+serde_yaml = "0.9"
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
+
+[[test]]
+name = "unit"
+path = "tests/unit/mod.rs"

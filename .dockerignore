@@ -1,0 +1,9 @@
+target/
+.git/
+.gitignore
+.dockerignore
+Dockerfile
+*.md
+.idea/
+.vscode/
+tests/
