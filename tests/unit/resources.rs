@@ -243,8 +243,8 @@ mod service_tests {
         let cluster = create_test_cluster("my-cluster", "default", 1);
         let svc = service::generate_primary_service(&cluster);
 
-        // Patroni primary service uses just the cluster name
-        assert_eq!(svc.name_any(), "my-cluster");
+        // Primary service uses {cluster}-primary to avoid name conflicts
+        assert_eq!(svc.name_any(), "my-cluster-primary");
     }
 
     #[test]

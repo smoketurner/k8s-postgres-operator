@@ -91,7 +91,14 @@ fn generate_spilo_config(cluster: &PostgresCluster) -> String {
         .map(|(k, v)| format!("    {}: {}", k, v))
         .collect();
 
-    format!("postgresql:\n  parameters:\n{}", params_yaml.join("\n"))
+    // Only override PostgreSQL parameters - let Spilo use its default
+    // basebackup_fast_xlog method for replica creation which works with its environment
+    format!(
+        r#"postgresql:
+  parameters:
+{}"#,
+        params_yaml.join("\n")
+    )
 }
 
 /// Generate Patroni YAML configuration for ConfigMap
@@ -125,8 +132,7 @@ kubernetes:
   scope_label: postgres.example.com/cluster
   role_label: postgres.example.com/role
   labels:
-    app.kubernetes.io/name: {cluster_name}
-    app.kubernetes.io/component: postgresql
+    application: spilo
     postgres.example.com/cluster: {cluster_name}
 
 bootstrap:
@@ -166,7 +172,7 @@ postgresql:
       username: postgres
       password: $(POSTGRES_PASSWORD)
     replication:
-      username: replication
+      username: standby
       password: $(REPLICATION_PASSWORD)
   parameters:
 {params}
@@ -359,42 +365,14 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
     let secret_name = format!("{}-credentials", name);
     let sa_name = format!("{}-patroni", name);
 
-    // Environment variables for Patroni
+    // Environment variables for Spilo
+    // Based on Zalando's postgres-operator configuration
+    // See: https://github.com/zalando/postgres-operator/blob/master/pkg/cluster/k8sres.go
     let env_vars = vec![
-        // Spilo scope (cluster name) - Spilo uses SCOPE env var
+        // Cluster scope name
         EnvVar {
             name: "SCOPE".to_string(),
             value: Some(name.clone()),
-            ..Default::default()
-        },
-        // Patroni scope (cluster name) - for compatibility
-        EnvVar {
-            name: "PATRONI_SCOPE".to_string(),
-            value: Some(name.clone()),
-            ..Default::default()
-        },
-        // Kubernetes namespace
-        EnvVar {
-            name: "PATRONI_KUBERNETES_NAMESPACE".to_string(),
-            value_from: Some(EnvVarSource {
-                field_ref: Some(k8s_openapi::api::core::v1::ObjectFieldSelector {
-                    field_path: "metadata.namespace".to_string(),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-        // Pod name for Patroni member name
-        EnvVar {
-            name: "PATRONI_NAME".to_string(),
-            value_from: Some(EnvVarSource {
-                field_ref: Some(k8s_openapi::api::core::v1::ObjectFieldSelector {
-                    field_path: "metadata.name".to_string(),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
             ..Default::default()
         },
         // Pod IP for connect addresses
@@ -409,9 +387,26 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
             }),
             ..Default::default()
         },
-        // PostgreSQL superuser password
+        // Pod namespace
         EnvVar {
-            name: "POSTGRES_PASSWORD".to_string(),
+            name: "POD_NAMESPACE".to_string(),
+            value_from: Some(EnvVarSource {
+                field_ref: Some(k8s_openapi::api::core::v1::ObjectFieldSelector {
+                    field_path: "metadata.namespace".to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        // PostgreSQL superuser credentials (Spilo-native)
+        EnvVar {
+            name: "PGUSER_SUPERUSER".to_string(),
+            value: Some("postgres".to_string()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "PGPASSWORD_SUPERUSER".to_string(),
             value_from: Some(EnvVarSource {
                 secret_key_ref: Some(SecretKeySelector {
                     name: secret_name.clone(),
@@ -422,20 +417,12 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
             }),
             ..Default::default()
         },
-        // Replication password (Patroni native)
+        // Replication/standby user credentials (Spilo-native)
         EnvVar {
-            name: "REPLICATION_PASSWORD".to_string(),
-            value_from: Some(EnvVarSource {
-                secret_key_ref: Some(SecretKeySelector {
-                    name: secret_name.clone(),
-                    key: "REPLICATION_PASSWORD".to_string(),
-                    optional: Some(false),
-                }),
-                ..Default::default()
-            }),
+            name: "PGUSER_STANDBY".to_string(),
+            value: Some("standby".to_string()),
             ..Default::default()
         },
-        // Spilo-specific: replication password for standby user
         EnvVar {
             name: "PGPASSWORD_STANDBY".to_string(),
             value_from: Some(EnvVarSource {
@@ -448,37 +435,41 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
             }),
             ..Default::default()
         },
-        // Spilo configuration - pass entire Patroni config as YAML
-        // This is the Spilo-native way to configure Patroni
-        EnvVar {
-            name: "SPILO_CONFIGURATION".to_string(),
-            value: Some(generate_spilo_config(cluster)),
-            ..Default::default()
-        },
         // Data directory
         EnvVar {
-            name: "PGDATA".to_string(),
-            value: Some("/var/lib/postgresql/data/pgdata".to_string()),
+            name: "PGROOT".to_string(),
+            value: Some("/var/lib/postgresql".to_string()),
             ..Default::default()
         },
-        // Use Kubernetes for DCS - both Spilo and Patroni native settings
+        // Enable Kubernetes API as DCS backend
         EnvVar {
             name: "DCS_ENABLE_KUBERNETES_API".to_string(),
             value: Some("true".to_string()),
             ..Default::default()
         },
+        // Kubernetes labels for Spilo to manage pod roles
         EnvVar {
-            name: "PATRONI_KUBERNETES_USE_ENDPOINTS".to_string(),
-            value: Some("true".to_string()),
+            name: "KUBERNETES_SCOPE_LABEL".to_string(),
+            value: Some("postgres.example.com/cluster".to_string()),
             ..Default::default()
         },
-        // Labels for Patroni to manage
         EnvVar {
-            name: "PATRONI_KUBERNETES_LABELS".to_string(),
+            name: "KUBERNETES_ROLE_LABEL".to_string(),
+            value: Some("postgres.example.com/role".to_string()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "KUBERNETES_LABELS".to_string(),
             value: Some(format!(
-                "{{app.kubernetes.io/name: {}, postgres.example.com/cluster: {}}}",
-                name, name
+                "{{\"application\":\"spilo\",\"postgres.example.com/cluster\":\"{}\"}}",
+                name
             )),
+            ..Default::default()
+        },
+        // Spilo configuration - PostgreSQL parameters
+        EnvVar {
+            name: "SPILO_CONFIGURATION".to_string(),
+            value: Some(generate_spilo_config(cluster)),
             ..Default::default()
         },
     ];
@@ -630,6 +621,9 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
         }),
     };
 
+    // Headless service name must match serviceName for pod DNS to work
+    let headless_service_name = format!("{}-headless", name);
+
     StatefulSet {
         metadata: ObjectMeta {
             name: Some(name.clone()),
@@ -639,7 +633,7 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
             ..Default::default()
         },
         spec: Some(StatefulSetSpec {
-            service_name: Some(name.clone()),
+            service_name: Some(headless_service_name),
             replicas: Some(replicas),
             selector: LabelSelector {
                 match_labels: Some(labels.clone()),

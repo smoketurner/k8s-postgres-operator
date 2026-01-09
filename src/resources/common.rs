@@ -57,12 +57,19 @@ pub fn standard_labels(cluster_name: &str) -> BTreeMap<String, String> {
 }
 
 /// Generate labels for Patroni-managed resources
+///
+/// This includes the `application: spilo` label which is required by
+/// Patroni's Kubernetes DCS to discover cluster pods. The KUBERNETES_LABELS
+/// env var tells Patroni to filter pods by this label.
 pub fn patroni_labels(cluster_name: &str) -> BTreeMap<String, String> {
     let mut labels = standard_labels(cluster_name);
     labels.insert(
         "postgres.example.com/ha-mode".to_string(),
         "patroni".to_string(),
     );
+    // Required for Patroni's Kubernetes DCS pod discovery
+    // Must match the KUBERNETES_LABELS env var
+    labels.insert("application".to_string(), "spilo".to_string());
     labels
 }
 
@@ -98,6 +105,8 @@ mod tests {
             labels.get("postgres.example.com/ha-mode"),
             Some(&"patroni".to_string())
         );
+        // Required for Patroni's Kubernetes DCS
+        assert_eq!(labels.get("application"), Some(&"spilo".to_string()));
         // Should also have standard labels
         assert_eq!(
             labels.get("app.kubernetes.io/name"),

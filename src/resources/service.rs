@@ -34,9 +34,7 @@ pub fn generate_primary_service(cluster: &PostgresCluster) -> Service {
 
     // Get service configuration from spec
     let service_config = cluster.spec.service.as_ref();
-    let service_type = service_config
-        .map(|s| s.type_.clone())
-        .unwrap_or_default();
+    let service_type = service_config.map(|s| s.type_.clone()).unwrap_or_default();
 
     // Merge annotations from service config with labels
     let mut annotations = BTreeMap::new();
@@ -106,9 +104,7 @@ pub fn generate_replicas_service(cluster: &PostgresCluster) -> Service {
 
     // Get service configuration from spec
     let service_config = cluster.spec.service.as_ref();
-    let service_type = service_config
-        .map(|s| s.type_.clone())
-        .unwrap_or_default();
+    let service_type = service_config.map(|s| s.type_.clone()).unwrap_or_default();
 
     // Merge annotations from service config
     let mut annotations = BTreeMap::new();
