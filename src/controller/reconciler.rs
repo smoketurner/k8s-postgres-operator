@@ -10,9 +10,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use k8s_openapi::api::apps::v1::StatefulSet;
-use k8s_openapi::api::core::v1::{Pod, Secret};
-use kube::api::{ListParams, Patch, PatchParams};
+use k8s_openapi::api::core::v1::{
+    ConfigMap, Endpoints, PersistentVolumeClaim, Pod, Secret, Service, ServiceAccount,
+};
+use k8s_openapi::api::rbac::v1::{Role, RoleBinding};
+use kube::api::{DeleteParams, ListParams, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::{Api, ResourceExt};
 use serde::de::DeserializeOwned;
@@ -29,6 +33,10 @@ use crate::resources::{patroni, pdb, secret, service};
 
 /// Finalizer name for cleanup
 pub const FINALIZER: &str = "postgres.example.com/finalizer";
+
+/// Timeout for cluster stuck in Creating state (10 minutes)
+/// After this duration, the cluster will transition to Failed state
+const CREATING_TIMEOUT_SECS: i64 = 600;
 
 /// Default backoff configuration for error handling
 fn default_backoff() -> BackoffConfig {
@@ -60,8 +68,49 @@ pub async fn reconcile(cluster: Arc<PostgresCluster>, ctx: Arc<Context>) -> Resu
     let is_spec_changed = spec_changed(&cluster);
     let current_phase = cluster.status.as_ref().map(|s| s.phase).unwrap_or_default();
 
-    // Skip full reconciliation if spec hasn't changed and cluster is running
-    if !is_spec_changed && current_phase == ClusterPhase::Running {
+    // Check if critical owned resources exist
+    // If they're missing, we need full reconciliation to recreate them
+    let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
+    let secret_name = format!("{}-credentials", name);
+    let secret_missing = secrets_api.get_opt(&secret_name).await?.is_none();
+
+    // Check RBAC resources
+    let sa_api: Api<ServiceAccount> = Api::namespaced(ctx.client.clone(), &ns);
+    let role_api: Api<Role> = Api::namespaced(ctx.client.clone(), &ns);
+    let rb_api: Api<RoleBinding> = Api::namespaced(ctx.client.clone(), &ns);
+    let rbac_name = format!("{}-patroni", name);
+    let sa_missing = sa_api.get_opt(&rbac_name).await?.is_none();
+    let role_missing = role_api.get_opt(&rbac_name).await?.is_none();
+    let rb_missing = rb_api.get_opt(&rbac_name).await?.is_none();
+    let rbac_missing = sa_missing || role_missing || rb_missing;
+
+    // Check ConfigMap
+    let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &ns);
+    let cm_name = format!("{}-patroni-config", name);
+    let cm_missing = cm_api.get_opt(&cm_name).await?.is_none();
+
+    // Check Services
+    let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), &ns);
+    let primary_svc_missing = svc_api
+        .get_opt(&format!("{}-primary", name))
+        .await?
+        .is_none();
+    let replicas_svc_missing = svc_api.get_opt(&format!("{}-repl", name)).await?.is_none();
+    let headless_svc_missing = svc_api
+        .get_opt(&format!("{}-headless", name))
+        .await?
+        .is_none();
+    let svc_missing = primary_svc_missing || replicas_svc_missing || headless_svc_missing;
+
+    // Skip full reconciliation if spec hasn't changed, cluster is running, AND
+    // all critical resources exist
+    if !is_spec_changed
+        && current_phase == ClusterPhase::Running
+        && !secret_missing
+        && !rbac_missing
+        && !cm_missing
+        && !svc_missing
+    {
         debug!(
             "Spec unchanged for {} (generation: {:?}, observed: {:?}), checking status only",
             name,
@@ -70,6 +119,14 @@ pub async fn reconcile(cluster: Arc<PostgresCluster>, ctx: Arc<Context>) -> Resu
         );
         // Still check and update status periodically
         return check_and_update_status(&cluster, &ctx, &ns).await;
+    }
+
+    // Log why we're doing full reconciliation
+    if secret_missing || rbac_missing || cm_missing || svc_missing {
+        info!(
+            "Critical resource missing for {} (secret: {}, rbac: {}, configmap: {}, services: {}), performing full reconciliation",
+            name, secret_missing, rbac_missing, cm_missing, svc_missing
+        );
     }
 
     if is_spec_changed {
@@ -127,6 +184,18 @@ pub async fn reconcile(cluster: Arc<PostgresCluster>, ctx: Arc<Context>) -> Resu
 pub fn error_policy(cluster: Arc<PostgresCluster>, error: &Error, _ctx: Arc<Context>) -> Action {
     let name = cluster.name_any();
     let backoff = default_backoff();
+
+    // Check if this is a NotFound error (object was deleted)
+    // These are expected and should not be logged as errors
+    let error_str = format!("{:?}", error);
+    if error_str.contains("not found") || error_str.contains("NotFound") {
+        debug!(
+            "Object {} no longer exists (likely deleted), not requeuing",
+            name
+        );
+        // Don't requeue - the object is gone
+        return Action::await_change();
+    }
 
     // Get retry count from status for proper exponential backoff
     let retry_count = cluster
@@ -202,6 +271,7 @@ async fn check_and_update_status(
                 cluster.spec.replicas,
                 primary_pod,
                 replica_pods,
+                &cluster.spec.version,
             )
             .await?;
     }
@@ -245,6 +315,31 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
 
     let previous_replicas = cluster.status.as_ref().and_then(|s| s.previous_replicas);
     let is_spec_changed = spec_changed(cluster);
+
+    // Check for version downgrade before applying any resources
+    // Version downgrades are not supported because PostgreSQL data format is not backwards compatible
+    if is_spec_changed
+        && let Some(status) = &cluster.status
+        && let Some(current_version) = &status.current_version
+        && let Err(e) = crate::controller::validation::validate_version_upgrade(
+            current_version,
+            &cluster.spec.version,
+        )
+    {
+        warn!("Version change rejected for {}: {}", name, e);
+        status_manager
+            .set_failed("VersionDowngradeRejected", &e.to_string())
+            .await?;
+        ctx.publish_warning_event(
+            cluster,
+            "VersionDowngradeRejected",
+            "Validation",
+            Some(e.to_string()),
+        )
+        .await;
+        // Don't requeue - requires user intervention to fix
+        return Ok(Action::await_change());
+    }
 
     // Ensure Secret exists (credentials)
     let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
@@ -291,12 +386,26 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
     // Check StatefulSet status
     let sts_api: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), ns);
     let pods_api: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
+    let pvc_api: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), ns);
 
     let (ready_replicas, _, _) = get_statefulset_status(&sts_api, &name).await;
 
     // Get pod names from Patroni labels (spilo-role)
     let primary_pod = get_patroni_leader(&pods_api, &name).await;
     let replica_pods = get_patroni_replicas(&pods_api, &name).await;
+
+    // Check for stuck Creating state with timeout
+    if current_phase == ClusterPhase::Creating
+        && let Some(stuck_reason) = check_creating_timeout(cluster, &pvc_api, &name).await
+    {
+        warn!("Cluster {} stuck in Creating state: {}", name, stuck_reason);
+        status_manager
+            .set_failed("CreatingTimeout", &stuck_reason)
+            .await?;
+        ctx.publish_warning_event(cluster, "CreatingTimeout", "Timeout", Some(stuck_reason))
+            .await;
+        return Ok(Action::requeue(Duration::from_secs(60)));
+    }
 
     // Build transition context
     let mut transition_ctx = TransitionContext::new(ready_replicas, cluster.spec.replicas);
@@ -341,6 +450,7 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
                             cluster.spec.replicas,
                             primary_pod,
                             replica_pods,
+                            &cluster.spec.version,
                         )
                         .await?;
                 }
@@ -395,6 +505,7 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
                             cluster.spec.replicas,
                             primary_pod,
                             replica_pods,
+                            &cluster.spec.version,
                         )
                         .await?;
                 }
@@ -474,7 +585,11 @@ async fn apply_role(
     resource: &k8s_openapi::api::rbac::v1::Role,
 ) -> Result<()> {
     let api: Api<k8s_openapi::api::rbac::v1::Role> = Api::namespaced(ctx.client.clone(), ns);
-    let name = resource.metadata.name.as_ref().unwrap();
+    let name = resource
+        .metadata
+        .name
+        .as_ref()
+        .ok_or(Error::MissingObjectKey("Role.metadata.name"))?;
 
     let patch = Patch::Apply(resource);
     let params = PatchParams::apply("postgres-operator").force();
@@ -492,7 +607,11 @@ async fn apply_role_binding(
     resource: &k8s_openapi::api::rbac::v1::RoleBinding,
 ) -> Result<()> {
     let api: Api<k8s_openapi::api::rbac::v1::RoleBinding> = Api::namespaced(ctx.client.clone(), ns);
-    let name = resource.metadata.name.as_ref().unwrap();
+    let name = resource
+        .metadata
+        .name
+        .as_ref()
+        .ok_or(Error::MissingObjectKey("RoleBinding.metadata.name"))?;
 
     let patch = Patch::Apply(resource);
     let params = PatchParams::apply("postgres-operator").force();
@@ -598,6 +717,33 @@ async fn handle_deletion(cluster: &PostgresCluster, ctx: &Context, ns: &str) -> 
     )
     .await;
 
+    // Delete Patroni DCS endpoints that are created by Patroni at runtime
+    // These are NOT owned by the PostgresCluster and won't be garbage collected
+    // If left behind, they cause new clusters with the same name to get stuck
+    let endpoints_api: Api<Endpoints> = Api::namespaced(ctx.client.clone(), ns);
+    for suffix in ["", "-config", "-sync"] {
+        let endpoint_name = if suffix.is_empty() {
+            name.clone()
+        } else {
+            format!("{}{}", name, suffix)
+        };
+        match endpoints_api
+            .delete(&endpoint_name, &DeleteParams::default())
+            .await
+        {
+            Ok(_) => {
+                debug!("Deleted Patroni DCS endpoint: {}", endpoint_name);
+            }
+            Err(kube::Error::Api(err)) if err.code == 404 => {
+                // Endpoint doesn't exist, that's fine
+                debug!("Patroni endpoint {} not found, skipping", endpoint_name);
+            }
+            Err(e) => {
+                warn!("Failed to delete Patroni endpoint {}: {}", endpoint_name, e);
+            }
+        }
+    }
+
     // Kubernetes will garbage collect owned resources via owner references
     // Just remove the finalizer to allow deletion to proceed
 
@@ -621,6 +767,75 @@ async fn handle_deletion(cluster: &PostgresCluster, ctx: &Context, ns: &str) -> 
     }
 
     Ok(Action::await_change())
+}
+
+/// Check if a cluster has been stuck in Creating state for too long
+/// Returns Some(reason) if stuck, None if still within timeout
+async fn check_creating_timeout(
+    cluster: &PostgresCluster,
+    pvc_api: &Api<PersistentVolumeClaim>,
+    cluster_name: &str,
+) -> Option<String> {
+    // Check if we have a phase_started_at timestamp
+    let phase_started_at = cluster
+        .status
+        .as_ref()
+        .and_then(|s| s.phase_started_at.as_ref())
+        .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
+        .map(|dt| dt.with_timezone(&Utc));
+
+    let Some(started_at) = phase_started_at else {
+        // No timestamp yet, can't determine timeout
+        return None;
+    };
+
+    let duration_in_creating = Utc::now().signed_duration_since(started_at);
+    if duration_in_creating.num_seconds() < CREATING_TIMEOUT_SECS {
+        // Still within timeout
+        return None;
+    }
+
+    // Timeout exceeded, check for specific issues
+    // Check if PVCs are stuck pending
+    let label_selector = format!("postgres.example.com/cluster={}", cluster_name);
+    if let Ok(pvcs) = pvc_api
+        .list(&ListParams::default().labels(&label_selector))
+        .await
+    {
+        for pvc in pvcs.items {
+            let pvc_name = pvc.metadata.name.as_deref().unwrap_or("unknown");
+            let phase = pvc
+                .status
+                .as_ref()
+                .and_then(|s| s.phase.as_deref())
+                .unwrap_or("Unknown");
+
+            if phase == "Pending" {
+                // Check for storage class issues in events
+                let storage_class = pvc
+                    .spec
+                    .as_ref()
+                    .and_then(|s| s.storage_class_name.as_deref())
+                    .unwrap_or("default");
+
+                return Some(format!(
+                    "Cluster stuck in Creating state for {} minutes. \
+                     PVC '{}' is Pending - storage class '{}' may not exist or be provisioning. \
+                     Fix the spec.storage.storageClass or delete the cluster.",
+                    duration_in_creating.num_minutes(),
+                    pvc_name,
+                    storage_class
+                ));
+            }
+        }
+    }
+
+    // Generic timeout message if no specific issue found
+    Some(format!(
+        "Cluster stuck in Creating state for {} minutes with 0 ready replicas. \
+         Check pod events and logs for details.",
+        duration_in_creating.num_minutes()
+    ))
 }
 
 /// Emit a Kubernetes Event for a state transition

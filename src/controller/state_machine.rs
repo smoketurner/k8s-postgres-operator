@@ -502,6 +502,17 @@ pub fn determine_event(
         ClusterEvent::ReplicasDegraded
     } else if *current_phase == ClusterPhase::Pending {
         ClusterEvent::ResourcesApplied
+    } else if ctx.no_replicas_ready()
+        && matches!(
+            current_phase,
+            ClusterPhase::Creating | ClusterPhase::Updating | ClusterPhase::Scaling
+        )
+    {
+        // During initial bootstrap, updates, or scaling, having 0 ready replicas
+        // is a normal transitional state, not an error. Return ResourcesApplied
+        // which has no valid transition from these states (InvalidTransition),
+        // keeping us in the current state while waiting for pods to become ready.
+        ClusterEvent::ResourcesApplied
     } else {
         // Default: no state change needed, or error occurred
         ClusterEvent::ReconcileError

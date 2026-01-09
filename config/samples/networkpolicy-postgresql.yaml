@@ -1,0 +1,116 @@
+# Sample NetworkPolicy for PostgreSQL clusters managed by the operator
+# This policy restricts access to PostgreSQL pods to only allowed sources
+#
+# Usage: Apply this policy to your application namespace after creating a PostgresCluster
+# Replace ${CLUSTER_NAME} with your cluster name (e.g., "my-postgres")
+# Replace ${NAMESPACE} with your namespace (e.g., "default")
+#
+# kubectl apply -f networkpolicy-postgresql.yaml
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-cluster-policy
+  # namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/managed-by: postgres-operator
+spec:
+  # Select PostgreSQL pods by the cluster label
+  podSelector:
+    matchLabels:
+      # app.kubernetes.io/name: ${CLUSTER_NAME}
+      app.kubernetes.io/component: postgresql
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow PostgreSQL connections from pods with the client label
+    - from:
+        - podSelector:
+            matchLabels:
+              postgres.example.com/client: "true"
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Allow Patroni REST API for cluster communication (internal only)
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: postgresql
+      ports:
+        - protocol: TCP
+          port: 8008
+    # Allow metrics scraping from Prometheus
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 9187
+  egress:
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow Patroni cluster communication between pods
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: postgresql
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 8008
+    # Allow access to Kubernetes API for Patroni leader election
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+---
+# NetworkPolicy to allow application pods to connect to PostgreSQL
+# Apply this to pods that need PostgreSQL access
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-client-egress
+  # namespace: ${NAMESPACE}
+spec:
+  podSelector:
+    matchLabels:
+      postgres.example.com/client: "true"
+  policyTypes:
+    - Egress
+  egress:
+    # Allow connection to PostgreSQL primary service
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: postgresql
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Allow DNS
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53

@@ -119,9 +119,14 @@ impl Metrics {
     }
 
     /// Encode metrics to Prometheus text format
+    ///
+    /// Returns an empty string if encoding fails (should never happen with valid metrics).
     fn encode(&self) -> String {
         let mut buffer = String::new();
-        encode(&mut buffer, &self.registry).expect("encoding metrics");
+        if let Err(e) = encode(&mut buffer, &self.registry) {
+            tracing::error!("Failed to encode metrics: {}", e);
+            return String::new();
+        }
         buffer
     }
 }

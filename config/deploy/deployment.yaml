@@ -8,9 +8,15 @@ metadata:
     app.kubernetes.io/component: controller
 spec:
   replicas: 1
+  # Progress deadline for deployment rollouts (5 minutes)
+  progressDeadlineSeconds: 300
+  # Minimum time a pod must be ready before considered available
+  minReadySeconds: 5
   selector:
     matchLabels:
       app.kubernetes.io/name: postgres-operator
+  strategy:
+    type: Recreate
   template:
     metadata:
       labels:

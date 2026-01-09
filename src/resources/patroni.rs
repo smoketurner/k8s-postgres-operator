@@ -29,9 +29,25 @@ use std::collections::BTreeMap;
 use crate::crd::PostgresCluster;
 use crate::resources::common::{owner_reference, patroni_labels};
 
-/// Default Patroni/Spilo image (Zalando's production-ready PostgreSQL + Patroni image)
-/// This can be overridden in the CRD
-const DEFAULT_SPILO_IMAGE: &str = "ghcr.io/zalando/spilo-16:3.3-p1";
+/// Get the Spilo image for a given PostgreSQL version
+/// Spilo images are named: ghcr.io/zalando/spilo-{major_version}:{tag}
+/// Different PostgreSQL versions have different available Spilo tags
+/// Check https://github.com/orgs/zalando/packages?repo_name=spilo for available versions
+fn get_spilo_image(version: &str) -> String {
+    // Extract major version (e.g., "16" from "16.1" or just "16")
+    let major_version = version.split('.').next().unwrap_or("16");
+
+    // Map PostgreSQL major versions to their Spilo image tags
+    // Updated tags available at: https://github.com/zalando/spilo/pkgs/container/
+    let tag = match major_version {
+        "17" => "4.0-p3", // spilo-17 latest
+        "16" => "3.3-p3", // spilo-16 latest
+        "15" => "3.2-p2", // spilo-15 latest (from https://github.com/zalando/spilo/pkgs/container/spilo-15)
+        _ => "3.3-p3",    // Fallback to PostgreSQL 16 tag
+    };
+
+    format!("ghcr.io/zalando/spilo-{}:{}", major_version, tag)
+}
 
 /// Generate the Patroni configuration as a ConfigMap
 ///
@@ -360,8 +376,8 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
     let labels = patroni_labels(&name);
     let replicas = cluster.spec.replicas;
 
-    // Use Spilo image (Zalando's PostgreSQL + Patroni) or custom image
-    let image = DEFAULT_SPILO_IMAGE.to_string();
+    // Use Spilo image (Zalando's PostgreSQL + Patroni) based on requested version
+    let image = get_spilo_image(&cluster.spec.version);
     let secret_name = format!("{}-credentials", name);
     let sa_name = format!("{}-patroni", name);
 
@@ -591,6 +607,35 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
         ..Default::default()
     };
 
+    // Init container to fix permissions on the data directory
+    // Spilo's entrypoint tries to chown/chmod the data directory, which fails
+    // when running as non-root. This init container runs as root to set up
+    // the correct permissions before the main container starts.
+    let init_container = Container {
+        name: "init-permissions".to_string(),
+        image: Some("busybox:1.36".to_string()),
+        image_pull_policy: Some("IfNotPresent".to_string()),
+        command: Some(vec!["sh".to_string(), "-c".to_string()]),
+        args: Some(vec![
+            // Set ownership to postgres user (101) and group (103)
+            // Create the pgdata subdirectory if it doesn't exist
+            "chown -R 101:103 /var/lib/postgresql/data && chmod 700 /var/lib/postgresql/data"
+                .to_string(),
+        ]),
+        volume_mounts: Some(vec![VolumeMount {
+            name: "data".to_string(),
+            mount_path: "/var/lib/postgresql/data".to_string(),
+            ..Default::default()
+        }]),
+        security_context: Some(SecurityContext {
+            run_as_user: Some(0), // Run as root to change ownership
+            run_as_group: Some(0),
+            allow_privilege_escalation: Some(false),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
     // PVC template
     let pvc_template = PersistentVolumeClaim {
         metadata: ObjectMeta {
@@ -648,6 +693,7 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
                 }),
                 spec: Some(PodSpec {
                     service_account_name: Some(sa_name),
+                    init_containers: Some(vec![init_container]),
                     containers: vec![container],
                     volumes: Some(volumes),
                     termination_grace_period_seconds: Some(30),

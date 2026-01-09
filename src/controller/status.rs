@@ -163,6 +163,7 @@ impl<'a> StatusManager<'a> {
         total_replicas: i32,
         primary_pod: Option<String>,
         replica_pods: Vec<String>,
+        version: &str,
     ) -> Result<()> {
         let generation = self.cluster.metadata.generation;
         let existing_conditions = self
@@ -182,6 +183,9 @@ impl<'a> StatusManager<'a> {
             .degraded(false, "Healthy", "Cluster is healthy")
             .build();
 
+        // Track when we entered this phase
+        let phase_started_at = self.get_phase_started_at(ClusterPhase::Running);
+
         let status = PostgresClusterStatus {
             phase: ClusterPhase::Running,
             ready_replicas,
@@ -200,6 +204,9 @@ impl<'a> StatusManager<'a> {
             last_error: None,
             last_error_time: None,
             previous_replicas: self.cluster.status.as_ref().map(|s| s.replicas),
+            phase_started_at,
+            // Set current version when cluster becomes running
+            current_version: Some(version.to_string()),
         };
 
         self.update(status).await
@@ -226,6 +233,9 @@ impl<'a> StatusManager<'a> {
             .degraded(false, "NotApplicable", "Cluster is being created")
             .build();
 
+        // Track when we entered this phase
+        let phase_started_at = self.get_phase_started_at(ClusterPhase::Creating);
+
         let status = PostgresClusterStatus {
             phase: ClusterPhase::Creating,
             ready_replicas,
@@ -239,6 +249,13 @@ impl<'a> StatusManager<'a> {
             last_error: None,
             last_error_time: None,
             previous_replicas: None,
+            phase_started_at,
+            // Preserve existing version during creation (usually None)
+            current_version: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.current_version.clone()),
         };
 
         self.update(status).await
@@ -266,6 +283,9 @@ impl<'a> StatusManager<'a> {
             .degraded(false, "NotDegraded", "Cluster is updating normally")
             .build();
 
+        // Track when we entered this phase
+        let phase_started_at = self.get_phase_started_at(ClusterPhase::Updating);
+
         let status = PostgresClusterStatus {
             phase: ClusterPhase::Updating,
             ready_replicas,
@@ -283,6 +303,13 @@ impl<'a> StatusManager<'a> {
             last_error: None,
             last_error_time: None,
             previous_replicas: self.cluster.status.as_ref().map(|s| s.replicas),
+            phase_started_at,
+            // Preserve existing version during updates
+            current_version: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.current_version.clone()),
         };
 
         self.update(status).await
@@ -305,6 +332,9 @@ impl<'a> StatusManager<'a> {
         // Increment retry count for exponential backoff
         let current_retry = existing_status.and_then(|s| s.retry_count).unwrap_or(0);
 
+        // Track when we entered this phase
+        let phase_started_at = self.get_phase_started_at(ClusterPhase::Failed);
+
         let status = PostgresClusterStatus {
             phase: ClusterPhase::Failed,
             ready_replicas: existing_status.map(|s| s.ready_replicas).unwrap_or(0),
@@ -320,6 +350,9 @@ impl<'a> StatusManager<'a> {
             last_error: Some(message.to_string()),
             last_error_time: Some(chrono::Utc::now().to_rfc3339()),
             previous_replicas: existing_status.and_then(|s| s.previous_replicas),
+            phase_started_at,
+            // Preserve existing version when failed
+            current_version: existing_status.and_then(|s| s.current_version.clone()),
         };
 
         self.update(status).await
@@ -344,6 +377,9 @@ impl<'a> StatusManager<'a> {
             )
             .build();
 
+        // Track when we entered this phase
+        let phase_started_at = self.get_phase_started_at(ClusterPhase::Deleting);
+
         let status = PostgresClusterStatus {
             phase: ClusterPhase::Deleting,
             ready_replicas: 0,
@@ -361,9 +397,36 @@ impl<'a> StatusManager<'a> {
             last_error: None,
             last_error_time: None,
             previous_replicas: None,
+            phase_started_at,
+            // Preserve existing version when deleting
+            current_version: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.current_version.clone()),
         };
 
         self.update(status).await
+    }
+
+    /// Get the timestamp when the current phase started
+    /// If the phase is changing, returns a new timestamp
+    /// If the phase is the same, returns the existing timestamp
+    fn get_phase_started_at(&self, new_phase: ClusterPhase) -> Option<String> {
+        let current_phase = self.cluster.status.as_ref().map(|s| s.phase);
+        let existing_timestamp = self
+            .cluster
+            .status
+            .as_ref()
+            .and_then(|s| s.phase_started_at.clone());
+
+        if current_phase == Some(new_phase) && existing_timestamp.is_some() {
+            // Same phase, keep existing timestamp
+            existing_timestamp
+        } else {
+            // New phase, set new timestamp
+            Some(chrono::Utc::now().to_rfc3339())
+        }
     }
 }
 

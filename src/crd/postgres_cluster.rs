@@ -132,6 +132,7 @@ pub struct RetentionPolicy {
 }
 
 /// Backup destination configuration
+#[allow(clippy::upper_case_acronyms)] // GCS is a well-known acronym for Google Cloud Storage
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum BackupDestination {
@@ -340,6 +341,16 @@ pub struct PostgresClusterStatus {
     /// Previous replica count (used for tracking scaling operations)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_replicas: Option<i32>,
+
+    /// Timestamp when the current phase started (RFC3339 format)
+    /// Used to detect stuck states like Creating with invalid storage class
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_started_at: Option<String>,
+
+    /// Current PostgreSQL version running in the cluster
+    /// Used to prevent version downgrades which cause data incompatibility
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_version: Option<String>,
 }
 
 /// Cluster lifecycle phase

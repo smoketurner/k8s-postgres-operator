@@ -11,6 +11,10 @@ spec:
     singular: postgrescluster
     shortNames:
       - pgc
+    categories:
+      - databases
+      - postgresql
+      - all
   scope: Namespaced
   versions:
     - name: v1alpha1
@@ -45,10 +49,26 @@ spec:
               required:
                 - version
                 - storage
+              x-kubernetes-validations:
+                # PostgreSQL version format validation
+                - rule: "self.version.matches('^[0-9]{1,2}(\\\\.[0-9]+)?$')"
+                  message: "version must be a valid PostgreSQL version (e.g., '15', '16', '15.4')"
+                # Storage size format validation (Kubernetes quantity)
+                - rule: "self.storage.size.matches('^[0-9]+(\\\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$')"
+                  message: "storage.size must be a valid Kubernetes quantity (e.g., '10Gi', '500Mi')"
+                # TLS validation - certSecret required when TLS is enabled
+                - rule: "!has(self.tls) || !self.tls.enabled || has(self.tls.certSecret)"
+                  message: "tls.certSecret is required when TLS is enabled"
+                # HA recommendation - warn if replicas < 3 for production
+                - rule: "self.replicas >= 3 || self.replicas == 1"
+                  message: "For high availability, use 3+ replicas. Single replica (1) is allowed for development."
+                  messageExpression: "self.replicas == 2 ? 'Warning: 2 replicas provides no HA benefit over 1. Use 1 for dev or 3+ for HA.' : ''"
               properties:
                 version:
                   type: string
                   description: PostgreSQL version (e.g., "15", "16")
+                  # Pattern provides basic validation; CEL rule above provides better error messages
+                  pattern: "^[0-9]{1,2}(\\.[0-9]+)?$"
                 replicas:
                   type: integer
                   description: |
@@ -94,6 +114,10 @@ spec:
                   description: Custom PostgreSQL configuration parameters
                 backup:
                   type: object
+                  x-kubernetes-validations:
+                    # If backup is configured with a destination, schedule is required
+                    - rule: "!has(self.destination) || has(self.schedule)"
+                      message: "backup.schedule is required when backup.destination is configured"
                   properties:
                     schedule:
                       type: string
@@ -103,10 +127,23 @@ spec:
                       properties:
                         count:
                           type: integer
+                          minimum: 1
                         maxAge:
                           type: string
                     destination:
                       type: object
+                      x-kubernetes-validations:
+                        # S3 requires bucket, region, and credentialsSecret
+                        - rule: "self.type != 'S3' || (has(self.bucket) && has(self.region) && has(self.credentialsSecret))"
+                          message: "S3 backup requires bucket, region, and credentialsSecret"
+                        # GCS requires bucket and credentialsSecret
+                        - rule: "self.type != 'GCS' || (has(self.bucket) && has(self.credentialsSecret))"
+                          message: "GCS backup requires bucket and credentialsSecret"
+                        # Azure requires container, storageAccount, and credentialsSecret
+                        - rule: "self.type != 'Azure' || (has(self.container) && has(self.storageAccount) && has(self.credentialsSecret))"
+                          message: "Azure backup requires container, storageAccount, and credentialsSecret"
+                      required:
+                        - type
                       properties:
                         type:
                           type: string
@@ -116,40 +153,70 @@ spec:
                             - Azure
                         bucket:
                           type: string
+                          description: Bucket name for S3 or GCS
                         region:
                           type: string
+                          description: AWS region for S3
                         endpoint:
                           type: string
+                          description: Custom S3-compatible endpoint URL
                         container:
                           type: string
+                          description: Azure blob container name
                         storageAccount:
                           type: string
+                          description: Azure storage account name
                         credentialsSecret:
                           type: string
+                          description: Name of secret containing cloud credentials
                 pgbouncer:
                   type: object
+                  description: PgBouncer connection pooler configuration
+                  x-kubernetes-validations:
+                    # If PgBouncer is enabled, pool settings should be reasonable
+                    - rule: "!self.enabled || !has(self.maxClientConn) || self.maxClientConn >= 10"
+                      message: "pgbouncer.maxClientConn should be at least 10 when enabled"
+                    - rule: "!self.enabled || !has(self.defaultPoolSize) || self.defaultPoolSize >= 1"
+                      message: "pgbouncer.defaultPoolSize must be at least 1 when enabled"
                   properties:
                     enabled:
                       type: boolean
+                      description: Enable PgBouncer connection pooler sidecar
                     poolMode:
                       type: string
+                      description: Connection pool mode
                       enum:
                         - session
                         - transaction
                         - statement
+                      default: transaction
                     maxClientConn:
                       type: integer
+                      description: Maximum number of client connections
+                      minimum: 10
+                      maximum: 10000
                     defaultPoolSize:
                       type: integer
+                      description: Default pool size per user/database pair
+                      minimum: 1
+                      maximum: 1000
                 tls:
                   type: object
+                  description: TLS configuration for encrypted connections
+                  x-kubernetes-validations:
+                    # certSecret is required when TLS is enabled (also validated at spec level)
+                    - rule: "!self.enabled || has(self.certSecret)"
+                      message: "tls.certSecret is required when TLS is enabled"
                   properties:
                     enabled:
                       type: boolean
+                      description: Enable TLS for PostgreSQL connections
                     certSecret:
                       type: string
+                      description: Name of secret containing TLS certificate and key
                     caSecret:
                       type: string
+                      description: Name of secret containing CA certificate for client verification
                 metrics:
                   type: object
                   properties:
@@ -160,6 +227,13 @@ spec:
                 service:
                   type: object
                   description: Service configuration for external access
+                  x-kubernetes-validations:
+                    - rule: "!has(self.nodePort) || self.type == 'NodePort'"
+                      message: "nodePort is only valid when service type is NodePort"
+                    - rule: "!has(self.loadBalancerSourceRanges) || self.type == 'LoadBalancer'"
+                      message: "loadBalancerSourceRanges is only valid when service type is LoadBalancer"
+                    - rule: "!has(self.externalTrafficPolicy) || self.type == 'NodePort' || self.type == 'LoadBalancer'"
+                      message: "externalTrafficPolicy is only valid for NodePort or LoadBalancer service types"
                   properties:
                     type:
                       type: string
@@ -200,7 +274,10 @@ spec:
                     - Creating
                     - Running
                     - Updating
+                    - Scaling
+                    - Degraded
                     - Failed
+                    - Recovering
                     - Deleting
                 readyReplicas:
                   type: integer
@@ -235,3 +312,21 @@ spec:
                       observedGeneration:
                         type: integer
                         format: int64
+                retryCount:
+                  type: integer
+                  description: Current retry count for exponential backoff
+                lastError:
+                  type: string
+                  description: Last error message encountered during reconciliation
+                lastErrorTime:
+                  type: string
+                  description: Timestamp of the last error
+                previousReplicas:
+                  type: integer
+                  description: Previous replica count (used for tracking scaling operations)
+                phaseStartedAt:
+                  type: string
+                  description: Timestamp when the current phase started (RFC3339 format)
+                currentVersion:
+                  type: string
+                  description: Current PostgreSQL version running in the cluster (used to prevent downgrades)

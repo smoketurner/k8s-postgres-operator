@@ -4,7 +4,10 @@
 //! - Resource generators (StatefulSet, Service, ConfigMap, Secret, PDB)
 //! - Validation logic
 //! - Status management
+//! - State machine transitions
 //! - Error handling
 
 mod resources;
+mod state_machine;
+mod status;
 mod validation;

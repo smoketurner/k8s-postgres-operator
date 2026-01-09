@@ -62,7 +62,18 @@ pub async fn run_controller(client: Client, health_state: Option<Arc<HealthState
                     tracing::debug!("Reconciled: {}", obj.name);
                 }
                 Err(e) => {
-                    tracing::error!("Reconciliation error: {:?}", e);
+                    // ObjectNotFound/NotFound errors are expected after deletion when
+                    // related watch events trigger reconciliation for a deleted object.
+                    // Log these at debug level instead of error.
+                    let error_str = format!("{:?}", e);
+                    if error_str.contains("ObjectNotFound")
+                        || error_str.contains("\"NotFound\"")
+                        || error_str.contains("not found")
+                    {
+                        tracing::debug!("Object no longer exists (likely deleted): {:?}", e);
+                    } else {
+                        tracing::error!("Reconciliation error: {:?}", e);
+                    }
                 }
             }
         })

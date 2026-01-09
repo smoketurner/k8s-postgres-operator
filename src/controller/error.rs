@@ -1,6 +1,12 @@
+//! Error types for the PostgresCluster controller
+
 use std::time::Duration;
+
 use thiserror::Error;
 
+/// Error variants are named with the `Error` suffix for clarity (e.g., `KubeError`, `ValidationError`).
+/// This is idiomatic for error enums and improves readability at call sites.
+#[allow(clippy::enum_variant_names)]
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("Kubernetes API error: {0}")]

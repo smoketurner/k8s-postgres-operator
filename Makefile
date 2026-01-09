@@ -59,7 +59,7 @@ install-crd: ## Install the CRD
 	$(KUBECTL) apply -f config/crd/postgres-cluster.yaml
 
 install-rbac: ## Install RBAC (creates namespace if needed)
-	$(KUBECTL) create namespace $(NAMESPACE) --dry-run=client -o yaml | $(KUBECTL) apply -f -
+	$(KUBECTL) apply -f config/deploy/namespace.yaml
 	$(KUBECTL) apply -f config/rbac/
 
 uninstall: uninstall-rbac uninstall-crd ## Uninstall CRD and RBAC from the cluster
@@ -75,8 +75,10 @@ uninstall-rbac: ## Uninstall RBAC
 
 deploy: install docker-build ## Deploy the operator to the cluster
 	$(KUBECTL) apply -f config/deploy/deployment.yaml
+	$(KUBECTL) apply -f config/deploy/networkpolicy.yaml
 
 undeploy: ## Undeploy the operator from the cluster
+	$(KUBECTL) delete -f config/deploy/networkpolicy.yaml --ignore-not-found
 	$(KUBECTL) delete -f config/deploy/deployment.yaml --ignore-not-found
 
 ##@ Samples
