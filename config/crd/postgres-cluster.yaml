@@ -157,6 +157,39 @@ spec:
                       type: boolean
                     port:
                       type: integer
+                service:
+                  type: object
+                  description: Service configuration for external access
+                  properties:
+                    type:
+                      type: string
+                      description: "Service type: ClusterIP (default), NodePort, or LoadBalancer"
+                      enum:
+                        - ClusterIP
+                        - NodePort
+                        - LoadBalancer
+                      default: ClusterIP
+                    annotations:
+                      type: object
+                      additionalProperties:
+                        type: string
+                      description: Annotations to add to the services
+                    loadBalancerSourceRanges:
+                      type: array
+                      items:
+                        type: string
+                      description: CIDR ranges allowed to access LoadBalancer
+                    externalTrafficPolicy:
+                      type: string
+                      description: External traffic policy (Cluster or Local)
+                      enum:
+                        - Cluster
+                        - Local
+                    nodePort:
+                      type: integer
+                      description: NodePort for PostgreSQL port (only for NodePort type)
+                      minimum: 30000
+                      maximum: 32767
             status:
               type: object
               properties:

@@ -361,7 +361,13 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
 
     // Environment variables for Patroni
     let env_vars = vec![
-        // Patroni scope (cluster name)
+        // Spilo scope (cluster name) - Spilo uses SCOPE env var
+        EnvVar {
+            name: "SCOPE".to_string(),
+            value: Some(name.clone()),
+            ..Default::default()
+        },
+        // Patroni scope (cluster name) - for compatibility
         EnvVar {
             name: "PATRONI_SCOPE".to_string(),
             value: Some(name.clone()),
@@ -416,9 +422,22 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
             }),
             ..Default::default()
         },
-        // Replication password
+        // Replication password (Patroni native)
         EnvVar {
             name: "REPLICATION_PASSWORD".to_string(),
+            value_from: Some(EnvVarSource {
+                secret_key_ref: Some(SecretKeySelector {
+                    name: secret_name.clone(),
+                    key: "REPLICATION_PASSWORD".to_string(),
+                    optional: Some(false),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        // Spilo-specific: replication password for standby user
+        EnvVar {
+            name: "PGPASSWORD_STANDBY".to_string(),
             value_from: Some(EnvVarSource {
                 secret_key_ref: Some(SecretKeySelector {
                     name: secret_name.clone(),
@@ -442,7 +461,12 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
             value: Some("/var/lib/postgresql/data/pgdata".to_string()),
             ..Default::default()
         },
-        // Use Kubernetes for DCS
+        // Use Kubernetes for DCS - both Spilo and Patroni native settings
+        EnvVar {
+            name: "DCS_ENABLE_KUBERNETES_API".to_string(),
+            value: Some("true".to_string()),
+            ..Default::default()
+        },
         EnvVar {
             name: "PATRONI_KUBERNETES_USE_ENDPOINTS".to_string(),
             value: Some("true".to_string()),

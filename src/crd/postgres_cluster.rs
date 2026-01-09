@@ -57,6 +57,10 @@ pub struct PostgresClusterSpec {
     /// Metrics configuration (Phase 0.3)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<MetricsSpec>,
+
+    /// Service configuration for external access
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<ServiceSpec>,
 }
 
 fn default_replicas() -> i32 {
@@ -214,6 +218,75 @@ pub struct MetricsSpec {
 
 fn default_metrics_port() -> i32 {
     9187
+}
+
+/// Service configuration for external access
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceSpec {
+    /// Service type: ClusterIP, NodePort, or LoadBalancer
+    #[serde(default = "default_service_type")]
+    pub type_: ServiceType,
+
+    /// Annotations to add to the services (e.g., for cloud provider load balancers)
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub annotations: BTreeMap<String, String>,
+
+    /// Load balancer source ranges (CIDR notation) for restricting access
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub load_balancer_source_ranges: Vec<String>,
+
+    /// External traffic policy: Cluster or Local
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_traffic_policy: Option<ExternalTrafficPolicy>,
+
+    /// NodePort for the PostgreSQL port (only used when type is NodePort)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_port: Option<i32>,
+}
+
+/// Kubernetes Service type
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default, PartialEq)]
+pub enum ServiceType {
+    /// ClusterIP (internal only, default)
+    #[default]
+    ClusterIP,
+    /// NodePort (exposes on each node's IP)
+    NodePort,
+    /// LoadBalancer (provisions external load balancer)
+    LoadBalancer,
+}
+
+impl std::fmt::Display for ServiceType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ServiceType::ClusterIP => write!(f, "ClusterIP"),
+            ServiceType::NodePort => write!(f, "NodePort"),
+            ServiceType::LoadBalancer => write!(f, "LoadBalancer"),
+        }
+    }
+}
+
+/// External traffic policy for LoadBalancer/NodePort services
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq)]
+pub enum ExternalTrafficPolicy {
+    /// Route to any node (default, may lose client IP)
+    Cluster,
+    /// Route only to local node (preserves client IP)
+    Local,
+}
+
+impl std::fmt::Display for ExternalTrafficPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExternalTrafficPolicy::Cluster => write!(f, "Cluster"),
+            ExternalTrafficPolicy::Local => write!(f, "Local"),
+        }
+    }
+}
+
+fn default_service_type() -> ServiceType {
+    ServiceType::ClusterIP
 }
 
 /// Status of the PostgresCluster

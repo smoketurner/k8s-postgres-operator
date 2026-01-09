@@ -111,6 +111,7 @@ impl PostgresClusterBuilder {
                 pgbouncer: None,
                 tls: None,
                 metrics: None,
+                service: None,
             },
             status: None,
         }

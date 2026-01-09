@@ -81,11 +81,11 @@ undeploy: ## Undeploy the operator from the cluster
 
 ##@ Samples
 
-deploy-sample: ## Deploy a sample PostgresCluster (standalone)
-	$(KUBECTL) apply -f config/samples/standalone.yaml
+deploy-sample: ## Deploy a sample PostgresCluster (automatic failover)
+	$(KUBECTL) apply -f config/samples/automatic-failover.yaml
 
 delete-sample: ## Delete the sample PostgresCluster
-	$(KUBECTL) delete -f config/samples/standalone.yaml --ignore-not-found
+	$(KUBECTL) delete -f config/samples/automatic-failover.yaml --ignore-not-found
 
 ##@ Cleanup
 

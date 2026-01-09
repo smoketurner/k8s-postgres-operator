@@ -33,6 +33,7 @@ fn create_test_cluster(
             pgbouncer: None,
             tls: None,
             metrics: None,
+            service: None,
         },
         status: None,
     }

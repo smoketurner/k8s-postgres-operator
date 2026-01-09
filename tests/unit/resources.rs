@@ -29,6 +29,7 @@ fn create_test_cluster(name: &str, namespace: &str, replicas: i32) -> PostgresCl
             pgbouncer: None,
             tls: None,
             metrics: None,
+            service: None,
         },
         status: None,
     }

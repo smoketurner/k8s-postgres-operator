@@ -9,7 +9,6 @@ spec:
   version: "16"
   replicas: 3  # Primary + 2 read replicas (quorum for HA)
   storage:
-    storageClass: fast-ssd
     size: 100Gi
   resources:
     requests:

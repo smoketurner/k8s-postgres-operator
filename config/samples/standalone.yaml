@@ -13,3 +13,11 @@ spec:
   postgresqlParams:
     max_connections: "200"
     shared_buffers: "256MB"
+  # Service configuration for external access (optional)
+  # service:
+  #   type: LoadBalancer  # or NodePort, ClusterIP (default)
+  #   annotations:
+  #     service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+  #   loadBalancerSourceRanges:
+  #     - "10.0.0.0/8"
+  #   externalTrafficPolicy: Local  # preserves client IP

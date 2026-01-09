@@ -9,7 +9,6 @@ spec:
   version: "16"
   replicas: 2  # Primary + 1 read replica
   storage:
-    storageClass: standard
     size: 50Gi
   resources:
     requests:
