@@ -52,6 +52,31 @@ const GCS_CREDENTIALS_FILE: &str = "credentials.json";
 /// Encryption key mount path
 const ENCRYPTION_KEY_PATH: &str = "/var/secrets/backup-encryption";
 
+/// Parse a duration string (e.g., "7d", "30d", "1w", "2m") to days.
+///
+/// Supported suffixes:
+/// - `d` or `D`: days
+/// - `w` or `W`: weeks (7 days)
+/// - `m` or `M`: months (30 days, approximate)
+///
+/// Returns `None` if the format is invalid.
+fn parse_duration_to_days(duration: &str) -> Option<i32> {
+    let duration = duration.trim();
+    if duration.is_empty() {
+        return None;
+    }
+
+    let (num_str, suffix) = duration.split_at(duration.len() - 1);
+    let num: i32 = num_str.parse().ok()?;
+
+    match suffix.to_lowercase().as_str() {
+        "d" => Some(num),
+        "w" => Some(num * 7),
+        "m" => Some(num * 30), // Approximate month
+        _ => None,
+    }
+}
+
 /// Generate backup-related environment variables for Spilo/WAL-G.
 ///
 /// Returns a vector of environment variables to add to the StatefulSet pod spec.
@@ -147,13 +172,34 @@ pub fn generate_backup_env_vars(cluster: &PostgresCluster) -> Vec<EnvVar> {
             }
 
     // Retention settings via WAL-G
-    // WAL-G uses WALG_RETENTION_* environment variables
+    // Spilo handles retention via BACKUP_NUM_TO_RETAIN
+    // WAL-G also supports WALG_RETAIN_FULL_BACKUPS
     if let Some(count) = backup.retention.count {
         env_vars.push(EnvVar {
             name: "BACKUP_NUM_TO_RETAIN".to_string(),
             value: Some(count.to_string()),
             ..Default::default()
         });
+        // WAL-G native retention setting
+        env_vars.push(EnvVar {
+            name: "WALG_RETAIN_FULL_BACKUPS".to_string(),
+            value: Some(count.to_string()),
+            ..Default::default()
+        });
+    }
+
+    // Time-based retention
+    // Note: Spilo's backup script uses BACKUP_NUM_TO_RETAIN primarily.
+    // For time-based cleanup, users can run `wal-g delete retain FULL <count> --confirm`
+    // or use WALG_BACKUP_RETENTION_DAYS with custom scripts
+    if let Some(ref max_age) = backup.retention.max_age {
+        if let Some(days) = parse_duration_to_days(max_age) {
+            env_vars.push(EnvVar {
+                name: "WALG_BACKUP_RETENTION_DAYS".to_string(),
+                value: Some(days.to_string()),
+                ..Default::default()
+            });
+        }
     }
 
     // Destination-specific configuration
@@ -914,5 +960,73 @@ mod tests {
         };
         let cluster_with_backup = create_test_cluster(Some(backup));
         assert!(is_backup_enabled(&cluster_with_backup));
+    }
+
+    #[test]
+    fn test_parse_duration_to_days() {
+        // Days
+        assert_eq!(parse_duration_to_days("7d"), Some(7));
+        assert_eq!(parse_duration_to_days("30d"), Some(30));
+        assert_eq!(parse_duration_to_days("1D"), Some(1));
+
+        // Weeks
+        assert_eq!(parse_duration_to_days("1w"), Some(7));
+        assert_eq!(parse_duration_to_days("2W"), Some(14));
+        assert_eq!(parse_duration_to_days("4w"), Some(28));
+
+        // Months (approximate)
+        assert_eq!(parse_duration_to_days("1m"), Some(30));
+        assert_eq!(parse_duration_to_days("2M"), Some(60));
+
+        // Invalid formats
+        assert_eq!(parse_duration_to_days(""), None);
+        assert_eq!(parse_duration_to_days("7"), None);
+        assert_eq!(parse_duration_to_days("abc"), None);
+        assert_eq!(parse_duration_to_days("7x"), None);
+    }
+
+    #[test]
+    fn test_retention_max_age_env_var() {
+        let backup = BackupSpec {
+            schedule: "0 2 * * *".to_string(),
+            retention: RetentionPolicy {
+                count: Some(7),
+                max_age: Some("30d".to_string()),
+                retain_timestamps: vec![],
+            },
+            destination: BackupDestination::S3 {
+                bucket: "bucket".to_string(),
+                region: "us-east-1".to_string(),
+                endpoint: None,
+                credentials_secret: "creds".to_string(),
+                path: None,
+                disable_sse: false,
+                force_path_style: false,
+            },
+            wal_archiving: None,
+            encryption: None,
+            compression: None,
+            backup_from_replica: false,
+            upload_concurrency: None,
+            download_concurrency: None,
+            enable_delta_backups: false,
+            delta_max_steps: None,
+        };
+
+        let cluster = create_test_cluster(Some(backup));
+        let env_vars = generate_backup_env_vars(&cluster);
+
+        // Check count-based retention
+        assert!(env_vars.iter().any(|e| e.name == "BACKUP_NUM_TO_RETAIN"));
+        assert!(env_vars
+            .iter()
+            .any(|e| e.name == "WALG_RETAIN_FULL_BACKUPS"));
+
+        // Check time-based retention
+        let days_var = env_vars
+            .iter()
+            .find(|e| e.name == "WALG_BACKUP_RETENTION_DAYS")
+            .unwrap();
+        assert_eq!(days_var.value.as_deref(), Some("30"));
     }
 }

@@ -111,11 +111,11 @@ schedule: "0 * * * *"
 
 ```yaml
 retention:
-  # Keep last N backups (recommended)
+  # Keep last N backups - uses Spilo's BACKUP_NUM_TO_RETAIN
   count: 7
 
-  # Delete backups older than duration
-  maxAge: "30d"  # Supports: d (days), w (weeks), m (months)
+  # Delete backups older than duration (d=days, w=weeks, m=months)
+  maxAge: "30d"
 
   # Both can be used together - backup deleted when EITHER condition is met
 ```
