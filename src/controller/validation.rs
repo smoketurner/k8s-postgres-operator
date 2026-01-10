@@ -19,7 +19,7 @@ pub const MAX_REPLICAS: i32 = 100;
 /// Validate the cluster spec
 pub fn validate_spec(cluster: &PostgresCluster) -> Result<()> {
     validate_replicas(cluster)?;
-    validate_version(&cluster.spec.version)?;
+    // Note: PostgreSQL version is validated by the CRD enum (PostgresVersion)
     validate_storage(cluster)?;
     Ok(())
 }
@@ -39,26 +39,6 @@ fn validate_replicas(cluster: &PostgresCluster) -> Result<()> {
         return Err(Error::ValidationError(format!(
             "replica count {} exceeds maximum {}",
             replicas, MAX_REPLICAS
-        )));
-    }
-
-    Ok(())
-}
-
-/// Validate PostgreSQL version
-fn validate_version(version: &str) -> Result<()> {
-    // Parse major version
-    let major_version: u32 = version
-        .split('.')
-        .next()
-        .and_then(|v| v.parse().ok())
-        .ok_or_else(|| Error::ValidationError(format!("invalid version format: {}", version)))?;
-
-    // Supported versions (10-17 as of 2024)
-    if !(10..=17).contains(&major_version) {
-        return Err(Error::ValidationError(format!(
-            "PostgreSQL version {} is not supported (10-17)",
-            version
         )));
     }
 
@@ -232,12 +212,6 @@ mod tests {
         assert_eq!(MAX_REPLICAS, 100);
     }
 
-    #[test]
-    fn test_validate_version() {
-        assert!(validate_version("15").is_ok());
-        assert!(validate_version("16").is_ok());
-        assert!(validate_version("16.1").is_ok());
-        assert!(validate_version("9").is_err());
-        assert!(validate_version("invalid").is_err());
-    }
+    // Note: PostgreSQL version validation is now handled by the CRD enum (PostgresVersion)
+    // The enum only allows valid versions: "15", "16", "17"
 }

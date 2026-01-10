@@ -4,7 +4,7 @@
 //! All PostgreSQL clusters use Patroni for consistent management.
 
 use postgres_operator::crd::{
-    PgBouncerSpec, PostgresCluster, PostgresClusterSpec, StorageSpec, TLSSpec,
+    PgBouncerSpec, PostgresCluster, PostgresClusterSpec, PostgresVersion, StorageSpec, TLSSpec,
 };
 use postgres_operator::resources::{patroni, pdb, pgbouncer, secret, service};
 
@@ -19,7 +19,7 @@ fn create_test_cluster(name: &str, namespace: &str, replicas: i32) -> PostgresCl
             ..Default::default()
         },
         spec: PostgresClusterSpec {
-            version: "16".to_string(),
+            version: PostgresVersion::V16,
             replicas,
             storage: StorageSpec {
                 storage_class: Some("standard".to_string()),
@@ -1258,7 +1258,7 @@ mod production_configuration_tests {
 
     fn create_production_cluster() -> PostgresCluster {
         let mut cluster = create_test_cluster("production-db", "databases", 3);
-        cluster.spec.version = "16".to_string();
+        cluster.spec.version = PostgresVersion::V16;
         cluster.spec.storage.size = "100Gi".to_string();
         cluster.spec.storage.storage_class = Some("fast-ssd".to_string());
 

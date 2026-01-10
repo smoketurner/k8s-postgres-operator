@@ -2,6 +2,60 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt;
+
+/// Supported PostgreSQL versions (must match available Spilo images)
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub enum PostgresVersion {
+    #[serde(rename = "15")]
+    V15,
+    #[serde(rename = "16")]
+    V16,
+    #[serde(rename = "17")]
+    V17,
+}
+
+impl fmt::Display for PostgresVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PostgresVersion::V15 => write!(f, "15"),
+            PostgresVersion::V16 => write!(f, "16"),
+            PostgresVersion::V17 => write!(f, "17"),
+        }
+    }
+}
+
+impl PostgresVersion {
+    /// Returns the major version number as a string
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PostgresVersion::V15 => "15",
+            PostgresVersion::V16 => "16",
+            PostgresVersion::V17 => "17",
+        }
+    }
+
+    /// Returns the Spilo image tag for this PostgreSQL version
+    /// Updated tags available at: https://github.com/zalando/spilo/pkgs/container/
+    pub fn spilo_tag(&self) -> &'static str {
+        match self {
+            PostgresVersion::V15 => "3.2-p2", // spilo-15 latest
+            PostgresVersion::V16 => "3.3-p3", // spilo-16 latest
+            PostgresVersion::V17 => "4.0-p3", // spilo-17 latest
+        }
+    }
+
+    /// Returns the full Spilo image name for this PostgreSQL version
+    /// Spilo images are named: ghcr.io/zalando/spilo-{major_version}:{tag}
+    /// Check https://github.com/orgs/zalando/packages?repo_name=spilo for available versions
+    pub fn spilo_image(&self) -> String {
+        format!(
+            "ghcr.io/zalando/spilo-{}:{}",
+            self.as_str(),
+            self.spilo_tag()
+        )
+    }
+}
 
 /// PostgresCluster is the Schema for the postgresclusters API
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
@@ -21,8 +75,8 @@ use std::collections::BTreeMap;
 )]
 #[serde(rename_all = "camelCase")]
 pub struct PostgresClusterSpec {
-    /// PostgreSQL version (e.g., "15", "16")
-    pub version: String,
+    /// PostgreSQL version - must be a version supported by Spilo
+    pub version: PostgresVersion,
 
     /// Number of replicas (total Patroni members)
     /// - 1 = single server (still managed by Patroni)

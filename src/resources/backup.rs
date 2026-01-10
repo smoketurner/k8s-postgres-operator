@@ -43,9 +43,7 @@ use k8s_openapi::api::core::v1::{
     EnvVar, EnvVarSource, KeyToPath, SecretKeySelector, SecretVolumeSource, Volume, VolumeMount,
 };
 
-use crate::crd::{
-    BackupDestination, EncryptionMethod, PostgresCluster, RecoveryTarget, RestoreSource,
-};
+use crate::crd::{BackupDestination, EncryptionMethod, PostgresCluster, RecoveryTarget, RestoreSource};
 
 /// GCS credentials mount path inside the container
 const GCS_CREDENTIALS_PATH: &str = "/var/secrets/google";
@@ -885,7 +883,7 @@ mod tests {
     use super::*;
     use crate::crd::{
         BackupDestination, BackupSpec, CompressionMethod, EncryptionMethod, EncryptionSpec,
-        PostgresCluster, PostgresClusterSpec, RetentionPolicy, StorageSpec,
+        PostgresCluster, PostgresClusterSpec, PostgresVersion, RetentionPolicy, StorageSpec,
     };
     use kube::core::ObjectMeta;
 
@@ -897,7 +895,7 @@ mod tests {
                 ..Default::default()
             },
             spec: PostgresClusterSpec {
-                version: "16".to_string(),
+                version: PostgresVersion::V16,
                 replicas: 3,
                 storage: StorageSpec {
                     size: "10Gi".to_string(),

@@ -14,7 +14,7 @@ use postgres_operator::controller::state_machine::{
 use postgres_operator::controller::validation::{validate_spec, validate_version_upgrade};
 use postgres_operator::crd::{
     ClusterPhase, PgBouncerSpec, PostgresCluster, PostgresClusterSpec, PostgresClusterStatus,
-    ResourceList, ResourceRequirements, StorageSpec, TLSSpec,
+    PostgresVersion, ResourceList, ResourceRequirements, StorageSpec, TLSSpec,
 };
 use postgres_operator::resources::{patroni, pdb, secret, service};
 
@@ -22,34 +22,17 @@ use postgres_operator::resources::{patroni, pdb, secret, service};
 // Strategy generators for PostgreSQL cluster specs
 // =============================================================================
 
-/// Generate a valid PostgreSQL version (10-17)
-fn valid_version() -> impl Strategy<Value = String> {
+/// Generate a valid PostgreSQL version (15, 16, 17 - supported by Spilo)
+fn valid_version() -> impl Strategy<Value = PostgresVersion> {
     prop_oneof![
-        Just("10".to_string()),
-        Just("11".to_string()),
-        Just("12".to_string()),
-        Just("13".to_string()),
-        Just("14".to_string()),
-        Just("15".to_string()),
-        Just("16".to_string()),
-        Just("17".to_string()),
+        Just(PostgresVersion::V15),
+        Just(PostgresVersion::V16),
+        Just(PostgresVersion::V17),
     ]
 }
 
-/// Generate an invalid PostgreSQL version
-fn invalid_version() -> impl Strategy<Value = String> {
-    prop_oneof![
-        Just("".to_string()),
-        Just("8".to_string()),
-        Just("9".to_string()),
-        Just("18".to_string()),
-        Just("99".to_string()),
-        Just("invalid".to_string()),
-        Just("not-a-number".to_string()),
-        Just(" 16 ".to_string()),
-        // Note: "16." and ".16" may be leniently parsed as "16" by some validators
-    ]
-}
+// Note: Invalid version tests are no longer needed as PostgresVersion enum
+// enforces valid values at the CRD level
 
 /// Generate a valid replica count (1-100)
 fn valid_replicas() -> impl Strategy<Value = i32> {
@@ -347,35 +330,15 @@ proptest! {
         prop_assert!(result.is_ok());
     }
 
-    /// Property: Invalid versions are always rejected
-    #[test]
-    fn prop_invalid_version_rejected(version in invalid_version()) {
-        let spec = PostgresClusterSpec {
-            version,
-            replicas: 1,
-            storage: StorageSpec {
-                size: "10Gi".to_string(),
-                storage_class: None,
-            },
-            resources: None,
-            postgresql_params: Default::default(),
-            backup: None,
-            pgbouncer: None,
-            tls: None,
-            metrics: None,
-            service: None,
-            restore: None,
-        };
-        let cluster = cluster_from_spec(spec);
-        let result = validate_spec(&cluster);
-        prop_assert!(result.is_err(), "Invalid version should be rejected: {}", cluster.spec.version);
-    }
+    // Note: Invalid version tests are no longer needed because PostgresVersion enum
+    // enforces valid values (15, 16, 17) at the CRD level. Invalid values cannot
+    // be constructed at runtime.
 
     /// Property: Invalid replica counts are always rejected
     #[test]
     fn prop_invalid_replicas_rejected(replicas in invalid_replicas()) {
         let spec = PostgresClusterSpec {
-            version: "16".to_string(),
+            version: PostgresVersion::V16,
             replicas,
             storage: StorageSpec {
                 size: "10Gi".to_string(),
@@ -399,7 +362,7 @@ proptest! {
     #[test]
     fn prop_invalid_storage_rejected(size in invalid_storage_size()) {
         let spec = PostgresClusterSpec {
-            version: "16".to_string(),
+            version: PostgresVersion::V16,
             replicas: 1,
             storage: StorageSpec {
                 size,
@@ -474,7 +437,7 @@ proptest! {
     #[test]
     fn prop_pdb_min_available_correct(replicas in 1..=20i32) {
         let spec = PostgresClusterSpec {
-            version: "16".to_string(),
+            version: PostgresVersion::V16,
             replicas,
             storage: StorageSpec {
                 size: "10Gi".to_string(),
@@ -510,7 +473,7 @@ proptest! {
     #[test]
     fn prop_statefulset_replicas_match(replicas in 1..=50i32) {
         let spec = PostgresClusterSpec {
-            version: "16".to_string(),
+            version: PostgresVersion::V16,
             replicas,
             storage: StorageSpec {
                 size: "10Gi".to_string(),
@@ -547,7 +510,7 @@ mod edge_case_tests {
     #[test]
     fn test_cluster_with_all_optional_fields_none() {
         let spec = PostgresClusterSpec {
-            version: "16".to_string(),
+            version: PostgresVersion::V16,
             replicas: 1,
             storage: StorageSpec {
                 size: "10Gi".to_string(),
@@ -579,7 +542,7 @@ mod edge_case_tests {
     #[test]
     fn test_cluster_with_status() {
         let mut cluster = cluster_from_spec(PostgresClusterSpec {
-            version: "16".to_string(),
+            version: PostgresVersion::V16,
             replicas: 3,
             storage: StorageSpec {
                 size: "10Gi".to_string(),

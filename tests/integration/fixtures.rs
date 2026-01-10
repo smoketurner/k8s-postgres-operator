@@ -9,7 +9,8 @@
 use kube::core::ObjectMeta;
 use postgres_operator::crd::{
     ExternalTrafficPolicy, MetricsSpec, PgBouncerSpec, PostgresCluster, PostgresClusterSpec,
-    ResourceList, ResourceRequirements, ServiceSpec, ServiceType, StorageSpec, TLSSpec,
+    PostgresVersion, ResourceList, ResourceRequirements, ServiceSpec, ServiceType, StorageSpec,
+    TLSSpec,
 };
 use std::collections::BTreeMap;
 
@@ -17,7 +18,7 @@ use std::collections::BTreeMap;
 pub struct PostgresClusterBuilder {
     name: String,
     namespace: String,
-    version: String,
+    version: PostgresVersion,
     replicas: i32,
     storage_size: String,
     storage_class: Option<String>,
@@ -35,7 +36,7 @@ impl PostgresClusterBuilder {
         Self {
             name: name.to_string(),
             namespace: namespace.to_string(),
-            version: "16".to_string(),
+            version: PostgresVersion::V16,
             replicas: 1,
             storage_size: "1Gi".to_string(),
             storage_class: None,
@@ -59,8 +60,8 @@ impl PostgresClusterBuilder {
     }
 
     /// Set the PostgreSQL version
-    pub fn with_version(mut self, version: &str) -> Self {
-        self.version = version.to_string();
+    pub fn with_version(mut self, version: PostgresVersion) -> Self {
+        self.version = version;
         self
     }
 
@@ -369,7 +370,7 @@ pub fn with_replicas(name: &str, namespace: &str, replicas: i32) -> PostgresClus
 /// Create a minimal single-replica PostgresCluster
 pub fn minimal_single(name: &str, namespace: &str) -> PostgresCluster {
     PostgresClusterBuilder::single(name, namespace)
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build()
 }
@@ -377,17 +378,13 @@ pub fn minimal_single(name: &str, namespace: &str) -> PostgresCluster {
 /// Create a minimal HA PostgresCluster (3 replicas)
 pub fn minimal_ha(name: &str, namespace: &str) -> PostgresCluster {
     PostgresClusterBuilder::ha(name, namespace)
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build()
 }
 
-/// Create a PostgresCluster with an invalid version (for error testing)
-pub fn invalid_version(name: &str, namespace: &str) -> PostgresCluster {
-    PostgresClusterBuilder::single(name, namespace)
-        .with_version("invalid-99.99")
-        .build()
-}
+// Note: invalid_version() function removed - PostgresVersion enum now enforces
+// valid values (15, 16, 17) at the CRD level. Invalid versions cannot be constructed.
 
 /// Create a PostgresCluster with a non-existent storage class (for error testing)
 pub fn invalid_storage_class(name: &str, namespace: &str) -> PostgresCluster {

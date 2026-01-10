@@ -30,6 +30,7 @@ use crate::{
     PostgresClusterBuilder, ScopedOperator, SharedTestCluster, TestNamespace, ensure_crd_installed,
     ensure_operator_running,
 };
+use postgres_operator::crd::PostgresVersion;
 
 /// Short timeout - we're testing operator logic, not pod readiness
 const FAST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -141,7 +142,7 @@ async fn test_single_creates_resources() {
         .expect("create ns");
 
     let pg = PostgresClusterBuilder::single("test-sa", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -218,7 +219,7 @@ async fn test_finalizer_added() {
         .expect("create ns");
 
     let pg = PostgresClusterBuilder::single("test-fin", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -251,7 +252,7 @@ async fn test_owner_references() {
         .expect("create ns");
 
     let pg = PostgresClusterBuilder::single("test-own", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -317,7 +318,7 @@ async fn test_status_observed_generation() {
         .expect("create ns");
 
     let pg = PostgresClusterBuilder::single("test-gen", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -363,7 +364,7 @@ async fn test_ha_creates_patroni_resources() {
 
     let pg = PostgresClusterBuilder::new("test-ha", ns.name())
         .with_replicas(3)
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -423,7 +424,7 @@ async fn test_scale_updates_statefulset() {
     // Start with 2 replicas
     let pg = PostgresClusterBuilder::new("test-scale", ns.name())
         .with_replicas(2)
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -498,7 +499,7 @@ async fn test_config_change_updates_configmap() {
         .expect("create ns");
 
     let pg = PostgresClusterBuilder::single("test-cfg", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -596,7 +597,7 @@ async fn test_deletion_removes_finalizer() {
         .expect("create ns");
 
     let pg = PostgresClusterBuilder::single("test-del", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -650,7 +651,7 @@ async fn test_invalid_storage_class_still_creates_resources() {
         .expect("create ns");
 
     let pg = PostgresClusterBuilder::single("test-bad", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", Some("nonexistent-storage-class"))
         .build();
 
@@ -701,15 +702,15 @@ async fn test_multiple_clusters_same_namespace() {
 
     // Create 3 clusters concurrently
     let pg1 = PostgresClusterBuilder::single("test-m1", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
     let pg2 = PostgresClusterBuilder::single("test-m2", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
     let pg3 = PostgresClusterBuilder::single("test-m3", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -765,7 +766,7 @@ async fn test_deletion_during_creation() {
         .expect("create ns");
 
     let pg = PostgresClusterBuilder::single("test-dc", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -821,7 +822,7 @@ async fn test_rapid_spec_updates() {
 
     let pg = PostgresClusterBuilder::new("test-rapid", ns.name())
         .with_replicas(1)
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -896,7 +897,7 @@ async fn test_concurrent_cluster_deletion() {
     // Create 3 clusters
     for i in 1..=3 {
         let pg = PostgresClusterBuilder::single(&format!("test-cd{}", i), ns.name())
-            .with_version("16")
+            .with_version(PostgresVersion::V16)
             .with_storage("1Gi", None)
             .build();
         api.create(&PostParams::default(), &pg)

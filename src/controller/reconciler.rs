@@ -397,7 +397,7 @@ async fn check_and_update_status(
                 cluster.spec.replicas,
                 primary_pod,
                 replica_pods,
-                &cluster.spec.version,
+                cluster.spec.version.as_str(),
                 collected_backup_status,
             )
             .await?;
@@ -450,7 +450,7 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
         && let Some(current_version) = &status.current_version
         && let Err(e) = crate::controller::validation::validate_version_upgrade(
             current_version,
-            &cluster.spec.version,
+            cluster.spec.version.as_str(),
         )
     {
         warn!("Version change rejected for {}: {}", name, e);
@@ -819,7 +819,7 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
                             cluster.spec.replicas,
                             primary_pod,
                             replica_pods,
-                            &cluster.spec.version,
+                            cluster.spec.version.as_str(),
                         )
                         .await?;
                 }
@@ -874,7 +874,7 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
                             cluster.spec.replicas,
                             primary_pod,
                             replica_pods,
-                            &cluster.spec.version,
+                            cluster.spec.version.as_str(),
                         )
                         .await?;
                 }
@@ -1103,8 +1103,14 @@ async fn handle_deletion(cluster: &PostgresCluster, ctx: &Context, ns: &str) -> 
     // Delete Patroni DCS endpoints that are created by Patroni at runtime
     // These are NOT owned by the PostgresCluster and won't be garbage collected
     // If left behind, they cause new clusters with the same name to get stuck
+    //
+    // Patroni creates these endpoints for its Kubernetes DCS backend:
+    // - <scope>        : Primary endpoint for leader election
+    // - <scope>-config : Stores cluster configuration
+    // - <scope>-leader : Stores the leader key
+    // - <scope>-sync   : For synchronous replication coordination
     let endpoints_api: Api<Endpoints> = Api::namespaced(ctx.client.clone(), ns);
-    for suffix in ["", "-config", "-sync"] {
+    for suffix in ["", "-config", "-leader", "-sync"] {
         let endpoint_name = if suffix.is_empty() {
             name.clone()
         } else {

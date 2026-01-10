@@ -21,6 +21,7 @@ use crate::{
     PostgresClusterBuilder, ScopedOperator, SharedTestCluster, TestNamespace, ensure_crd_installed,
     ensure_operator_running, has_primary_pod, has_ready_replicas, is_phase,
 };
+use postgres_operator::crd::PostgresVersion;
 
 /// Timeout for slow tests - 5 minutes to allow for image pull and startup
 const SLOW_TIMEOUT: Duration = Duration::from_secs(300);
@@ -99,7 +100,7 @@ async fn test_single_reaches_running_phase() {
         .expect("create ns");
 
     let pg = PostgresClusterBuilder::single("test-slow-run", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -158,7 +159,7 @@ async fn test_single_has_ready_replica() {
         .expect("create ns");
 
     let pg = PostgresClusterBuilder::single("test-slow-rdy", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -196,7 +197,7 @@ async fn test_ha_reaches_running_phase() {
         .expect("create ns");
 
     let pg = PostgresClusterBuilder::ha("test-slow-ha", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -239,7 +240,7 @@ async fn test_ha_has_ready_replicas() {
         .expect("create ns");
 
     let pg = PostgresClusterBuilder::ha("test-ha-rdy", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -276,7 +277,7 @@ async fn test_ha_elects_primary() {
         .expect("create ns");
 
     let pg = PostgresClusterBuilder::ha("test-ha-pri", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -322,7 +323,7 @@ async fn test_scaling_updates_ready_replicas() {
 
     // Start with 1 replica
     let pg = PostgresClusterBuilder::single("test-scale", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -381,7 +382,7 @@ async fn test_scale_down_3_to_1() {
 
     // Start with 3 replicas
     let pg = PostgresClusterBuilder::ha("test-sd", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -453,7 +454,7 @@ async fn test_scale_up_1_to_5() {
         .expect("create ns");
 
     let pg = PostgresClusterBuilder::single("test-su5", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -509,7 +510,7 @@ async fn test_primary_pod_deletion_triggers_failover() {
         .expect("create ns");
 
     let pg = PostgresClusterBuilder::ha("test-fo", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -584,7 +585,7 @@ async fn test_replica_pod_deletion_recovery() {
         .expect("create ns");
 
     let pg = PostgresClusterBuilder::ha("test-rd", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -668,7 +669,7 @@ async fn test_degraded_to_running_transition() {
         .expect("create ns");
 
     let pg = PostgresClusterBuilder::ha("test-deg", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -754,7 +755,7 @@ async fn test_version_upgrade_rolling_update() {
 
     // Start with version 15
     let pg = PostgresClusterBuilder::single("test-upg", ns.name())
-        .with_version("15")
+        .with_version(PostgresVersion::V15)
         .with_storage("1Gi", None)
         .build();
 
@@ -830,7 +831,7 @@ async fn test_enable_tls_on_running_cluster() {
 
     // Create cluster without TLS
     let pg = PostgresClusterBuilder::single("test-tls-en", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -947,7 +948,7 @@ async fn test_disable_tls_on_running_cluster() {
 
     // Create cluster with TLS enabled
     let pg = PostgresClusterBuilder::single("test-tls-dis", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .with_tls("test-tls-secret")
         .build();
@@ -1020,7 +1021,7 @@ async fn test_enable_pgbouncer_on_running_cluster() {
 
     // Create cluster without PgBouncer
     let pg = PostgresClusterBuilder::ha("test-pb-en", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -1104,7 +1105,7 @@ async fn test_disable_pgbouncer_on_running_cluster() {
 
     // Create cluster with PgBouncer
     let pg = PostgresClusterBuilder::ha("test-pb-dis", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .with_pgbouncer()
         .build();
@@ -1190,7 +1191,7 @@ async fn test_change_pgbouncer_pool_mode() {
 
     // Create cluster with PgBouncer in transaction mode
     let pg = PostgresClusterBuilder::ha("test-pb-mode", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .with_pgbouncer_mode("transaction")
         .build();
@@ -1286,7 +1287,7 @@ async fn test_enable_replica_pooler() {
 
     // Create cluster with PgBouncer but without replica pooler
     let pg = PostgresClusterBuilder::ha("test-rp", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .with_pgbouncer()
         .build();
@@ -1380,7 +1381,7 @@ async fn test_enable_metrics_on_running_cluster() {
 
     // Create cluster without metrics
     let pg = PostgresClusterBuilder::single("test-metrics", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 
@@ -1461,7 +1462,7 @@ async fn test_enable_tls_and_pgbouncer_together() {
 
     // Create cluster without TLS or PgBouncer
     let pg = PostgresClusterBuilder::ha("test-combo", ns.name())
-        .with_version("16")
+        .with_version(PostgresVersion::V16)
         .with_storage("1Gi", None)
         .build();
 

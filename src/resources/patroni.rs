@@ -42,25 +42,6 @@ const DEFAULT_POSTGRESQL_PARAMS: &[(&str, &str)] = &[
     ("hot_standby_feedback", "on"),
 ];
 
-/// Get the Spilo image for a given PostgreSQL version
-/// Spilo images are named: ghcr.io/zalando/spilo-{major_version}:{tag}
-/// Different PostgreSQL versions have different available Spilo tags
-/// Check https://github.com/orgs/zalando/packages?repo_name=spilo for available versions
-fn get_spilo_image(version: &str) -> String {
-    // Extract major version (e.g., "16" from "16.1" or just "16")
-    let major_version = version.split('.').next().unwrap_or("16");
-
-    // Map PostgreSQL major versions to their Spilo image tags
-    // Updated tags available at: https://github.com/zalando/spilo/pkgs/container/
-    let tag = match major_version {
-        "17" => "4.0-p3", // spilo-17 latest
-        "16" => "3.3-p3", // spilo-16 latest
-        "15" => "3.2-p2", // spilo-15 latest (from https://github.com/zalando/spilo/pkgs/container/spilo-15)
-        _ => "3.3-p3",    // Fallback to PostgreSQL 16 tag
-    };
-
-    format!("ghcr.io/zalando/spilo-{}:{}", major_version, tag)
-}
 
 /// Generate the Patroni configuration as a ConfigMap
 ///
@@ -384,7 +365,7 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
     let replicas = cluster.spec.replicas;
 
     // Use Spilo image (Zalando's PostgreSQL + Patroni) based on requested version
-    let image = get_spilo_image(&cluster.spec.version);
+    let image = cluster.spec.version.spilo_image();
     let secret_name = format!("{}-credentials", name);
     let sa_name = format!("{}-patroni", name);
 
