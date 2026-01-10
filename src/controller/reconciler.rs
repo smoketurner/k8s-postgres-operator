@@ -320,32 +320,31 @@ async fn check_and_update_status(
     let transition_ctx = TransitionContext::new(ready_replicas, cluster.spec.replicas);
 
     // Collect backup status if backups are enabled and cluster is running
-    let collected_backup_status = if current_phase == ClusterPhase::Running
-        && backup::is_backup_enabled(cluster)
-    {
-        let collector = BackupStatusCollector::new(ctx.client.clone(), ns, &name);
-        match collector.collect(cluster).await {
-            Ok(backup_status) => {
-                debug!(
-                    cluster = %name,
-                    backup_count = ?backup_status.backup_count,
-                    wal_healthy = ?backup_status.wal_archiving_healthy,
-                    "Collected backup status"
-                );
-                Some(backup_status)
+    let collected_backup_status =
+        if current_phase == ClusterPhase::Running && backup::is_backup_enabled(cluster) {
+            let collector = BackupStatusCollector::new(ctx.client.clone(), ns, &name);
+            match collector.collect(cluster).await {
+                Ok(backup_status) => {
+                    debug!(
+                        cluster = %name,
+                        backup_count = ?backup_status.backup_count,
+                        wal_healthy = ?backup_status.wal_archiving_healthy,
+                        "Collected backup status"
+                    );
+                    Some(backup_status)
+                }
+                Err(e) => {
+                    debug!(
+                        cluster = %name,
+                        error = %e,
+                        "Failed to collect backup status (non-fatal)"
+                    );
+                    None
+                }
             }
-            Err(e) => {
-                debug!(
-                    cluster = %name,
-                    error = %e,
-                    "Failed to collect backup status (non-fatal)"
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     // Check if cluster has become degraded while running
     if current_phase == ClusterPhase::Running && transition_ctx.is_degraded() {
@@ -516,7 +515,11 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
         // Validate credentials secret exists
         let credentials_secret_name = backup_spec.credentials_secret_name();
         let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
-        if secrets_api.get_opt(credentials_secret_name).await?.is_none() {
+        if secrets_api
+            .get_opt(credentials_secret_name)
+            .await?
+            .is_none()
+        {
             let destination_type = backup_spec.destination.destination_type();
             warn!(
                 "Backup credentials secret '{}' not found for {} destination on cluster {}",
@@ -546,56 +549,57 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
 
         // Validate encryption key secret if encryption is enabled
         if let Some(ref encryption) = backup_spec.encryption
-            && encryption.enabled {
-                if let Some(ref key_secret_name) = encryption.key_secret {
-                    if secrets_api.get_opt(key_secret_name).await?.is_none() {
-                        warn!(
-                            "Backup encryption key secret '{}' not found for cluster {}",
-                            key_secret_name, name
-                        );
-                        status_manager
-                            .set_failed(
-                                "EncryptionKeyNotFound",
-                                &format!(
-                                    "Backup encryption key secret '{}' not found",
-                                    key_secret_name
-                                ),
-                            )
-                            .await?;
-                        ctx.publish_warning_event(
-                            cluster,
-                            "EncryptionKeyNotFound",
-                            "Validation",
-                            Some(format!(
-                                "Backup encryption key secret '{}' not found",
-                                key_secret_name
-                            )),
-                        )
-                        .await;
-                        return Ok(Action::requeue(Duration::from_secs(30)));
-                    }
-                } else {
-                    // Encryption enabled but no key secret specified
+            && encryption.enabled
+        {
+            if let Some(ref key_secret_name) = encryption.key_secret {
+                if secrets_api.get_opt(key_secret_name).await?.is_none() {
                     warn!(
-                        "Backup encryption enabled but no key secret specified for cluster {}",
-                        name
+                        "Backup encryption key secret '{}' not found for cluster {}",
+                        key_secret_name, name
                     );
                     status_manager
                         .set_failed(
-                            "EncryptionKeyNotSpecified",
-                            "Backup encryption is enabled but no key secret is specified",
+                            "EncryptionKeyNotFound",
+                            &format!(
+                                "Backup encryption key secret '{}' not found",
+                                key_secret_name
+                            ),
                         )
                         .await?;
                     ctx.publish_warning_event(
                         cluster,
-                        "EncryptionKeyNotSpecified",
+                        "EncryptionKeyNotFound",
                         "Validation",
-                        Some("Backup encryption is enabled but no key secret is specified".to_string()),
+                        Some(format!(
+                            "Backup encryption key secret '{}' not found",
+                            key_secret_name
+                        )),
                     )
                     .await;
                     return Ok(Action::requeue(Duration::from_secs(30)));
                 }
+            } else {
+                // Encryption enabled but no key secret specified
+                warn!(
+                    "Backup encryption enabled but no key secret specified for cluster {}",
+                    name
+                );
+                status_manager
+                    .set_failed(
+                        "EncryptionKeyNotSpecified",
+                        "Backup encryption is enabled but no key secret is specified",
+                    )
+                    .await?;
+                ctx.publish_warning_event(
+                    cluster,
+                    "EncryptionKeyNotSpecified",
+                    "Validation",
+                    Some("Backup encryption is enabled but no key secret is specified".to_string()),
+                )
+                .await;
+                return Ok(Action::requeue(Duration::from_secs(30)));
             }
+        }
 
         info!(
             "Backup configured for cluster {}: {} destination, schedule '{}'",

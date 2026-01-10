@@ -524,12 +524,7 @@ impl<'a> StatusManager<'a> {
         // If backup is configured in spec, generate initial status if not present
         if let Some(ref backup_spec) = self.cluster.spec.backup {
             // Try to preserve existing backup status
-            if let Some(existing) = self
-                .cluster
-                .status
-                .as_ref()
-                .and_then(|s| s.backup.clone())
-            {
+            if let Some(existing) = self.cluster.status.as_ref().and_then(|s| s.backup.clone()) {
                 return Some(existing);
             }
 

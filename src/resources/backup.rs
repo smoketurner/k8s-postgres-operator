@@ -91,11 +91,7 @@ pub fn generate_backup_env_vars(cluster: &PostgresCluster) -> Vec<EnvVar> {
         .name
         .as_deref()
         .unwrap_or("postgres-cluster");
-    let namespace = cluster
-        .metadata
-        .namespace
-        .as_deref()
-        .unwrap_or("default");
+    let namespace = cluster.metadata.namespace.as_deref().unwrap_or("default");
 
     let mut env_vars = Vec::new();
 
@@ -163,13 +159,14 @@ pub fn generate_backup_env_vars(cluster: &PostgresCluster) -> Vec<EnvVar> {
     // WAL restore timeout
     if let Some(ref wal_archiving) = backup.wal_archiving
         && let Some(timeout) = wal_archiving.restore_timeout
-            && timeout > 0 {
-                env_vars.push(EnvVar {
-                    name: "WAL_RESTORE_TIMEOUT".to_string(),
-                    value: Some(format!("{}s", timeout)),
-                    ..Default::default()
-                });
-            }
+        && timeout > 0
+    {
+        env_vars.push(EnvVar {
+            name: "WAL_RESTORE_TIMEOUT".to_string(),
+            value: Some(format!("{}s", timeout)),
+            ..Default::default()
+        });
+    }
 
     // Retention settings via WAL-G
     // Spilo handles retention via BACKUP_NUM_TO_RETAIN
@@ -193,13 +190,14 @@ pub fn generate_backup_env_vars(cluster: &PostgresCluster) -> Vec<EnvVar> {
     // For time-based cleanup, users can run `wal-g delete retain FULL <count> --confirm`
     // or use WALG_BACKUP_RETENTION_DAYS with custom scripts
     if let Some(ref max_age) = backup.retention.max_age
-        && let Some(days) = parse_duration_to_days(max_age) {
-            env_vars.push(EnvVar {
-                name: "WALG_BACKUP_RETENTION_DAYS".to_string(),
-                value: Some(days.to_string()),
-                ..Default::default()
-            });
-        }
+        && let Some(days) = parse_duration_to_days(max_age)
+    {
+        env_vars.push(EnvVar {
+            name: "WALG_BACKUP_RETENTION_DAYS".to_string(),
+            value: Some(days.to_string()),
+            ..Default::default()
+        });
+    }
 
     // Destination-specific configuration
     match &backup.destination {
@@ -249,9 +247,19 @@ pub fn generate_backup_env_vars(cluster: &PostgresCluster) -> Vec<EnvVar> {
                 });
                 env_vars.push(EnvVar {
                     name: "WALE_S3_ENDPOINT".to_string(),
-                    value: Some(format!("{}+path://{}:{}",
-                        if endpoint_url.starts_with("https") { "https" } else { "http" },
-                        endpoint_url.trim_start_matches("https://").trim_start_matches("http://").split(':').next().unwrap_or("localhost"),
+                    value: Some(format!(
+                        "{}+path://{}:{}",
+                        if endpoint_url.starts_with("https") {
+                            "https"
+                        } else {
+                            "http"
+                        },
+                        endpoint_url
+                            .trim_start_matches("https://")
+                            .trim_start_matches("http://")
+                            .split(':')
+                            .next()
+                            .unwrap_or("localhost"),
                         endpoint_url.split(':').nth(2).unwrap_or("9000")
                     )),
                     ..Default::default()
@@ -481,27 +489,28 @@ pub fn generate_backup_env_vars(cluster: &PostgresCluster) -> Vec<EnvVar> {
 
     // Encryption configuration
     if let Some(ref encryption) = backup.encryption
-        && encryption.enabled {
-            let method = encryption.method.as_ref().cloned().unwrap_or_default();
-            match method {
-                EncryptionMethod::Aes256 => {
-                    // libsodium key path
-                    env_vars.push(EnvVar {
-                        name: "WALG_LIBSODIUM_KEY_PATH".to_string(),
-                        value: Some(format!("{}/encryption-key", ENCRYPTION_KEY_PATH)),
-                        ..Default::default()
-                    });
-                }
-                EncryptionMethod::Pgp => {
-                    // PGP key path
-                    env_vars.push(EnvVar {
-                        name: "WALG_PGP_KEY_PATH".to_string(),
-                        value: Some(format!("{}/pgp-key", ENCRYPTION_KEY_PATH)),
-                        ..Default::default()
-                    });
-                }
+        && encryption.enabled
+    {
+        let method = encryption.method.as_ref().cloned().unwrap_or_default();
+        match method {
+            EncryptionMethod::Aes256 => {
+                // libsodium key path
+                env_vars.push(EnvVar {
+                    name: "WALG_LIBSODIUM_KEY_PATH".to_string(),
+                    value: Some(format!("{}/encryption-key", ENCRYPTION_KEY_PATH)),
+                    ..Default::default()
+                });
+            }
+            EncryptionMethod::Pgp => {
+                // PGP key path
+                env_vars.push(EnvVar {
+                    name: "WALG_PGP_KEY_PATH".to_string(),
+                    value: Some(format!("{}/pgp-key", ENCRYPTION_KEY_PATH)),
+                    ..Default::default()
+                });
             }
         }
+    }
 
     env_vars
 }
@@ -542,27 +551,28 @@ pub fn generate_backup_volumes(cluster: &PostgresCluster) -> Vec<Volume> {
     // Encryption key volume
     if let Some(ref encryption) = backup.encryption
         && encryption.enabled
-            && let Some(ref key_secret) = encryption.key_secret {
-                let key_name = match encryption.method.as_ref().cloned().unwrap_or_default() {
-                    EncryptionMethod::Aes256 => "encryption-key",
-                    EncryptionMethod::Pgp => "pgp-key",
-                };
+        && let Some(ref key_secret) = encryption.key_secret
+    {
+        let key_name = match encryption.method.as_ref().cloned().unwrap_or_default() {
+            EncryptionMethod::Aes256 => "encryption-key",
+            EncryptionMethod::Pgp => "pgp-key",
+        };
 
-                volumes.push(Volume {
-                    name: "backup-encryption-key".to_string(),
-                    secret: Some(SecretVolumeSource {
-                        secret_name: Some(key_secret.clone()),
-                        items: Some(vec![KeyToPath {
-                            key: key_name.to_string(),
-                            path: key_name.to_string(),
-                            mode: Some(0o400),
-                        }]),
-                        default_mode: Some(0o400),
-                        optional: Some(false),
-                    }),
-                    ..Default::default()
-                });
-            }
+        volumes.push(Volume {
+            name: "backup-encryption-key".to_string(),
+            secret: Some(SecretVolumeSource {
+                secret_name: Some(key_secret.clone()),
+                items: Some(vec![KeyToPath {
+                    key: key_name.to_string(),
+                    path: key_name.to_string(),
+                    mode: Some(0o400),
+                }]),
+                default_mode: Some(0o400),
+                optional: Some(false),
+            }),
+            ..Default::default()
+        });
+    }
 
     volumes
 }
@@ -587,14 +597,16 @@ pub fn generate_backup_volume_mounts(cluster: &PostgresCluster) -> Vec<VolumeMou
 
     // Encryption key mount
     if let Some(ref encryption) = backup.encryption
-        && encryption.enabled && encryption.key_secret.is_some() {
-            mounts.push(VolumeMount {
-                name: "backup-encryption-key".to_string(),
-                mount_path: ENCRYPTION_KEY_PATH.to_string(),
-                read_only: Some(true),
-                ..Default::default()
-            });
-        }
+        && encryption.enabled
+        && encryption.key_secret.is_some()
+    {
+        mounts.push(VolumeMount {
+            name: "backup-encryption-key".to_string(),
+            mount_path: ENCRYPTION_KEY_PATH.to_string(),
+            read_only: Some(true),
+            ..Default::default()
+        });
+    }
 
     mounts
 }
@@ -741,9 +753,11 @@ mod tests {
         let env_vars = generate_backup_env_vars(&cluster);
 
         assert!(env_vars.iter().any(|e| e.name == "WALG_GS_PREFIX"));
-        assert!(env_vars
-            .iter()
-            .any(|e| e.name == "GOOGLE_APPLICATION_CREDENTIALS"));
+        assert!(
+            env_vars
+                .iter()
+                .any(|e| e.name == "GOOGLE_APPLICATION_CREDENTIALS")
+        );
 
         // Check custom path
         let prefix_var = env_vars
@@ -800,14 +814,14 @@ mod tests {
 
         assert!(env_vars.iter().any(|e| e.name == "WALG_AZ_PREFIX"));
         assert!(env_vars.iter().any(|e| e.name == "AZURE_STORAGE_ACCOUNT"));
-        assert!(env_vars
-            .iter()
-            .any(|e| e.name == "AZURE_ENVIRONMENT_NAME"));
+        assert!(env_vars.iter().any(|e| e.name == "AZURE_ENVIRONMENT_NAME"));
 
         // Check backup from replica
-        assert!(env_vars
-            .iter()
-            .any(|e| e.name == "WALG_BACKUP_FROM_REPLICA"));
+        assert!(
+            env_vars
+                .iter()
+                .any(|e| e.name == "WALG_BACKUP_FROM_REPLICA")
+        );
 
         // Check delta backups
         let delta_var = env_vars
@@ -851,9 +865,7 @@ mod tests {
         let cluster = create_test_cluster(Some(backup));
         let env_vars = generate_backup_env_vars(&cluster);
 
-        assert!(env_vars
-            .iter()
-            .any(|e| e.name == "WALG_LIBSODIUM_KEY_PATH"));
+        assert!(env_vars.iter().any(|e| e.name == "WALG_LIBSODIUM_KEY_PATH"));
     }
 
     #[test]
@@ -1010,9 +1022,11 @@ mod tests {
 
         // Check count-based retention
         assert!(env_vars.iter().any(|e| e.name == "BACKUP_NUM_TO_RETAIN"));
-        assert!(env_vars
-            .iter()
-            .any(|e| e.name == "WALG_RETAIN_FULL_BACKUPS"));
+        assert!(
+            env_vars
+                .iter()
+                .any(|e| e.name == "WALG_RETAIN_FULL_BACKUPS")
+        );
 
         // Check time-based retention
         let days_var = env_vars

@@ -183,8 +183,8 @@ impl BackupStatusCollector {
                 status.last_wal_archive_time = archiver.last_archived_time.clone();
 
                 // Check if archiving is healthy (archived recently and no recent failures)
-                let is_healthy = archiver.last_archived_time.is_some()
-                    && archiver.last_failed_time.is_none();
+                let is_healthy =
+                    archiver.last_archived_time.is_some() && archiver.last_failed_time.is_none();
                 status.wal_archiving_healthy = Some(is_healthy);
 
                 // Update recovery window end to last archived WAL time
@@ -237,12 +237,15 @@ impl BackupStatusCollector {
         // Find a ready pod
         for pod in pod_list.items {
             if let Some(ref status) = pod.status
-                && let Some(ref conditions) = status.conditions {
-                    let is_ready = conditions.iter().any(|c| c.type_ == "Ready" && c.status == "True");
-                    if is_ready {
-                        return Ok(pod.name_any());
-                    }
+                && let Some(ref conditions) = status.conditions
+            {
+                let is_ready = conditions
+                    .iter()
+                    .any(|c| c.type_ == "Ready" && c.status == "True");
+                if is_ready {
+                    return Ok(pod.name_any());
                 }
+            }
         }
 
         // If no master found, try any cluster pod
@@ -253,12 +256,15 @@ impl BackupStatusCollector {
 
         for pod in pod_list.items {
             if let Some(ref status) = pod.status
-                && let Some(ref conditions) = status.conditions {
-                    let is_ready = conditions.iter().any(|c| c.type_ == "Ready" && c.status == "True");
-                    if is_ready {
-                        return Ok(pod.name_any());
-                    }
+                && let Some(ref conditions) = status.conditions
+            {
+                let is_ready = conditions
+                    .iter()
+                    .any(|c| c.type_ == "Ready" && c.status == "True");
+                if is_ready {
+                    return Ok(pod.name_any());
                 }
+            }
         }
 
         Err(BackupStatusError::NoPodsAvailable)
@@ -269,7 +275,12 @@ impl BackupStatusCollector {
         let output = self
             .exec_command(
                 pod_name,
-                &["su", "postgres", "-c", "wal-g backup-list --json 2>/dev/null || echo '[]'"],
+                &[
+                    "su",
+                    "postgres",
+                    "-c",
+                    "wal-g backup-list --json 2>/dev/null || echo '[]'",
+                ],
             )
             .await?;
 
@@ -296,7 +307,10 @@ impl BackupStatusCollector {
                     "su",
                     "postgres",
                     "-c",
-                    &format!("psql -U postgres -t -A -F',' -c \"{}\" 2>/dev/null || echo ''", query),
+                    &format!(
+                        "psql -U postgres -t -A -F',' -c \"{}\" 2>/dev/null || echo ''",
+                        query
+                    ),
                 ],
             )
             .await?;
@@ -306,11 +320,27 @@ impl BackupStatusCollector {
         if parts.len() >= 6 {
             Ok(PgStatArchiver {
                 archived_count: parts[0].parse().ok(),
-                last_archived_wal: if parts[1].is_empty() { None } else { Some(parts[1].to_string()) },
-                last_archived_time: if parts[2].is_empty() { None } else { Some(parts[2].to_string()) },
+                last_archived_wal: if parts[1].is_empty() {
+                    None
+                } else {
+                    Some(parts[1].to_string())
+                },
+                last_archived_time: if parts[2].is_empty() {
+                    None
+                } else {
+                    Some(parts[2].to_string())
+                },
                 failed_count: parts[3].parse().ok(),
-                last_failed_wal: if parts[4].is_empty() { None } else { Some(parts[4].to_string()) },
-                last_failed_time: if parts[5].is_empty() { None } else { Some(parts[5].to_string()) },
+                last_failed_wal: if parts[4].is_empty() {
+                    None
+                } else {
+                    Some(parts[4].to_string())
+                },
+                last_failed_time: if parts[5].is_empty() {
+                    None
+                } else {
+                    Some(parts[5].to_string())
+                },
             })
         } else {
             Ok(PgStatArchiver {
@@ -349,22 +379,24 @@ impl BackupStatusCollector {
             .ok_or_else(|| BackupStatusError::ExecFailed("No stdout available".to_string()))?;
 
         let mut output = Vec::new();
-        stdout_reader.read_to_end(&mut output).await.map_err(|e| {
-            BackupStatusError::ExecFailed(format!("Failed to read stdout: {}", e))
-        })?;
+        stdout_reader
+            .read_to_end(&mut output)
+            .await
+            .map_err(|e| BackupStatusError::ExecFailed(format!("Failed to read stdout: {}", e)))?;
 
         // Wait for the command to complete
         let status = attached.take_status();
         if let Some(status_channel) = status
             && let Some(result) = status_channel.await
-                && let Some(status) = result.status
-                    && status != "Success" {
-                        debug!(
-                            pod = pod_name,
-                            status = status,
-                            "Command exited with non-success status"
-                        );
-                    }
+            && let Some(status) = result.status
+            && status != "Success"
+        {
+            debug!(
+                pod = pod_name,
+                status = status,
+                "Command exited with non-success status"
+            );
+        }
 
         String::from_utf8(output).map_err(BackupStatusError::from)
     }
@@ -439,7 +471,10 @@ mod tests {
         update_backup_status(&mut existing, new_status);
 
         assert_eq!(existing.destination_type, Some("S3".to_string()));
-        assert_eq!(existing.last_backup_time, Some("2025-01-10T00:00:00Z".to_string()));
+        assert_eq!(
+            existing.last_backup_time,
+            Some("2025-01-10T00:00:00Z".to_string())
+        );
         assert_eq!(existing.backup_count, Some(5));
         assert_eq!(existing.wal_archiving_healthy, Some(true));
     }
