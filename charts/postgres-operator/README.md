@@ -4,7 +4,7 @@ A Helm chart for deploying the PostgreSQL Operator, which manages PostgreSQL clu
 
 ## Prerequisites
 
-- Kubernetes 1.26+
+- Kubernetes 1.35+
 - Helm 3.8+
 
 ## Installation
@@ -115,6 +115,111 @@ kubectl delete crd postgresclusters.postgres-operator.smoketurner.com
 | `serviceMonitor.interval` | Scrape interval | `30s` |
 | `serviceMonitor.scrapeTimeout` | Scrape timeout | `10s` |
 
+## PostgresCluster CRD Reference
+
+Once the operator is installed, you can create PostgresCluster resources. Below is a summary of the available configuration options.
+
+### Basic Configuration
+
+| Field | Description | Required |
+|-------|-------------|----------|
+| `spec.version` | PostgreSQL version (e.g., "15", "16") | Yes |
+| `spec.replicas` | Number of Patroni members (1 = standalone, 2+ = HA) | No (default: 1) |
+| `spec.storage.size` | PVC size (e.g., "10Gi") | Yes |
+| `spec.storage.storageClass` | Storage class name | No |
+| `spec.resources` | CPU/memory requests and limits | No |
+| `spec.postgresqlParams` | Custom postgresql.conf parameters | No |
+
+### Backup Configuration (`spec.backup`)
+
+| Field | Description |
+|-------|-------------|
+| `schedule` | Cron schedule for base backups (e.g., "0 2 * * *") |
+| `retention.count` | Number of backups to retain |
+| `retention.maxAge` | Maximum backup age (e.g., "30d") |
+| `destination.type` | Storage type: S3, GCS, or Azure |
+| `destination.bucket` | Bucket name (S3/GCS) |
+| `destination.region` | AWS region (S3) |
+| `destination.container` | Container name (Azure) |
+| `destination.storageAccount` | Storage account (Azure) |
+| `destination.credentialsSecret` | Secret with cloud credentials |
+| `destination.path` | Path prefix within bucket |
+| `destination.endpoint` | Custom S3-compatible endpoint |
+| `destination.forcePathStyle` | Force path-style URLs for S3 |
+| `destination.disableSse` | Disable S3 server-side encryption |
+| `walArchiving.enabled` | Enable WAL archiving (default: true) |
+| `walArchiving.restoreTimeout` | WAL restore timeout in seconds |
+| `encryption.enabled` | Enable backup encryption |
+| `encryption.method` | Encryption method: aes256 or pgp |
+| `encryption.keySecret` | Secret containing encryption key |
+| `compression` | Compression: lz4, lzma, brotli, zstd, none |
+| `backupFromReplica` | Take backups from replica |
+| `uploadConcurrency` | WAL-G upload concurrency (default: 16) |
+| `downloadConcurrency` | WAL-G download concurrency (default: 10) |
+| `enableDeltaBackups` | Enable delta backups |
+| `deltaMaxSteps` | Max delta steps before full backup |
+
+### Restore Configuration (`spec.restore`)
+
+Bootstrap a new cluster from an existing backup:
+
+| Field | Description |
+|-------|-------------|
+| `source.s3.prefix` | S3 backup path (e.g., "s3://bucket/path") |
+| `source.s3.region` | AWS region |
+| `source.s3.credentialsSecret` | Secret with AWS credentials |
+| `source.s3.endpoint` | Custom S3 endpoint |
+| `source.gcs.prefix` | GCS backup path |
+| `source.gcs.credentialsSecret` | Secret with GCS credentials |
+| `source.azure.prefix` | Azure backup path |
+| `source.azure.storageAccount` | Azure storage account |
+| `source.azure.credentialsSecret` | Secret with Azure credentials |
+| `recoveryTarget.time` | Point-in-time recovery timestamp |
+| `recoveryTarget.backup` | Restore to specific backup name |
+| `recoveryTarget.timeline` | Restore to specific timeline |
+
+### PgBouncer Configuration (`spec.pgbouncer`)
+
+| Field | Description |
+|-------|-------------|
+| `enabled` | Enable PgBouncer connection pooler |
+| `replicas` | Number of PgBouncer pods (default: 2) |
+| `poolMode` | Pool mode: session, transaction, statement |
+| `maxDbConnections` | Max database connections (default: 60) |
+| `defaultPoolSize` | Default pool size (default: 20) |
+| `maxClientConn` | Max client connections (default: 10000) |
+| `image` | Custom PgBouncer image |
+| `resources` | CPU/memory for PgBouncer pods |
+| `enableReplicaPooler` | Enable pooler for read replicas |
+
+### TLS Configuration (`spec.tls`)
+
+| Field | Description |
+|-------|-------------|
+| `enabled` | Enable TLS for PostgreSQL connections |
+| `certSecret` | Secret containing tls.crt and tls.key |
+| `caSecret` | Secret containing ca.crt |
+| `certificateFile` | Certificate filename (default: tls.crt) |
+| `privateKeyFile` | Key filename (default: tls.key) |
+| `caFile` | CA filename (default: ca.crt) |
+
+### Service Configuration (`spec.service`)
+
+| Field | Description |
+|-------|-------------|
+| `type` | ClusterIP, NodePort, or LoadBalancer |
+| `annotations` | Service annotations |
+| `loadBalancerSourceRanges` | CIDR ranges for LoadBalancer |
+| `externalTrafficPolicy` | Cluster or Local |
+| `nodePort` | NodePort number (30000-32767) |
+
+### Metrics Configuration (`spec.metrics`)
+
+| Field | Description |
+|-------|-------------|
+| `enabled` | Enable Prometheus metrics exporter |
+| `port` | Metrics port (default: 9187) |
+
 ## Examples
 
 ### Production deployment with monitoring
@@ -163,6 +268,94 @@ image:
 
 imagePullSecrets:
   - name: my-registry-secret
+```
+
+### PostgresCluster with S3 backups
+
+```yaml
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: production-db
+spec:
+  version: "16"
+  replicas: 3
+  storage:
+    size: 100Gi
+    storageClass: fast-ssd
+  resources:
+    requests:
+      cpu: "2"
+      memory: 8Gi
+    limits:
+      cpu: "4"
+      memory: 16Gi
+  backup:
+    schedule: "0 2 * * *"  # Daily at 2 AM
+    retention:
+      count: 7
+      maxAge: "30d"
+    destination:
+      type: S3
+      bucket: my-postgres-backups
+      region: us-east-1
+      path: production/main-db
+      credentialsSecret: aws-backup-credentials
+    compression: zstd
+    encryption:
+      enabled: true
+      method: aes256
+      keySecret: backup-encryption-key
+    backupFromReplica: true
+```
+
+### Restore from backup (point-in-time recovery)
+
+```yaml
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: restored-db
+spec:
+  version: "16"
+  replicas: 3
+  storage:
+    size: 100Gi
+  restore:
+    source:
+      s3:
+        prefix: s3://my-postgres-backups/production/main-db
+        region: us-east-1
+        credentialsSecret: aws-backup-credentials
+    recoveryTarget:
+      time: "2024-01-15T14:30:00Z"  # Restore to this point in time
+```
+
+### PostgresCluster with PgBouncer and TLS
+
+```yaml
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: secure-db
+spec:
+  version: "16"
+  replicas: 3
+  storage:
+    size: 50Gi
+  pgbouncer:
+    enabled: true
+    replicas: 2
+    poolMode: transaction
+    maxDbConnections: 100
+  tls:
+    enabled: true
+    certSecret: postgres-tls
+    caSecret: postgres-ca
+  service:
+    type: LoadBalancer
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-internal: "true"
 ```
 
 ## Upgrading

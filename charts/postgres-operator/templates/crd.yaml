@@ -91,6 +91,7 @@ spec:
                       description: Size of the persistent volume
                 resources:
                   type: object
+                  description: Resource requirements for PostgreSQL pods
                   properties:
                     limits:
                       type: object
@@ -106,6 +107,13 @@ spec:
                           type: string
                         memory:
                           type: string
+                    restartOnResize:
+                      type: boolean
+                      description: |
+                        Restart container when resources are resized (Kubernetes 1.35+).
+                        If false (default), resources are resized in-place without container restart.
+                        Note: Some PostgreSQL settings like shared_buffers require a PostgreSQL
+                        restart to take effect even with in-place resize.
                 postgresqlParams:
                   type: object
                   additionalProperties:
@@ -113,23 +121,37 @@ spec:
                   description: Custom PostgreSQL configuration parameters
                 backup:
                   type: object
+                  description: |
+                    Backup configuration for continuous archiving and point-in-time recovery (PITR).
+                    Integrates with WAL-G for continuous WAL archiving and scheduled base backups.
                   x-kubernetes-validations:
                     - rule: "!has(self.destination) || has(self.schedule)"
                       message: "backup.schedule is required when backup.destination is configured"
                   properties:
                     schedule:
                       type: string
-                      description: Backup schedule in cron format
+                      description: |
+                        Backup schedule in cron format (e.g., "0 2 * * *" for 2 AM daily).
+                        Base backups are created on this schedule.
+                        WAL archiving happens continuously regardless of this schedule.
                     retention:
                       type: object
+                      description: Retention policy for backups
                       properties:
                         count:
                           type: integer
+                          description: |
+                            Number of base backups to retain.
+                            Older backups and their associated WAL files are automatically deleted.
                           minimum: 1
                         maxAge:
                           type: string
+                          description: |
+                            Maximum age of backups (e.g., "7d", "30d", "1w").
+                            Backups older than this are automatically deleted.
                     destination:
                       type: object
+                      description: Backup destination (S3, GCS, or Azure)
                       x-kubernetes-validations:
                         - rule: "self.type != 'S3' || (has(self.bucket) && has(self.region) && has(self.credentialsSecret))"
                           message: "S3 backup requires bucket, region, and credentialsSecret"
@@ -154,16 +176,125 @@ spec:
                           description: AWS region for S3
                         endpoint:
                           type: string
-                          description: Custom S3-compatible endpoint URL
+                          description: Custom S3-compatible endpoint URL (for MinIO, etc.)
+                        path:
+                          type: string
+                          description: |
+                            Path prefix within the bucket (e.g., "backups/prod-cluster").
+                            Default: namespace/cluster-name
+                        disableSse:
+                          type: boolean
+                          description: Disable server-side encryption (S3 only)
+                          default: false
+                        forcePathStyle:
+                          type: boolean
+                          description: |
+                            Force path-style URLs (S3 only).
+                            Required for some S3-compatible storage like MinIO.
+                          default: false
                         container:
                           type: string
                           description: Azure blob container name
                         storageAccount:
                           type: string
                           description: Azure storage account name
+                        environment:
+                          type: string
+                          description: |
+                            Azure environment name (e.g., "AzurePublicCloud", "AzureUSGovernmentCloud").
+                            Azure only.
                         credentialsSecret:
                           type: string
-                          description: Name of secret containing cloud credentials
+                          description: |
+                            Name of secret containing cloud credentials.
+                            S3: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (optional: AWS_SESSION_TOKEN)
+                            GCS: GOOGLE_APPLICATION_CREDENTIALS (JSON service account key)
+                            Azure: AZURE_STORAGE_ACCESS_KEY or AZURE_STORAGE_SAS_TOKEN
+                    walArchiving:
+                      type: object
+                      description: WAL archiving configuration for continuous backup
+                      properties:
+                        enabled:
+                          type: boolean
+                          description: Enable WAL archiving. Default true when backup is configured.
+                          default: true
+                        restoreTimeout:
+                          type: integer
+                          description: |
+                            Timeout for WAL restore operations in seconds.
+                            Set to 0 to disable timeout. Default: disabled (0).
+                          minimum: 0
+                    encryption:
+                      type: object
+                      description: Encryption configuration for backups
+                      properties:
+                        enabled:
+                          type: boolean
+                          description: Enable backup encryption
+                        method:
+                          type: string
+                          description: Encryption method to use
+                          enum:
+                            - aes256
+                            - pgp
+                          default: aes256
+                        keySecret:
+                          type: string
+                          description: |
+                            Secret containing encryption key.
+                            For AES: expects a key named 'encryption-key' with the raw key bytes.
+                            For PGP: expects a key named 'pgp-key' with the PGP public key.
+                    compression:
+                      type: string
+                      description: |
+                        Compression method for backups.
+                        Default: lz4 (fast compression with good ratio)
+                      enum:
+                        - lz4
+                        - lzma
+                        - brotli
+                        - zstd
+                        - none
+                      default: lz4
+                    backupFromReplica:
+                      type: boolean
+                      description: |
+                        Take backups from replica instead of primary.
+                        Reduces load on the primary server.
+                      default: false
+                    uploadConcurrency:
+                      type: integer
+                      description: |
+                        Number of concurrent upload streams for WAL-G.
+                        Higher values increase upload speed but use more resources.
+                        Default: 16
+                      minimum: 1
+                      maximum: 64
+                      default: 16
+                    downloadConcurrency:
+                      type: integer
+                      description: |
+                        Number of concurrent download streams for restore.
+                        Default: 10
+                      minimum: 1
+                      maximum: 64
+                      default: 10
+                    enableDeltaBackups:
+                      type: boolean
+                      description: |
+                        Enable delta backups (WAL-G feature).
+                        Delta backups only store pages changed since the last backup.
+                        Reduces backup size and time but increases restore complexity.
+                      default: false
+                    deltaMaxSteps:
+                      type: integer
+                      description: |
+                        Maximum number of delta backup steps before forcing a full backup.
+                        Only used when enableDeltaBackups is true.
+                        Default: 3
+                      minimum: 1
+                      maximum: 10
+                      default: 3
                 pgbouncer:
                   type: object
                   description: PgBouncer connection pooler configuration
@@ -302,11 +433,95 @@ spec:
                       description: NodePort for PostgreSQL port
                       minimum: 30000
                       maximum: 32767
+                restore:
+                  type: object
+                  description: |
+                    Restore configuration for bootstrapping from an existing backup.
+                    When specified, the cluster will be initialized by restoring from the
+                    specified backup source instead of creating a fresh database.
+                    This is only used during initial cluster creation.
+                  properties:
+                    source:
+                      type: object
+                      description: Source backup location for the restore operation
+                      x-kubernetes-preserve-unknown-fields: true
+                      properties:
+                        s3:
+                          type: object
+                          description: Restore from an S3-compatible backup
+                          required:
+                            - prefix
+                            - region
+                            - credentialsSecret
+                          properties:
+                            prefix:
+                              type: string
+                              description: Full S3 prefix path (e.g., "s3://bucket/path/to/backup")
+                            region:
+                              type: string
+                              description: AWS region
+                            credentialsSecret:
+                              type: string
+                              description: Secret containing AWS credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+                            endpoint:
+                              type: string
+                              description: Custom endpoint for S3-compatible storage (e.g., MinIO)
+                        gcs:
+                          type: object
+                          description: Restore from a Google Cloud Storage backup
+                          required:
+                            - prefix
+                            - credentialsSecret
+                          properties:
+                            prefix:
+                              type: string
+                              description: Full GCS prefix path (e.g., "gs://bucket/path/to/backup")
+                            credentialsSecret:
+                              type: string
+                              description: Secret containing GCS credentials (GOOGLE_APPLICATION_CREDENTIALS)
+                        azure:
+                          type: object
+                          description: Restore from an Azure Blob Storage backup
+                          required:
+                            - prefix
+                            - storageAccount
+                            - credentialsSecret
+                          properties:
+                            prefix:
+                              type: string
+                              description: Full Azure prefix path (e.g., "azure://container/path/to/backup")
+                            storageAccount:
+                              type: string
+                              description: Azure storage account name
+                            credentialsSecret:
+                              type: string
+                              description: Secret containing Azure credentials
+                    recoveryTarget:
+                      type: object
+                      description: |
+                        Recovery target for point-in-time recovery (PITR).
+                        If not specified, restores to the latest available state.
+                      x-kubernetes-preserve-unknown-fields: true
+                      properties:
+                        time:
+                          type: string
+                          description: |
+                            Restore to a specific timestamp (ISO 8601 format).
+                            Example: "2024-01-15T14:30:00Z"
+                        backup:
+                          type: string
+                          description: |
+                            Restore to a specific backup by name.
+                            Example: "base_00000001000000000000000A"
+                        timeline:
+                          type: integer
+                          description: Restore to a specific timeline
             status:
               type: object
               properties:
                 phase:
                   type: string
+                  description: Current phase of the cluster lifecycle
                   enum:
                     - Pending
                     - Creating
@@ -319,37 +534,100 @@ spec:
                     - Deleting
                 readyReplicas:
                   type: integer
+                  description: Number of ready replicas
                 replicas:
                   type: integer
+                  description: Total desired replicas
                 primaryPod:
                   type: string
+                  description: Name of the current primary pod
                 replicaPods:
                   type: array
+                  description: Names of replica pods
                   items:
                     type: string
-                lastBackup:
-                  type: string
+                backup:
+                  type: object
+                  description: Backup status information
+                  properties:
+                    enabled:
+                      type: boolean
+                      description: Whether backups are currently configured and enabled
+                    destinationType:
+                      type: string
+                      description: Backup destination type (S3, GCS, Azure)
+                    lastBackupTime:
+                      type: string
+                      description: Timestamp of the last successful base backup (RFC3339)
+                    lastBackupSizeBytes:
+                      type: integer
+                      format: int64
+                      description: Size of the last backup in bytes
+                    lastBackupName:
+                      type: string
+                      description: Name/ID of the last backup
+                    oldestBackupTime:
+                      type: string
+                      description: Timestamp of the oldest available backup (RFC3339)
+                    backupCount:
+                      type: integer
+                      description: Number of available base backups
+                    lastWalArchived:
+                      type: string
+                      description: Last WAL file archived successfully
+                    lastWalArchiveTime:
+                      type: string
+                      description: Time of last WAL archive (RFC3339)
+                    walArchivingHealthy:
+                      type: boolean
+                      description: Whether WAL archiving is healthy
+                    lastError:
+                      type: string
+                      description: Last backup error message, if any
+                    lastErrorTime:
+                      type: string
+                      description: Time of last error (RFC3339)
+                    recoveryWindowStart:
+                      type: string
+                      description: Point-in-time recovery window start (RFC3339)
+                    recoveryWindowEnd:
+                      type: string
+                      description: Point-in-time recovery window end (RFC3339)
+                    lastManualBackupTrigger:
+                      type: string
+                      description: Timestamp of the last manually triggered backup request
+                    lastManualBackupStatus:
+                      type: string
+                      description: "Status of the last manual backup: pending, running, completed, failed"
                 observedGeneration:
                   type: integer
                   format: int64
+                  description: Observed generation of the resource
                 conditions:
                   type: array
+                  description: Kubernetes-style conditions
                   items:
                     type: object
                     properties:
                       type:
                         type: string
+                        description: Type of condition
                       status:
                         type: string
+                        description: "Status of the condition: True, False, or Unknown"
                       reason:
                         type: string
+                        description: Reason for the condition's last transition
                       message:
                         type: string
+                        description: Human-readable message
                       lastTransitionTime:
                         type: string
+                        description: Last time the condition transitioned
                       observedGeneration:
                         type: integer
                         format: int64
+                        description: Generation observed when condition was set
                 retryCount:
                   type: integer
                   description: Current retry count for exponential backoff
@@ -361,20 +639,102 @@ spec:
                   description: Timestamp of the last error
                 previousReplicas:
                   type: integer
-                  description: Previous replica count
+                  description: Previous replica count (used for tracking scaling operations)
                 phaseStartedAt:
                   type: string
-                  description: Timestamp when the current phase started
+                  description: Timestamp when the current phase started (RFC3339 format)
                 currentVersion:
                   type: string
-                  description: Current PostgreSQL version running
+                  description: |
+                    Current PostgreSQL version running in the cluster.
+                    Used to prevent version downgrades which cause data incompatibility.
                 tlsEnabled:
                   type: boolean
-                  description: Whether TLS is currently enabled
+                  description: Whether TLS is currently enabled on the cluster
                 pgbouncerEnabled:
                   type: boolean
-                  description: Whether PgBouncer is currently enabled
+                  description: Whether PgBouncer pooler is currently enabled
                 pgbouncerReadyReplicas:
                   type: integer
                   description: Number of ready PgBouncer replicas
+                pods:
+                  type: array
+                  description: Detailed pod information with generation tracking (Kubernetes 1.35+)
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                        description: Pod name
+                      generation:
+                        type: integer
+                        format: int64
+                        description: Pod's metadata.generation
+                      observedGeneration:
+                        type: integer
+                        format: int64
+                        description: Pod's status.observedGeneration (from kubelet)
+                      specApplied:
+                        type: boolean
+                        description: Whether kubelet has processed the latest pod spec
+                      role:
+                        type: string
+                        description: Pod role (master/replica from spilo-role label)
+                      ready:
+                        type: boolean
+                        description: Ready status
+                resizeStatus:
+                  type: array
+                  description: Resource resize status for each pod (Kubernetes 1.35+)
+                  items:
+                    type: object
+                    properties:
+                      podName:
+                        type: string
+                        description: Pod name
+                      status:
+                        type: string
+                        description: Current resize status
+                        enum:
+                          - NoResize
+                          - Proposed
+                          - InProgress
+                          - Deferred
+                          - Infeasible
+                      allocatedResources:
+                        type: object
+                        description: Current allocated resources
+                        properties:
+                          cpu:
+                            type: string
+                          memory:
+                            type: string
+                      lastTransitionTime:
+                        type: string
+                        description: Last transition time
+                      message:
+                        type: string
+                        description: Message about resize status
+                allPodsSynced:
+                  type: boolean
+                  description: Whether all pods have applied their latest spec (observedGeneration == generation)
+                restoredFrom:
+                  type: object
+                  description: Source backup information if this cluster was restored from a backup
+                  properties:
+                    sourcePrefix:
+                      type: string
+                      description: The prefix path of the backup source (e.g., "s3://bucket/path")
+                    sourceType:
+                      type: string
+                      description: The backup type (S3, GCS, Azure)
+                    recoveryTargetTime:
+                      type: string
+                      description: The recovery target time if PITR was used
+                    restoreStartedAt:
+                      type: string
+                      description: Timestamp when the restore was initiated
+                    restoreCompletedAt:
+                      type: string
+                      description: Timestamp when the restore completed
 {{- end }}
