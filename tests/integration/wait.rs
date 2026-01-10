@@ -45,6 +45,105 @@ pub fn has_primary_pod() -> impl Condition<PostgresCluster> {
     }
 }
 
+/// Condition that checks if status contains a specific error message substring
+pub fn has_error(expected_substring: &str) -> impl Condition<PostgresCluster> {
+    let expected = expected_substring.to_string();
+    move |obj: Option<&PostgresCluster>| {
+        obj.and_then(|cluster| cluster.status.as_ref())
+            .and_then(|status| status.last_error.as_ref())
+            .map(|err| err.contains(&expected))
+            .unwrap_or(false)
+    }
+}
+
+/// Condition that checks if a specific condition type has a given status
+pub fn has_condition(type_: &str, expected_status: &str) -> impl Condition<PostgresCluster> {
+    let cond_type = type_.to_string();
+    let status = expected_status.to_string();
+    move |obj: Option<&PostgresCluster>| {
+        obj.and_then(|cluster| cluster.status.as_ref())
+            .map(|s| {
+                s.conditions
+                    .iter()
+                    .any(|c| c.type_ == cond_type && c.status == status)
+            })
+            .unwrap_or(false)
+    }
+}
+
+/// Condition that checks if TLS is enabled in status
+pub fn tls_enabled() -> impl Condition<PostgresCluster> {
+    |obj: Option<&PostgresCluster>| {
+        obj.and_then(|cluster| cluster.status.as_ref())
+            .and_then(|status| status.tls_enabled)
+            .unwrap_or(false)
+    }
+}
+
+/// Condition that checks if PgBouncer is enabled in status
+pub fn pgbouncer_enabled() -> impl Condition<PostgresCluster> {
+    |obj: Option<&PostgresCluster>| {
+        obj.and_then(|cluster| cluster.status.as_ref())
+            .and_then(|status| status.pgbouncer_enabled)
+            .unwrap_or(false)
+    }
+}
+
+/// Condition that checks if PgBouncer has expected ready replicas
+pub fn pgbouncer_ready(expected: i32) -> impl Condition<PostgresCluster> {
+    move |obj: Option<&PostgresCluster>| {
+        obj.and_then(|cluster| cluster.status.as_ref())
+            .and_then(|status| status.pgbouncer_ready_replicas)
+            .map(|ready| ready >= expected)
+            .unwrap_or(false)
+    }
+}
+
+/// Condition that checks if current_version matches expected
+pub fn has_current_version(expected: &str) -> impl Condition<PostgresCluster> {
+    let version = expected.to_string();
+    move |obj: Option<&PostgresCluster>| {
+        obj.and_then(|cluster| cluster.status.as_ref())
+            .and_then(|status| status.current_version.as_ref())
+            .map(|v| v == &version)
+            .unwrap_or(false)
+    }
+}
+
+/// Condition that checks if observed_generation matches metadata.generation
+pub fn generation_observed() -> impl Condition<PostgresCluster> {
+    |obj: Option<&PostgresCluster>| {
+        obj.map(|cluster| {
+            let generation = cluster.metadata.generation;
+            let observed = cluster.status.as_ref().and_then(|s| s.observed_generation);
+            generation == observed
+        })
+        .unwrap_or(false)
+    }
+}
+
+/// Condition that checks if primaryPod matches a specific pod name
+pub fn has_primary_pod_named(expected: &str) -> impl Condition<PostgresCluster> {
+    let name = expected.to_string();
+    move |obj: Option<&PostgresCluster>| {
+        obj.and_then(|cluster| cluster.status.as_ref())
+            .and_then(|status| status.primary_pod.as_ref())
+            .map(|p| p == &name)
+            .unwrap_or(false)
+    }
+}
+
+/// Condition that checks if primaryPod is different from a specific pod name (failover detection)
+pub fn primary_pod_changed_from(old_primary: &str) -> impl Condition<PostgresCluster> {
+    let old = old_primary.to_string();
+    move |obj: Option<&PostgresCluster>| {
+        obj.and_then(|cluster| cluster.status.as_ref())
+            .and_then(|status| status.primary_pod.as_ref())
+            .map(|p| p != &old)
+            .unwrap_or(false)
+    }
+}
+
 /// Wait for a PostgresCluster to reach a condition with timeout
 pub async fn wait_for_cluster<C>(
     api: &Api<PostgresCluster>,

@@ -8,7 +8,8 @@
 
 use kube::core::ObjectMeta;
 use postgres_operator::crd::{
-    PostgresCluster, PostgresClusterSpec, ResourceList, ResourceRequirements, StorageSpec,
+    ExternalTrafficPolicy, MetricsSpec, PgBouncerSpec, PostgresCluster, PostgresClusterSpec,
+    ResourceList, ResourceRequirements, ServiceSpec, ServiceType, StorageSpec, TLSSpec,
 };
 use std::collections::BTreeMap;
 
@@ -22,6 +23,10 @@ pub struct PostgresClusterBuilder {
     storage_class: Option<String>,
     postgresql_params: BTreeMap<String, String>,
     resources: Option<ResourceRequirements>,
+    tls: Option<TLSSpec>,
+    pgbouncer: Option<PgBouncerSpec>,
+    metrics: Option<MetricsSpec>,
+    service: Option<ServiceSpec>,
 }
 
 impl PostgresClusterBuilder {
@@ -36,6 +41,10 @@ impl PostgresClusterBuilder {
             storage_class: None,
             postgresql_params: BTreeMap::new(),
             resources: None,
+            tls: None,
+            pgbouncer: None,
+            metrics: None,
+            service: None,
         }
     }
 
@@ -90,6 +99,207 @@ impl PostgresClusterBuilder {
         self
     }
 
+    /// Set separate resource requests and limits
+    pub fn with_resources_full(
+        mut self,
+        req_cpu: &str,
+        req_memory: &str,
+        limit_cpu: &str,
+        limit_memory: &str,
+    ) -> Self {
+        self.resources = Some(ResourceRequirements {
+            requests: Some(ResourceList {
+                cpu: Some(req_cpu.to_string()),
+                memory: Some(req_memory.to_string()),
+            }),
+            limits: Some(ResourceList {
+                cpu: Some(limit_cpu.to_string()),
+                memory: Some(limit_memory.to_string()),
+            }),
+        });
+        self
+    }
+
+    /// Enable TLS with a certificate secret
+    pub fn with_tls(mut self, cert_secret: &str) -> Self {
+        self.tls = Some(TLSSpec {
+            enabled: true,
+            cert_secret: Some(cert_secret.to_string()),
+            ca_secret: None,
+            certificate_file: None,
+            private_key_file: None,
+            ca_file: None,
+        });
+        self
+    }
+
+    /// Enable TLS with certificate and CA secrets
+    pub fn with_tls_and_ca(mut self, cert_secret: &str, ca_secret: &str) -> Self {
+        self.tls = Some(TLSSpec {
+            enabled: true,
+            cert_secret: Some(cert_secret.to_string()),
+            ca_secret: Some(ca_secret.to_string()),
+            certificate_file: None,
+            private_key_file: None,
+            ca_file: None,
+        });
+        self
+    }
+
+    /// Enable TLS with custom filenames
+    pub fn with_tls_custom(mut self, cert_secret: &str, cert_file: &str, key_file: &str) -> Self {
+        self.tls = Some(TLSSpec {
+            enabled: true,
+            cert_secret: Some(cert_secret.to_string()),
+            ca_secret: None,
+            certificate_file: Some(cert_file.to_string()),
+            private_key_file: Some(key_file.to_string()),
+            ca_file: None,
+        });
+        self
+    }
+
+    /// Enable PgBouncer with default settings (transaction mode)
+    pub fn with_pgbouncer(mut self) -> Self {
+        self.pgbouncer = Some(PgBouncerSpec {
+            enabled: true,
+            replicas: 2,
+            pool_mode: "transaction".to_string(),
+            max_db_connections: 60,
+            default_pool_size: 20,
+            max_client_conn: 10000,
+            image: None,
+            resources: None,
+            enable_replica_pooler: false,
+        });
+        self
+    }
+
+    /// Enable PgBouncer with a specific pool mode
+    pub fn with_pgbouncer_mode(mut self, mode: &str) -> Self {
+        self.pgbouncer = Some(PgBouncerSpec {
+            enabled: true,
+            replicas: 2,
+            pool_mode: mode.to_string(),
+            max_db_connections: 60,
+            default_pool_size: 20,
+            max_client_conn: 10000,
+            image: None,
+            resources: None,
+            enable_replica_pooler: false,
+        });
+        self
+    }
+
+    /// Enable PgBouncer with replica pooler
+    pub fn with_pgbouncer_replica(mut self) -> Self {
+        self.pgbouncer = Some(PgBouncerSpec {
+            enabled: true,
+            replicas: 2,
+            pool_mode: "transaction".to_string(),
+            max_db_connections: 60,
+            default_pool_size: 20,
+            max_client_conn: 10000,
+            image: None,
+            resources: None,
+            enable_replica_pooler: true,
+        });
+        self
+    }
+
+    /// Enable PgBouncer with custom settings
+    pub fn with_pgbouncer_custom(
+        mut self,
+        replicas: i32,
+        pool_mode: &str,
+        max_db_connections: i32,
+        default_pool_size: i32,
+        max_client_conn: i32,
+    ) -> Self {
+        self.pgbouncer = Some(PgBouncerSpec {
+            enabled: true,
+            replicas,
+            pool_mode: pool_mode.to_string(),
+            max_db_connections,
+            default_pool_size,
+            max_client_conn,
+            image: None,
+            resources: None,
+            enable_replica_pooler: false,
+        });
+        self
+    }
+
+    /// Enable metrics with default port (9187)
+    pub fn with_metrics(mut self) -> Self {
+        self.metrics = Some(MetricsSpec {
+            enabled: true,
+            port: 9187,
+        });
+        self
+    }
+
+    /// Enable metrics with custom port
+    pub fn with_metrics_port(mut self, port: i32) -> Self {
+        self.metrics = Some(MetricsSpec {
+            enabled: true,
+            port,
+        });
+        self
+    }
+
+    /// Set service type to ClusterIP (default)
+    pub fn with_service_cluster_ip(mut self) -> Self {
+        self.service = Some(ServiceSpec {
+            type_: ServiceType::ClusterIP,
+            annotations: BTreeMap::new(),
+            load_balancer_source_ranges: vec![],
+            external_traffic_policy: None,
+            node_port: None,
+        });
+        self
+    }
+
+    /// Set service type to NodePort
+    pub fn with_service_node_port(mut self, node_port: Option<i32>) -> Self {
+        self.service = Some(ServiceSpec {
+            type_: ServiceType::NodePort,
+            annotations: BTreeMap::new(),
+            load_balancer_source_ranges: vec![],
+            external_traffic_policy: Some(ExternalTrafficPolicy::Cluster),
+            node_port,
+        });
+        self
+    }
+
+    /// Set service type to LoadBalancer
+    pub fn with_service_load_balancer(mut self, source_ranges: Vec<String>) -> Self {
+        self.service = Some(ServiceSpec {
+            type_: ServiceType::LoadBalancer,
+            annotations: BTreeMap::new(),
+            load_balancer_source_ranges: source_ranges,
+            external_traffic_policy: Some(ExternalTrafficPolicy::Local),
+            node_port: None,
+        });
+        self
+    }
+
+    /// Add service annotations
+    pub fn with_service_annotations(mut self, annotations: BTreeMap<String, String>) -> Self {
+        if let Some(ref mut svc) = self.service {
+            svc.annotations = annotations;
+        } else {
+            self.service = Some(ServiceSpec {
+                type_: ServiceType::ClusterIP,
+                annotations,
+                load_balancer_source_ranges: vec![],
+                external_traffic_policy: None,
+                node_port: None,
+            });
+        }
+        self
+    }
+
     /// Build the PostgresCluster resource
     pub fn build(self) -> PostgresCluster {
         PostgresCluster {
@@ -108,14 +318,49 @@ impl PostgresClusterBuilder {
                 postgresql_params: self.postgresql_params,
                 resources: self.resources,
                 backup: None,
-                pgbouncer: None,
-                tls: None,
-                metrics: None,
-                service: None,
+                pgbouncer: self.pgbouncer,
+                tls: self.tls,
+                metrics: self.metrics,
+                service: self.service,
             },
             status: None,
         }
     }
+}
+
+// =============================================================================
+// Additional convenience constructors
+// =============================================================================
+
+/// Create a PostgresCluster with TLS enabled
+pub fn with_tls(name: &str, namespace: &str, cert_secret: &str) -> PostgresCluster {
+    PostgresClusterBuilder::single(name, namespace)
+        .with_tls(cert_secret)
+        .build()
+}
+
+/// Create a PostgresCluster with PgBouncer enabled
+pub fn with_pgbouncer(name: &str, namespace: &str) -> PostgresCluster {
+    PostgresClusterBuilder::ha(name, namespace)
+        .with_pgbouncer()
+        .build()
+}
+
+/// Create a PostgresCluster with TLS and PgBouncer
+pub fn production_config(name: &str, namespace: &str) -> PostgresCluster {
+    PostgresClusterBuilder::ha(name, namespace)
+        .with_tls("tls-secret")
+        .with_pgbouncer()
+        .with_metrics()
+        .with_resources("500m", "1Gi")
+        .build()
+}
+
+/// Create a cluster with specific replica count for testing scaling
+pub fn with_replicas(name: &str, namespace: &str, replicas: i32) -> PostgresCluster {
+    PostgresClusterBuilder::new(name, namespace)
+        .with_replicas(replicas)
+        .build()
 }
 
 /// Create a minimal single-replica PostgresCluster

@@ -29,6 +29,18 @@ use std::collections::BTreeMap;
 use crate::crd::PostgresCluster;
 use crate::resources::common::{owner_reference, patroni_labels};
 
+/// Default PostgreSQL parameters for HA operation
+const DEFAULT_POSTGRESQL_PARAMS: &[(&str, &str)] = &[
+    ("max_connections", "100"),
+    ("shared_buffers", "128MB"),
+    ("wal_level", "replica"),
+    ("hot_standby", "on"),
+    ("max_wal_senders", "10"),
+    ("max_replication_slots", "10"),
+    ("wal_keep_size", "1GB"),
+    ("hot_standby_feedback", "on"),
+];
+
 /// Get the Spilo image for a given PostgreSQL version
 /// Spilo images are named: ghcr.io/zalando/spilo-{major_version}:{tag}
 /// Different PostgreSQL versions have different available Spilo tags
@@ -83,17 +95,14 @@ pub fn generate_patroni_config(cluster: &PostgresCluster) -> ConfigMap {
 /// This is passed via SPILO_CONFIGURATION env var and merged with Spilo's
 /// auto-generated Patroni config. We use this to customize PostgreSQL parameters.
 fn generate_spilo_config(cluster: &PostgresCluster) -> String {
+    use std::fmt::Write;
+
     let mut params: BTreeMap<String, String> = BTreeMap::new();
 
     // Default parameters for HA operation
-    params.insert("max_connections".to_string(), "100".to_string());
-    params.insert("shared_buffers".to_string(), "128MB".to_string());
-    params.insert("wal_level".to_string(), "replica".to_string());
-    params.insert("hot_standby".to_string(), "on".to_string());
-    params.insert("max_wal_senders".to_string(), "10".to_string());
-    params.insert("max_replication_slots".to_string(), "10".to_string());
-    params.insert("wal_keep_size".to_string(), "1GB".to_string());
-    params.insert("hot_standby_feedback".to_string(), "on".to_string());
+    for (key, value) in DEFAULT_POSTGRESQL_PARAMS {
+        params.insert((*key).to_string(), (*value).to_string());
+    }
 
     // Override with user-defined parameters
     for (key, value) in &cluster.spec.postgresql_params {
@@ -102,19 +111,14 @@ fn generate_spilo_config(cluster: &PostgresCluster) -> String {
 
     // Format as YAML for SPILO_CONFIGURATION
     // Spilo expects this structure to be merged into its generated config
-    let params_yaml: Vec<String> = params
-        .iter()
-        .map(|(k, v)| format!("    {}: {}", k, v))
-        .collect();
-
-    // Only override PostgreSQL parameters - let Spilo use its default
-    // basebackup_fast_xlog method for replica creation which works with its environment
-    format!(
-        r#"postgresql:
-  parameters:
-{}"#,
-        params_yaml.join("\n")
-    )
+    // Write directly to string buffer to avoid intermediate Vec allocation
+    let mut result = String::from("postgresql:\n  parameters:\n");
+    for (k, v) in &params {
+        let _ = writeln!(result, "    {}: {}", k, v);
+    }
+    // Remove trailing newline to match original format
+    result.pop();
+    result
 }
 
 /// Generate Patroni YAML configuration for ConfigMap
@@ -122,16 +126,18 @@ fn generate_patroni_yaml(cluster: &PostgresCluster) -> String {
     let cluster_name = cluster.name_any();
     let ns = cluster.namespace().unwrap_or_else(|| "default".to_string());
 
-    let mut postgresql_params = vec![
-        "max_connections: 100".to_string(),
-        "shared_buffers: 128MB".to_string(),
-        "wal_level: replica".to_string(),
-        "hot_standby: 'on'".to_string(),
-        "max_wal_senders: 10".to_string(),
-        "max_replication_slots: 10".to_string(),
-        "wal_keep_size: 1GB".to_string(),
-        "hot_standby_feedback: 'on'".to_string(),
-    ];
+    // Build parameter list from defaults
+    let mut postgresql_params: Vec<String> = DEFAULT_POSTGRESQL_PARAMS
+        .iter()
+        .map(|(k, v)| {
+            // Quote 'on' values for YAML compatibility
+            if *v == "on" {
+                format!("{}: 'on'", k)
+            } else {
+                format!("{}: {}", k, v)
+            }
+        })
+        .collect();
 
     // Add user-defined parameters
     for (key, value) in &cluster.spec.postgresql_params {
@@ -501,87 +507,87 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
     let mut volumes: Vec<Volume> = vec![];
 
     // TLS configuration
-    if let Some(ref tls) = cluster.spec.tls {
-        if tls.enabled {
-            // Get filenames with defaults
-            let cert_file = tls
-                .certificate_file
-                .as_deref()
-                .unwrap_or("tls.crt")
-                .to_string();
-            let key_file = tls
-                .private_key_file
-                .as_deref()
-                .unwrap_or("tls.key")
-                .to_string();
+    if let Some(ref tls) = cluster.spec.tls
+        && tls.enabled
+    {
+        // Get filenames with defaults
+        let cert_file = tls
+            .certificate_file
+            .as_deref()
+            .unwrap_or("tls.crt")
+            .to_string();
+        let key_file = tls
+            .private_key_file
+            .as_deref()
+            .unwrap_or("tls.key")
+            .to_string();
 
-            // Add TLS certificate volume if cert_secret is specified
-            if let Some(ref cert_secret) = tls.cert_secret {
-                volumes.push(Volume {
-                    name: "tls-certs".to_string(),
-                    secret: Some(SecretVolumeSource {
-                        secret_name: Some(cert_secret.clone()),
-                        default_mode: Some(0o640),
-                        ..Default::default()
-                    }),
+        // Add TLS certificate volume if cert_secret is specified
+        if let Some(ref cert_secret) = tls.cert_secret {
+            volumes.push(Volume {
+                name: "tls-certs".to_string(),
+                secret: Some(SecretVolumeSource {
+                    secret_name: Some(cert_secret.clone()),
+                    default_mode: Some(0o640),
                     ..Default::default()
-                });
+                }),
+                ..Default::default()
+            });
 
-                volume_mounts.push(VolumeMount {
-                    name: "tls-certs".to_string(),
-                    mount_path: "/tls".to_string(),
-                    read_only: Some(true),
+            volume_mounts.push(VolumeMount {
+                name: "tls-certs".to_string(),
+                mount_path: "/tls".to_string(),
+                read_only: Some(true),
+                ..Default::default()
+            });
+
+            // Spilo TLS environment variables
+            env_vars.push(EnvVar {
+                name: "SSL_CERTIFICATE_FILE".to_string(),
+                value: Some(format!("/tls/{}", cert_file)),
+                ..Default::default()
+            });
+            env_vars.push(EnvVar {
+                name: "SSL_PRIVATE_KEY_FILE".to_string(),
+                value: Some(format!("/tls/{}", key_file)),
+                ..Default::default()
+            });
+        }
+
+        // Add separate CA secret volume if specified
+        if let Some(ref ca_secret) = tls.ca_secret {
+            let ca_file = tls.ca_file.as_deref().unwrap_or("ca.crt").to_string();
+
+            volumes.push(Volume {
+                name: "tls-ca".to_string(),
+                secret: Some(SecretVolumeSource {
+                    secret_name: Some(ca_secret.clone()),
+                    default_mode: Some(0o640),
                     ..Default::default()
-                });
+                }),
+                ..Default::default()
+            });
 
-                // Spilo TLS environment variables
-                env_vars.push(EnvVar {
-                    name: "SSL_CERTIFICATE_FILE".to_string(),
-                    value: Some(format!("/tls/{}", cert_file)),
-                    ..Default::default()
-                });
-                env_vars.push(EnvVar {
-                    name: "SSL_PRIVATE_KEY_FILE".to_string(),
-                    value: Some(format!("/tls/{}", key_file)),
-                    ..Default::default()
-                });
-            }
+            volume_mounts.push(VolumeMount {
+                name: "tls-ca".to_string(),
+                mount_path: "/tlsca".to_string(),
+                read_only: Some(true),
+                ..Default::default()
+            });
 
-            // Add separate CA secret volume if specified
-            if let Some(ref ca_secret) = tls.ca_secret {
-                let ca_file = tls.ca_file.as_deref().unwrap_or("ca.crt").to_string();
-
-                volumes.push(Volume {
-                    name: "tls-ca".to_string(),
-                    secret: Some(SecretVolumeSource {
-                        secret_name: Some(ca_secret.clone()),
-                        default_mode: Some(0o640),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                });
-
-                volume_mounts.push(VolumeMount {
-                    name: "tls-ca".to_string(),
-                    mount_path: "/tlsca".to_string(),
-                    read_only: Some(true),
-                    ..Default::default()
-                });
-
+            env_vars.push(EnvVar {
+                name: "SSL_CA_FILE".to_string(),
+                value: Some(format!("/tlsca/{}", ca_file)),
+                ..Default::default()
+            });
+        } else if tls.cert_secret.is_some() {
+            // CA file in the same secret as cert/key
+            if let Some(ref ca_file) = tls.ca_file {
                 env_vars.push(EnvVar {
                     name: "SSL_CA_FILE".to_string(),
-                    value: Some(format!("/tlsca/{}", ca_file)),
+                    value: Some(format!("/tls/{}", ca_file)),
                     ..Default::default()
                 });
-            } else if tls.cert_secret.is_some() {
-                // CA file in the same secret as cert/key
-                if let Some(ref ca_file) = tls.ca_file {
-                    env_vars.push(EnvVar {
-                        name: "SSL_CA_FILE".to_string(),
-                        value: Some(format!("/tls/{}", ca_file)),
-                        ..Default::default()
-                    });
-                }
             }
         }
     }

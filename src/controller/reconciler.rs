@@ -47,7 +47,12 @@ struct MissingResources {
 
 impl MissingResources {
     fn any_missing(&self) -> bool {
-        self.secret || self.rbac || self.configmap || self.services || self.statefulset || self.pgbouncer
+        self.secret
+            || self.rbac
+            || self.configmap
+            || self.services
+            || self.statefulset
+            || self.pgbouncer
     }
 }
 
@@ -94,7 +99,10 @@ async fn check_missing_resources(
 
     // Check Services
     let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
-    let services = svc_api.get_opt(&format!("{}-primary", name)).await?.is_none()
+    let services = svc_api
+        .get_opt(&format!("{}-primary", name))
+        .await?
+        .is_none()
         || svc_api.get_opt(&format!("{}-repl", name)).await?.is_none()
         || svc_api
             .get_opt(&format!("{}-headless", name))
@@ -252,8 +260,7 @@ pub fn error_policy(cluster: Arc<PostgresCluster>, error: &Error, _ctx: Arc<Cont
 
     // Check if this is a NotFound error (object was deleted)
     // These are expected and should not be logged as errors
-    let error_str = format!("{:?}", error);
-    if error_str.contains("not found") || error_str.contains("NotFound") {
+    if error.is_not_found() {
         debug!(
             "Object {} no longer exists (likely deleted), not requeuing",
             name
@@ -407,69 +414,69 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
     }
 
     // Validate TLS configuration if enabled
-    if let Some(ref tls) = cluster.spec.tls {
-        if tls.enabled {
-            // If TLS is enabled but no cert_secret is specified, that's a warning
-            // (Spilo will generate self-signed certs)
-            if tls.cert_secret.is_none() {
-                info!(
-                    "TLS enabled for {} but no cert_secret specified - Spilo will use self-signed certificates",
-                    name
+    if let Some(ref tls) = cluster.spec.tls
+        && tls.enabled
+    {
+        // If TLS is enabled but no cert_secret is specified, that's a warning
+        // (Spilo will generate self-signed certs)
+        if tls.cert_secret.is_none() {
+            info!(
+                "TLS enabled for {} but no cert_secret specified - Spilo will use self-signed certificates",
+                name
+            );
+        } else if let Some(ref cert_secret_name) = tls.cert_secret {
+            // Validate that the cert secret exists
+            let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
+            if secrets_api.get_opt(cert_secret_name).await?.is_none() {
+                warn!(
+                    "TLS cert_secret '{}' not found for cluster {}",
+                    cert_secret_name, name
                 );
-            } else if let Some(ref cert_secret_name) = tls.cert_secret {
-                // Validate that the cert secret exists
-                let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
-                if secrets_api.get_opt(cert_secret_name).await?.is_none() {
-                    warn!(
-                        "TLS cert_secret '{}' not found for cluster {}",
-                        cert_secret_name, name
-                    );
-                    status_manager
-                        .set_failed(
-                            "TLSSecretNotFound",
-                            &format!("TLS certificate secret '{}' not found", cert_secret_name),
-                        )
-                        .await?;
-                    ctx.publish_warning_event(
-                        cluster,
+                status_manager
+                    .set_failed(
                         "TLSSecretNotFound",
-                        "Validation",
-                        Some(format!(
-                            "TLS certificate secret '{}' not found",
-                            cert_secret_name
-                        )),
+                        &format!("TLS certificate secret '{}' not found", cert_secret_name),
                     )
-                    .await;
-                    return Ok(Action::requeue(Duration::from_secs(30)));
-                }
+                    .await?;
+                ctx.publish_warning_event(
+                    cluster,
+                    "TLSSecretNotFound",
+                    "Validation",
+                    Some(format!(
+                        "TLS certificate secret '{}' not found",
+                        cert_secret_name
+                    )),
+                )
+                .await;
+                return Ok(Action::requeue(Duration::from_secs(30)));
             }
+        }
 
-            // Validate CA secret if specified
-            if let Some(ref ca_secret_name) = tls.ca_secret {
-                let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
-                if secrets_api.get_opt(ca_secret_name).await?.is_none() {
-                    warn!(
-                        "TLS ca_secret '{}' not found for cluster {}",
-                        ca_secret_name, name
-                    );
-                    status_manager
-                        .set_failed(
-                            "TLSCASecretNotFound",
-                            &format!("TLS CA certificate secret '{}' not found", ca_secret_name),
-                        )
-                        .await?;
-                    ctx.publish_warning_event(
-                        cluster,
+        // Validate CA secret if specified
+        if let Some(ref ca_secret_name) = tls.ca_secret {
+            let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
+            if secrets_api.get_opt(ca_secret_name).await?.is_none() {
+                warn!(
+                    "TLS ca_secret '{}' not found for cluster {}",
+                    ca_secret_name, name
+                );
+                status_manager
+                    .set_failed(
                         "TLSCASecretNotFound",
-                        "Validation",
-                        Some(format!(
-                            "TLS CA certificate secret '{}' not found",
-                            ca_secret_name
-                        )),
+                        &format!("TLS CA certificate secret '{}' not found", ca_secret_name),
                     )
-                    .await;
-                    return Ok(Action::requeue(Duration::from_secs(30)));
-                }
+                    .await?;
+                ctx.publish_warning_event(
+                    cluster,
+                    "TLSCASecretNotFound",
+                    "Validation",
+                    Some(format!(
+                        "TLS CA certificate secret '{}' not found",
+                        ca_secret_name
+                    )),
+                )
+                .await;
+                return Ok(Action::requeue(Duration::from_secs(30)));
             }
         }
     }

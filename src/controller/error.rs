@@ -38,6 +38,15 @@ pub enum Error {
 }
 
 impl Error {
+    /// Check if this error indicates a resource was not found
+    pub fn is_not_found(&self) -> bool {
+        match self {
+            Error::NotFound(_) => true,
+            Error::KubeError(e) => matches!(e, kube::Error::Api(api_err) if api_err.code == 404),
+            _ => false,
+        }
+    }
+
     /// Check if this error is retryable
     pub fn is_retryable(&self) -> bool {
         match self {

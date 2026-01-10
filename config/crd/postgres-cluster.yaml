@@ -56,10 +56,12 @@ spec:
                 # Storage size format validation (Kubernetes quantity)
                 - rule: "self.storage.size.matches('^[0-9]+(\\\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$')"
                   message: "storage.size must be a valid Kubernetes quantity (e.g., '10Gi', '500Mi')"
-                # HA recommendation - warn if replicas < 3 for production
-                - rule: "self.replicas >= 3 || self.replicas == 1"
-                  message: "For high availability, use 3+ replicas. Single replica (1) is allowed for development."
-                  messageExpression: "self.replicas == 2 ? 'Warning: 2 replicas provides no HA benefit over 1. Use 1 for dev or 3+ for HA.' : ''"
+                # Replica count validation
+                # 1 replica: development/testing
+                # 2 replicas: primary + read replica (no automatic failover)
+                # 3+ replicas: full HA with automatic failover
+                - rule: "self.replicas >= 1"
+                  message: "replicas must be at least 1"
               properties:
                 version:
                   type: string

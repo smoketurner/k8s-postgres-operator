@@ -61,19 +61,15 @@ impl ConditionBuilder {
 
         // Find existing condition of this type
         if let Some(existing) = self.conditions.iter_mut().find(|c| c.type_ == type_) {
-            // Only update if status changed
+            // Only update transition time if status changed
             if existing.status != status {
-                existing.status = status.to_string();
-                existing.reason = reason.to_string();
-                existing.message = message.to_string();
                 existing.last_transition_time = now;
-                existing.observed_generation = self.generation;
-            } else {
-                // Update reason and message even if status unchanged
-                existing.reason = reason.to_string();
-                existing.message = message.to_string();
-                existing.observed_generation = self.generation;
             }
+            // Always update reason, message, and status
+            existing.status = status.to_string();
+            existing.reason = reason.to_string();
+            existing.message = message.to_string();
+            existing.observed_generation = self.generation;
         } else {
             // Add new condition
             self.conditions.push(Condition {

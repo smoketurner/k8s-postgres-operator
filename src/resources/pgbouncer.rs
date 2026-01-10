@@ -297,27 +297,26 @@ pub fn generate_pgbouncer_deployment(cluster: &PostgresCluster) -> Deployment {
     ];
 
     // Add TLS volumes if TLS is enabled
-    if let Some(ref tls) = cluster.spec.tls {
-        if tls.enabled {
-            if let Some(ref cert_secret) = tls.cert_secret {
-                volumes.push(Volume {
-                    name: "tls-certs".to_string(),
-                    secret: Some(SecretVolumeSource {
-                        secret_name: Some(cert_secret.clone()),
-                        default_mode: Some(0o640),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                });
+    if let Some(ref tls) = cluster.spec.tls
+        && tls.enabled
+        && let Some(ref cert_secret) = tls.cert_secret
+    {
+        volumes.push(Volume {
+            name: "tls-certs".to_string(),
+            secret: Some(SecretVolumeSource {
+                secret_name: Some(cert_secret.clone()),
+                default_mode: Some(0o640),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
 
-                volume_mounts.push(VolumeMount {
-                    name: "tls-certs".to_string(),
-                    mount_path: "/tls".to_string(),
-                    read_only: Some(true),
-                    ..Default::default()
-                });
-            }
-        }
+        volume_mounts.push(VolumeMount {
+            name: "tls-certs".to_string(),
+            mount_path: "/tls".to_string(),
+            read_only: Some(true),
+            ..Default::default()
+        });
     }
 
     // Environment variables for Bitnami PgBouncer image
@@ -394,35 +393,36 @@ pub fn generate_pgbouncer_deployment(cluster: &PostgresCluster) -> Deployment {
     ];
 
     // Add client TLS env vars if TLS is enabled
-    if let Some(ref tls) = cluster.spec.tls {
-        if tls.enabled && tls.cert_secret.is_some() {
-            let cert_file = tls
-                .certificate_file
-                .as_deref()
-                .unwrap_or("tls.crt")
-                .to_string();
-            let key_file = tls
-                .private_key_file
-                .as_deref()
-                .unwrap_or("tls.key")
-                .to_string();
+    if let Some(ref tls) = cluster.spec.tls
+        && tls.enabled
+        && tls.cert_secret.is_some()
+    {
+        let cert_file = tls
+            .certificate_file
+            .as_deref()
+            .unwrap_or("tls.crt")
+            .to_string();
+        let key_file = tls
+            .private_key_file
+            .as_deref()
+            .unwrap_or("tls.key")
+            .to_string();
 
-            env_vars.push(EnvVar {
-                name: "PGBOUNCER_CLIENT_TLS_SSLMODE".to_string(),
-                value: Some("require".to_string()),
-                ..Default::default()
-            });
-            env_vars.push(EnvVar {
-                name: "PGBOUNCER_CLIENT_TLS_CERT_FILE".to_string(),
-                value: Some(format!("/tls/{}", cert_file)),
-                ..Default::default()
-            });
-            env_vars.push(EnvVar {
-                name: "PGBOUNCER_CLIENT_TLS_KEY_FILE".to_string(),
-                value: Some(format!("/tls/{}", key_file)),
-                ..Default::default()
-            });
-        }
+        env_vars.push(EnvVar {
+            name: "PGBOUNCER_CLIENT_TLS_SSLMODE".to_string(),
+            value: Some("require".to_string()),
+            ..Default::default()
+        });
+        env_vars.push(EnvVar {
+            name: "PGBOUNCER_CLIENT_TLS_CERT_FILE".to_string(),
+            value: Some(format!("/tls/{}", cert_file)),
+            ..Default::default()
+        });
+        env_vars.push(EnvVar {
+            name: "PGBOUNCER_CLIENT_TLS_KEY_FILE".to_string(),
+            value: Some(format!("/tls/{}", key_file)),
+            ..Default::default()
+        });
     }
 
     // Probes
@@ -608,27 +608,26 @@ pub fn generate_pgbouncer_replica_deployment(cluster: &PostgresCluster) -> Deplo
     ];
 
     // Add TLS volumes if TLS is enabled
-    if let Some(ref tls) = cluster.spec.tls {
-        if tls.enabled {
-            if let Some(ref cert_secret) = tls.cert_secret {
-                volumes.push(Volume {
-                    name: "tls-certs".to_string(),
-                    secret: Some(SecretVolumeSource {
-                        secret_name: Some(cert_secret.clone()),
-                        default_mode: Some(0o640),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                });
+    if let Some(ref tls) = cluster.spec.tls
+        && tls.enabled
+        && let Some(ref cert_secret) = tls.cert_secret
+    {
+        volumes.push(Volume {
+            name: "tls-certs".to_string(),
+            secret: Some(SecretVolumeSource {
+                secret_name: Some(cert_secret.clone()),
+                default_mode: Some(0o640),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
 
-                volume_mounts.push(VolumeMount {
-                    name: "tls-certs".to_string(),
-                    mount_path: "/tls".to_string(),
-                    read_only: Some(true),
-                    ..Default::default()
-                });
-            }
-        }
+        volume_mounts.push(VolumeMount {
+            name: "tls-certs".to_string(),
+            mount_path: "/tls".to_string(),
+            read_only: Some(true),
+            ..Default::default()
+        });
     }
 
     // Environment variables for Bitnami PgBouncer image
@@ -705,35 +704,36 @@ pub fn generate_pgbouncer_replica_deployment(cluster: &PostgresCluster) -> Deplo
     ];
 
     // Add client TLS env vars if TLS is enabled
-    if let Some(ref tls) = cluster.spec.tls {
-        if tls.enabled && tls.cert_secret.is_some() {
-            let cert_file = tls
-                .certificate_file
-                .as_deref()
-                .unwrap_or("tls.crt")
-                .to_string();
-            let key_file = tls
-                .private_key_file
-                .as_deref()
-                .unwrap_or("tls.key")
-                .to_string();
+    if let Some(ref tls) = cluster.spec.tls
+        && tls.enabled
+        && tls.cert_secret.is_some()
+    {
+        let cert_file = tls
+            .certificate_file
+            .as_deref()
+            .unwrap_or("tls.crt")
+            .to_string();
+        let key_file = tls
+            .private_key_file
+            .as_deref()
+            .unwrap_or("tls.key")
+            .to_string();
 
-            env_vars.push(EnvVar {
-                name: "PGBOUNCER_CLIENT_TLS_SSLMODE".to_string(),
-                value: Some("require".to_string()),
-                ..Default::default()
-            });
-            env_vars.push(EnvVar {
-                name: "PGBOUNCER_CLIENT_TLS_CERT_FILE".to_string(),
-                value: Some(format!("/tls/{}", cert_file)),
-                ..Default::default()
-            });
-            env_vars.push(EnvVar {
-                name: "PGBOUNCER_CLIENT_TLS_KEY_FILE".to_string(),
-                value: Some(format!("/tls/{}", key_file)),
-                ..Default::default()
-            });
-        }
+        env_vars.push(EnvVar {
+            name: "PGBOUNCER_CLIENT_TLS_SSLMODE".to_string(),
+            value: Some("require".to_string()),
+            ..Default::default()
+        });
+        env_vars.push(EnvVar {
+            name: "PGBOUNCER_CLIENT_TLS_CERT_FILE".to_string(),
+            value: Some(format!("/tls/{}", cert_file)),
+            ..Default::default()
+        });
+        env_vars.push(EnvVar {
+            name: "PGBOUNCER_CLIENT_TLS_KEY_FILE".to_string(),
+            value: Some(format!("/tls/{}", key_file)),
+            ..Default::default()
+        });
     }
 
     // Probes

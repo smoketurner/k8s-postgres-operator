@@ -517,10 +517,7 @@ mod tls_statefulset_tests {
         assert!(tls_volume.is_some(), "TLS volume should exist");
 
         let secret_source = tls_volume.unwrap().secret.as_ref().unwrap();
-        assert_eq!(
-            secret_source.secret_name,
-            Some("my-tls-secret".to_string())
-        );
+        assert_eq!(secret_source.secret_name, Some("my-tls-secret".to_string()));
     }
 
     #[test]
@@ -965,5 +962,518 @@ mod tls_pgbouncer_integration_tests {
             tls_mode.is_some(),
             "PgBouncer should have TLS sslmode env var"
         );
+    }
+}
+
+// =============================================================================
+// Replica Count Configuration Tests
+// =============================================================================
+
+mod replica_count_tests {
+    use super::*;
+
+    #[test]
+    fn test_single_replica_statefulset() {
+        let cluster = create_test_cluster("my-cluster", "default", 1);
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+        assert_eq!(sts.spec.as_ref().unwrap().replicas, Some(1));
+    }
+
+    #[test]
+    fn test_two_replica_statefulset() {
+        let cluster = create_test_cluster("my-cluster", "default", 2);
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+        assert_eq!(sts.spec.as_ref().unwrap().replicas, Some(2));
+    }
+
+    #[test]
+    fn test_five_replica_statefulset() {
+        let cluster = create_test_cluster("my-cluster", "default", 5);
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+        assert_eq!(sts.spec.as_ref().unwrap().replicas, Some(5));
+    }
+
+    #[test]
+    fn test_ten_replica_statefulset() {
+        let cluster = create_test_cluster("my-cluster", "default", 10);
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+        assert_eq!(sts.spec.as_ref().unwrap().replicas, Some(10));
+    }
+
+    #[test]
+    fn test_pdb_five_replicas() {
+        let cluster = create_test_cluster("my-cluster", "default", 5);
+        let pdb_resource = pdb::generate_pdb(&cluster);
+        let spec = pdb_resource.spec.as_ref().unwrap();
+        // Five replicas: min_available = 4 (n-1)
+        assert_eq!(
+            spec.min_available,
+            Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(4))
+        );
+    }
+
+    #[test]
+    fn test_pdb_ten_replicas() {
+        let cluster = create_test_cluster("my-cluster", "default", 10);
+        let pdb_resource = pdb::generate_pdb(&cluster);
+        let spec = pdb_resource.spec.as_ref().unwrap();
+        // Ten replicas: min_available = 9 (n-1)
+        assert_eq!(
+            spec.min_available,
+            Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(9))
+        );
+    }
+}
+
+// =============================================================================
+// PgBouncer Pool Mode Tests
+// =============================================================================
+
+mod pgbouncer_pool_mode_tests {
+    use super::*;
+    use kube::ResourceExt;
+
+    fn create_cluster_with_pool_mode(mode: &str) -> PostgresCluster {
+        let mut cluster = create_test_cluster("my-cluster", "default", 3);
+        cluster.spec.pgbouncer = Some(PgBouncerSpec {
+            enabled: true,
+            replicas: 2,
+            pool_mode: mode.to_string(),
+            max_db_connections: 60,
+            default_pool_size: 20,
+            max_client_conn: 10000,
+            image: None,
+            resources: None,
+            enable_replica_pooler: false,
+        });
+        cluster
+    }
+
+    #[test]
+    fn test_session_pool_mode() {
+        let cluster = create_cluster_with_pool_mode("session");
+        let cm = pgbouncer::generate_pgbouncer_configmap(&cluster);
+        let data = cm.data.as_ref().unwrap();
+        let ini = data.get("pgbouncer.ini").unwrap();
+        assert!(ini.contains("pool_mode = session"));
+    }
+
+    #[test]
+    fn test_transaction_pool_mode() {
+        let cluster = create_cluster_with_pool_mode("transaction");
+        let cm = pgbouncer::generate_pgbouncer_configmap(&cluster);
+        let data = cm.data.as_ref().unwrap();
+        let ini = data.get("pgbouncer.ini").unwrap();
+        assert!(ini.contains("pool_mode = transaction"));
+    }
+
+    #[test]
+    fn test_statement_pool_mode() {
+        let cluster = create_cluster_with_pool_mode("statement");
+        let cm = pgbouncer::generate_pgbouncer_configmap(&cluster);
+        let data = cm.data.as_ref().unwrap();
+        let ini = data.get("pgbouncer.ini").unwrap();
+        assert!(ini.contains("pool_mode = statement"));
+    }
+
+    #[test]
+    fn test_pgbouncer_configmap_has_correct_name() {
+        let cluster = create_cluster_with_pool_mode("transaction");
+        let cm = pgbouncer::generate_pgbouncer_configmap(&cluster);
+        assert_eq!(cm.name_any(), "my-cluster-pgbouncer-config");
+    }
+}
+
+// =============================================================================
+// Resource Configuration Tests
+// =============================================================================
+
+mod resource_configuration_tests {
+    use super::*;
+    use postgres_operator::crd::{ResourceList, ResourceRequirements};
+
+    fn create_cluster_with_resources(
+        cpu_req: &str,
+        mem_req: &str,
+        cpu_limit: &str,
+        mem_limit: &str,
+    ) -> PostgresCluster {
+        let mut cluster = create_test_cluster("my-cluster", "default", 1);
+        cluster.spec.resources = Some(ResourceRequirements {
+            requests: Some(ResourceList {
+                cpu: Some(cpu_req.to_string()),
+                memory: Some(mem_req.to_string()),
+            }),
+            limits: Some(ResourceList {
+                cpu: Some(cpu_limit.to_string()),
+                memory: Some(mem_limit.to_string()),
+            }),
+        });
+        cluster
+    }
+
+    #[test]
+    fn test_low_resources() {
+        let cluster = create_cluster_with_resources("100m", "128Mi", "500m", "512Mi");
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+        let container = &sts
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0];
+        let resources = container.resources.as_ref().unwrap();
+
+        let requests = resources.requests.as_ref().unwrap();
+        assert_eq!(requests.get("cpu").unwrap().0, "100m");
+        assert_eq!(requests.get("memory").unwrap().0, "128Mi");
+
+        let limits = resources.limits.as_ref().unwrap();
+        assert_eq!(limits.get("cpu").unwrap().0, "500m");
+        assert_eq!(limits.get("memory").unwrap().0, "512Mi");
+    }
+
+    #[test]
+    fn test_high_resources() {
+        let cluster = create_cluster_with_resources("2", "4Gi", "4", "8Gi");
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+        let container = &sts
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0];
+        let resources = container.resources.as_ref().unwrap();
+
+        let requests = resources.requests.as_ref().unwrap();
+        assert_eq!(requests.get("cpu").unwrap().0, "2");
+        assert_eq!(requests.get("memory").unwrap().0, "4Gi");
+    }
+
+    #[test]
+    fn test_no_resources() {
+        let cluster = create_test_cluster("my-cluster", "default", 1);
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+        let container = &sts
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0];
+        // Without resources, should either have None or empty resources
+        // This test verifies no panic occurs when resources are not set
+        let _ = container.resources.as_ref();
+    }
+}
+
+// =============================================================================
+// Storage Class Configuration Tests
+// =============================================================================
+
+mod storage_class_tests {
+    use super::*;
+
+    fn create_cluster_with_storage(size: &str, storage_class: Option<&str>) -> PostgresCluster {
+        let mut cluster = create_test_cluster("my-cluster", "default", 1);
+        cluster.spec.storage.size = size.to_string();
+        cluster.spec.storage.storage_class = storage_class.map(String::from);
+        cluster
+    }
+
+    #[test]
+    fn test_default_storage_class() {
+        let cluster = create_cluster_with_storage("10Gi", None);
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+        let vct = &sts
+            .spec
+            .as_ref()
+            .unwrap()
+            .volume_claim_templates
+            .as_ref()
+            .unwrap()[0];
+        // When no storage class is specified, storageClassName should be None (uses cluster default)
+        assert!(vct.spec.as_ref().unwrap().storage_class_name.is_none());
+    }
+
+    #[test]
+    fn test_custom_storage_class() {
+        let cluster = create_cluster_with_storage("10Gi", Some("fast-ssd"));
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+        let vct = &sts
+            .spec
+            .as_ref()
+            .unwrap()
+            .volume_claim_templates
+            .as_ref()
+            .unwrap()[0];
+        assert_eq!(
+            vct.spec.as_ref().unwrap().storage_class_name,
+            Some("fast-ssd".to_string())
+        );
+    }
+
+    #[test]
+    fn test_storage_size_in_volume_claim() {
+        let cluster = create_cluster_with_storage("100Gi", None);
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+        let vct = &sts
+            .spec
+            .as_ref()
+            .unwrap()
+            .volume_claim_templates
+            .as_ref()
+            .unwrap()[0];
+        let requests = vct
+            .spec
+            .as_ref()
+            .unwrap()
+            .resources
+            .as_ref()
+            .unwrap()
+            .requests
+            .as_ref()
+            .unwrap();
+        assert_eq!(requests.get("storage").unwrap().0, "100Gi");
+    }
+}
+
+// =============================================================================
+// Full Production Configuration Tests
+// =============================================================================
+
+mod production_configuration_tests {
+    use super::*;
+    use postgres_operator::crd::{MetricsSpec, ResourceList, ResourceRequirements};
+
+    fn create_production_cluster() -> PostgresCluster {
+        let mut cluster = create_test_cluster("production-db", "databases", 3);
+        cluster.spec.version = "16".to_string();
+        cluster.spec.storage.size = "100Gi".to_string();
+        cluster.spec.storage.storage_class = Some("fast-ssd".to_string());
+
+        // Resources
+        cluster.spec.resources = Some(ResourceRequirements {
+            requests: Some(ResourceList {
+                cpu: Some("2".to_string()),
+                memory: Some("4Gi".to_string()),
+            }),
+            limits: Some(ResourceList {
+                cpu: Some("4".to_string()),
+                memory: Some("8Gi".to_string()),
+            }),
+        });
+
+        // TLS
+        cluster.spec.tls = Some(TLSSpec {
+            enabled: true,
+            cert_secret: Some("production-db-tls".to_string()),
+            ca_secret: Some("production-db-ca".to_string()),
+            certificate_file: None,
+            private_key_file: None,
+            ca_file: None,
+        });
+
+        // PgBouncer
+        cluster.spec.pgbouncer = Some(PgBouncerSpec {
+            enabled: true,
+            replicas: 3,
+            pool_mode: "transaction".to_string(),
+            max_db_connections: 100,
+            default_pool_size: 25,
+            max_client_conn: 10000,
+            image: None,
+            resources: None,
+            enable_replica_pooler: true,
+        });
+
+        // Metrics
+        cluster.spec.metrics = Some(MetricsSpec {
+            enabled: true,
+            port: 9187,
+        });
+
+        // PostgreSQL params
+        cluster
+            .spec
+            .postgresql_params
+            .insert("max_connections".to_string(), "500".to_string());
+        cluster
+            .spec
+            .postgresql_params
+            .insert("shared_buffers".to_string(), "1GB".to_string());
+
+        cluster
+    }
+
+    #[test]
+    fn test_production_statefulset_replicas() {
+        let cluster = create_production_cluster();
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+        assert_eq!(sts.spec.as_ref().unwrap().replicas, Some(3));
+    }
+
+    #[test]
+    fn test_production_statefulset_has_tls_volumes() {
+        let cluster = create_production_cluster();
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+        let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+        let volumes = pod_spec.volumes.as_ref().unwrap();
+
+        let tls_volume = volumes.iter().find(|v| v.name == "tls-certs");
+        let ca_volume = volumes.iter().find(|v| v.name == "tls-ca");
+
+        assert!(
+            tls_volume.is_some(),
+            "Production cluster should have TLS cert volume"
+        );
+        assert!(
+            ca_volume.is_some(),
+            "Production cluster should have CA volume"
+        );
+    }
+
+    #[test]
+    fn test_production_pgbouncer_deployment() {
+        let cluster = create_production_cluster();
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
+        assert_eq!(deployment.spec.as_ref().unwrap().replicas, Some(3));
+    }
+
+    #[test]
+    fn test_production_has_replica_pooler() {
+        let cluster = create_production_cluster();
+        assert!(pgbouncer::is_replica_pooler_enabled(&cluster));
+
+        let repl_deployment = pgbouncer::generate_pgbouncer_replica_deployment(&cluster);
+        assert!(repl_deployment.metadata.name.is_some());
+    }
+
+    #[test]
+    fn test_production_pdb_min_available() {
+        let cluster = create_production_cluster();
+        let pdb_resource = pdb::generate_pdb(&cluster);
+        let spec = pdb_resource.spec.as_ref().unwrap();
+        // 3 replicas: min_available = 2
+        assert_eq!(
+            spec.min_available,
+            Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(2))
+        );
+    }
+
+    #[test]
+    fn test_production_config_has_postgresql_params() {
+        let cluster = create_production_cluster();
+        let cm = patroni::generate_patroni_config(&cluster);
+        let data = cm.data.as_ref().unwrap();
+        let yaml = data.get("patroni.yml").unwrap();
+
+        // The PostgreSQL params should be included in the Patroni config
+        assert!(yaml.contains("max_connections") || yaml.contains("parameters"));
+    }
+}
+
+// =============================================================================
+// Panic Prevention Tests for Resource Generation
+// =============================================================================
+
+mod resource_panic_prevention_tests {
+    use super::*;
+    use postgres_operator::crd::PostgresClusterStatus;
+
+    #[test]
+    fn test_generate_statefulset_with_nil_optional_fields() {
+        let mut cluster = create_test_cluster("my-cluster", "default", 1);
+        cluster.spec.resources = None;
+        cluster.spec.postgresql_params = Default::default();
+        cluster.spec.tls = None;
+        cluster.spec.pgbouncer = None;
+        cluster.spec.metrics = None;
+        cluster.spec.service = None;
+        cluster.spec.backup = None;
+        cluster.status = None;
+
+        // Should not panic
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+        assert!(sts.metadata.name.is_some());
+    }
+
+    #[test]
+    fn test_generate_config_with_empty_params() {
+        let cluster = create_test_cluster("my-cluster", "default", 1);
+        assert!(cluster.spec.postgresql_params.is_empty());
+
+        // Should not panic with empty params
+        let cm = patroni::generate_patroni_config(&cluster);
+        assert!(cm.data.is_some());
+    }
+
+    #[test]
+    fn test_generate_services_with_nil_service_spec() {
+        let cluster = create_test_cluster("my-cluster", "default", 1);
+        assert!(cluster.spec.service.is_none());
+
+        // Should not panic
+        let primary = service::generate_primary_service(&cluster);
+        let replicas = service::generate_replicas_service(&cluster);
+        let headless = service::generate_headless_service(&cluster);
+
+        assert!(primary.metadata.name.is_some());
+        assert!(replicas.metadata.name.is_some());
+        assert!(headless.metadata.name.is_some());
+    }
+
+    #[test]
+    fn test_generate_pdb_with_status() {
+        let mut cluster = create_test_cluster("my-cluster", "default", 3);
+        cluster.status = Some(PostgresClusterStatus {
+            phase: postgres_operator::crd::ClusterPhase::Running,
+            ready_replicas: 3,
+            replicas: 3,
+            ..Default::default()
+        });
+
+        // Should not panic
+        let pdb_resource = pdb::generate_pdb(&cluster);
+        assert!(pdb_resource.metadata.name.is_some());
+    }
+
+    #[test]
+    fn test_generate_secret_always_succeeds() {
+        let cluster = create_test_cluster("my-cluster", "default", 1);
+
+        // Secret generation should always succeed for valid cluster
+        let result = secret::generate_credentials_secret(&cluster);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_pgbouncer_not_generated_when_disabled() {
+        let cluster = create_test_cluster("my-cluster", "default", 3);
+        assert!(!pgbouncer::is_pgbouncer_enabled(&cluster));
+    }
+
+    #[test]
+    fn test_tls_disabled_no_volumes() {
+        let cluster = create_test_cluster("my-cluster", "default", 1);
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+        let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+
+        // Without TLS, should have no volumes or empty volumes
+        if let Some(volumes) = &pod_spec.volumes {
+            let tls_volume = volumes.iter().find(|v| v.name == "tls-certs");
+            assert!(
+                tls_volume.is_none(),
+                "Should not have TLS volume when TLS is disabled"
+            );
+        }
     }
 }
