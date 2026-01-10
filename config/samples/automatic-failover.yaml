@@ -1,6 +1,6 @@
 # Highly available PostgreSQL cluster
 # 3+ replicas for production workloads with automatic failover
-apiVersion: postgres.example.com/v1alpha1
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
 kind: PostgresCluster
 metadata:
   name: pg-ha

@@ -20,7 +20,7 @@ Describe the solution you'd like to see implemented.
 
 ```yaml
 # If this requires CRD changes, show the proposed API
-apiVersion: postgres.example.com/v1alpha1
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
 kind: PostgresCluster
 spec:
   newFeature:

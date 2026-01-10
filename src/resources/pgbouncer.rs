@@ -39,7 +39,7 @@ fn pgbouncer_labels(cluster_name: &str) -> BTreeMap<String, String> {
         "pgbouncer".to_string(),
     );
     labels.insert(
-        "postgres.example.com/pooler".to_string(),
+        "postgres-operator.smoketurner.com/pooler".to_string(),
         "true".to_string(),
     );
     labels
@@ -49,7 +49,7 @@ fn pgbouncer_labels(cluster_name: &str) -> BTreeMap<String, String> {
 fn pgbouncer_replica_labels(cluster_name: &str) -> BTreeMap<String, String> {
     let mut labels = pgbouncer_labels(cluster_name);
     labels.insert(
-        "postgres.example.com/pooler-type".to_string(),
+        "postgres-operator.smoketurner.com/pooler-type".to_string(),
         "replica".to_string(),
     );
     labels
@@ -218,12 +218,12 @@ fn generate_pgbouncer_anti_affinity(cluster_name: &str) -> Affinity {
                         label_selector: Some(LabelSelector {
                             match_expressions: Some(vec![
                                 LabelSelectorRequirement {
-                                    key: "postgres.example.com/cluster".to_string(),
+                                    key: "postgres-operator.smoketurner.com/cluster".to_string(),
                                     operator: "In".to_string(),
                                     values: Some(vec![cluster_name.to_string()]),
                                 },
                                 LabelSelectorRequirement {
-                                    key: "postgres.example.com/pooler".to_string(),
+                                    key: "postgres-operator.smoketurner.com/pooler".to_string(),
                                     operator: "In".to_string(),
                                     values: Some(vec!["true".to_string()]),
                                 },

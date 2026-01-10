@@ -18,7 +18,7 @@
 #    kubectl create secret generic azure-backup-credentials \
 #      --from-literal=AZURE_STORAGE_SAS_TOKEN=<your-sas-token>
 #
-apiVersion: postgres.example.com/v1alpha1
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
 kind: PostgresCluster
 metadata:
   name: production-azure-backup

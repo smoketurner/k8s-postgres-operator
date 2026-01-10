@@ -8,7 +8,7 @@ metadata:
 rules:
   # PostgresCluster resources
   - apiGroups:
-      - postgres.example.com
+      - postgres-operator.smoketurner.com
     resources:
       - postgresclusters
     verbs:
@@ -20,7 +20,7 @@ rules:
       - patch
       - delete
   - apiGroups:
-      - postgres.example.com
+      - postgres-operator.smoketurner.com
     resources:
       - postgresclusters/status
     verbs:
@@ -28,7 +28,7 @@ rules:
       - update
       - patch
   - apiGroups:
-      - postgres.example.com
+      - postgres-operator.smoketurner.com
     resources:
       - postgresclusters/finalizers
     verbs:

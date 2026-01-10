@@ -33,7 +33,7 @@ pub async fn install_crd(client: Client) -> Result<(), CrdError> {
     tracing::info!("Installing PostgresCluster CRD...");
 
     crds.patch(
-        "postgresclusters.postgres.example.com",
+        "postgresclusters.postgres-operator.smoketurner.com",
         &params,
         &Patch::Apply(&crd),
     )
@@ -44,7 +44,7 @@ pub async fn install_crd(client: Client) -> Result<(), CrdError> {
 
     let establish = await_condition(
         crds,
-        "postgresclusters.postgres.example.com",
+        "postgresclusters.postgres-operator.smoketurner.com",
         conditions::is_crd_established(),
     );
 

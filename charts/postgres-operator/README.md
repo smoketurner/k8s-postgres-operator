@@ -43,7 +43,7 @@ helm uninstall postgres-operator -n postgres-operator-system
 Note: By default, the CRD is retained to prevent accidental data loss. To remove it:
 
 ```bash
-kubectl delete crd postgresclusters.postgres.example.com
+kubectl delete crd postgresclusters.postgres-operator.smoketurner.com
 ```
 
 ## Configuration

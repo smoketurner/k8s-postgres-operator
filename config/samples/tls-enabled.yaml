@@ -1,7 +1,7 @@
 # PostgreSQL cluster with TLS encryption
 # Requires a TLS secret to be created beforehand:
 #   kubectl create secret tls my-postgres-tls --cert=server.crt --key=server.key
-apiVersion: postgres.example.com/v1alpha1
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
 kind: PostgresCluster
 metadata:
   name: pg-tls

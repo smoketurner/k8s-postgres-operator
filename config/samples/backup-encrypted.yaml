@@ -17,7 +17,7 @@
 #
 # IMPORTANT: Store your encryption key securely! Without it, backups cannot be restored.
 #
-apiVersion: postgres.example.com/v1alpha1
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
 kind: PostgresCluster
 metadata:
   name: secure-backup

@@ -1,6 +1,6 @@
 # Single PostgreSQL server managed by Patroni
 # Good for development or small workloads
-apiVersion: postgres.example.com/v1alpha1
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
 kind: PostgresCluster
 metadata:
   name: pg-single

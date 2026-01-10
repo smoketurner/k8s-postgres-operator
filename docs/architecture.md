@@ -157,7 +157,7 @@ On Kubernetes 1.35+, the operator tracks additional pod-level status:
 The `PostgresCluster` CRD defines the API for managing clusters:
 
 ```yaml
-apiVersion: postgres.example.com/v1alpha1
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
 kind: PostgresCluster
 metadata:
   name: my-cluster
@@ -242,7 +242,7 @@ The operator tracks `metadata.generation` vs `status.observedGeneration`:
 Finalizers ensure graceful deletion:
 
 ```rust
-const FINALIZER: &str = "postgres.example.com/finalizer";
+const FINALIZER: &str = "postgres-operator.smoketurner.com/finalizer";
 ```
 
 - Prevents premature resource deletion
@@ -308,7 +308,7 @@ spec:
   minAvailable: 1  # For 2+ replicas
   selector:
     matchLabels:
-      postgres.example.com/cluster: <name>
+      postgres-operator.smoketurner.com/cluster: <name>
 ```
 
 ## Leader Election

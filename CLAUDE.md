@@ -88,7 +88,7 @@ Initializes logging, creates Kubernetes client, builds shared Context, and runs 
 - **Spec**: `version`, `replicas`, `storage`, `resources`, `postgresql_params`, `backup`, `pgbouncer`, `tls`, `metrics`
 - **Status**: `phase`, `readyReplicas`, `primaryPod`, `replicaPods`, `conditions`, retry tracking, `observed_generation`
 
-API version: `postgres.example.com/v1alpha1`
+API version: `postgres-operator.smoketurner.com/v1alpha1`
 
 ### Controller (`src/controller/`)
 - `reconciler.rs`: Main reconciliation loop - handles finalizers, spec change detection, resource application, state transitions

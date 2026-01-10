@@ -241,7 +241,7 @@ impl BackupStatusCollector {
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
 
         let label_selector = format!(
-            "postgres.example.com/cluster={},spilo-role=master",
+            "postgres-operator.smoketurner.com/cluster={},spilo-role=master",
             self.cluster_name
         );
 
@@ -264,7 +264,7 @@ impl BackupStatusCollector {
         }
 
         // If no master found, try any cluster pod
-        let label_selector = format!("postgres.example.com/cluster={}", self.cluster_name);
+        let label_selector = format!("postgres-operator.smoketurner.com/cluster={}", self.cluster_name);
         let pod_list = pods
             .list(&kube::api::ListParams::default().labels(&label_selector))
             .await?;

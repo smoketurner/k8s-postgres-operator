@@ -152,11 +152,11 @@ namespace: {ns}
 
 kubernetes:
   use_endpoints: true
-  scope_label: postgres.example.com/cluster
+  scope_label: postgres-operator.smoketurner.com/cluster
   role_label: spilo-role
   labels:
     application: spilo
-    postgres.example.com/cluster: {cluster_name}
+    postgres-operator.smoketurner.com/cluster: {cluster_name}
 
 bootstrap:
   dcs:
@@ -341,7 +341,7 @@ fn generate_anti_affinity(cluster_name: &str) -> Affinity {
                     pod_affinity_term: PodAffinityTerm {
                         label_selector: Some(LabelSelector {
                             match_expressions: Some(vec![LabelSelectorRequirement {
-                                key: "postgres.example.com/cluster".to_string(),
+                                key: "postgres-operator.smoketurner.com/cluster".to_string(),
                                 operator: "In".to_string(),
                                 values: Some(vec![cluster_name.to_string()]),
                             }]),
@@ -356,7 +356,7 @@ fn generate_anti_affinity(cluster_name: &str) -> Affinity {
                     pod_affinity_term: PodAffinityTerm {
                         label_selector: Some(LabelSelector {
                             match_expressions: Some(vec![LabelSelectorRequirement {
-                                key: "postgres.example.com/cluster".to_string(),
+                                key: "postgres-operator.smoketurner.com/cluster".to_string(),
                                 operator: "In".to_string(),
                                 values: Some(vec![cluster_name.to_string()]),
                             }]),
@@ -473,7 +473,7 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
         // Kubernetes labels for Spilo to manage pod roles
         EnvVar {
             name: "KUBERNETES_SCOPE_LABEL".to_string(),
-            value: Some("postgres.example.com/cluster".to_string()),
+            value: Some("postgres-operator.smoketurner.com/cluster".to_string()),
             ..Default::default()
         },
         EnvVar {
@@ -484,7 +484,7 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
         EnvVar {
             name: "KUBERNETES_LABELS".to_string(),
             value: Some(format!(
-                "{{\"application\":\"spilo\",\"postgres.example.com/cluster\":\"{}\"}}",
+                "{{\"application\":\"spilo\",\"postgres-operator.smoketurner.com/cluster\":\"{}\"}}",
                 name
             )),
             ..Default::default()
@@ -780,11 +780,11 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
     };
 
     // Update strategy - calculate maxUnavailable based on replica count
-    // For single replica: 0 (no disruption allowed during updates)
+    // For single replica: 1 (minimum allowed by Kubernetes 1.35+)
     // For 2 replicas: 1 (one at a time)
     // For 3+ replicas: allow up to half to update in parallel while maintaining quorum
     let max_unavailable = match replicas {
-        1 => 0,                             // Single replica - no disruption
+        1 => 1,                             // Single replica - minimum allowed
         2 => 1,                             // Two replicas - one at a time
         n => std::cmp::max(1, (n - 1) / 2), // Keep quorum: at most (n-1)/2
     };

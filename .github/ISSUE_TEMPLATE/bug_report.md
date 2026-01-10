@@ -31,7 +31,7 @@ What actually happened, including any error messages.
 
 ```yaml
 # Paste your PostgresCluster manifest here (remove sensitive data)
-apiVersion: postgres.example.com/v1alpha1
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
 kind: PostgresCluster
 metadata:
   name: my-cluster

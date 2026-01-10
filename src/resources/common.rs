@@ -11,7 +11,7 @@ use kube::ResourceExt;
 use crate::crd::PostgresCluster;
 
 /// API version for PostgresCluster CRD
-pub const API_VERSION: &str = "postgres.example.com/v1alpha1";
+pub const API_VERSION: &str = "postgres-operator.smoketurner.com/v1alpha1";
 
 /// Kind for PostgresCluster CRD
 pub const KIND: &str = "PostgresCluster";
@@ -50,7 +50,7 @@ pub fn standard_labels(cluster_name: &str) -> BTreeMap<String, String> {
             FIELD_MANAGER.to_string(),
         ),
         (
-            "postgres.example.com/cluster".to_string(),
+            "postgres-operator.smoketurner.com/cluster".to_string(),
             cluster_name.to_string(),
         ),
     ])
@@ -64,7 +64,7 @@ pub fn standard_labels(cluster_name: &str) -> BTreeMap<String, String> {
 pub fn patroni_labels(cluster_name: &str) -> BTreeMap<String, String> {
     let mut labels = standard_labels(cluster_name);
     labels.insert(
-        "postgres.example.com/ha-mode".to_string(),
+        "postgres-operator.smoketurner.com/ha-mode".to_string(),
         "patroni".to_string(),
     );
     // Required for Patroni's Kubernetes DCS pod discovery
@@ -93,7 +93,7 @@ mod tests {
             Some(&"postgres-operator".to_string())
         );
         assert_eq!(
-            labels.get("postgres.example.com/cluster"),
+            labels.get("postgres-operator.smoketurner.com/cluster"),
             Some(&"my-cluster".to_string())
         );
     }
@@ -102,7 +102,7 @@ mod tests {
     fn test_patroni_labels() {
         let labels = patroni_labels("my-cluster");
         assert_eq!(
-            labels.get("postgres.example.com/ha-mode"),
+            labels.get("postgres-operator.smoketurner.com/ha-mode"),
             Some(&"patroni".to_string())
         );
         // Required for Patroni's Kubernetes DCS

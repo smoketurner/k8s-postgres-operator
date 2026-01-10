@@ -266,7 +266,7 @@ kubectl logs <cluster>-0 -c postgres
 make install-crd
 
 # Verify
-kubectl get crd postgresclusters.postgres.example.com
+kubectl get crd postgresclusters.postgres-operator.smoketurner.com
 ```
 
 #### Operator Not Reconciling
@@ -284,7 +284,7 @@ kubectl logs -n postgres-operator-system deploy/postgres-operator
 
 ```bash
 # Check PVC status
-kubectl get pvc -l postgres.example.com/cluster=<name>
+kubectl get pvc -l postgres-operator.smoketurner.com/cluster=<name>
 
 # Check storage class
 kubectl get storageclass

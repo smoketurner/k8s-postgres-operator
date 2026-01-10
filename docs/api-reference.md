@@ -7,7 +7,7 @@ This document provides a complete reference for the PostgresCluster custom resou
 The `PostgresCluster` resource defines a PostgreSQL cluster managed by the operator.
 
 ```yaml
-apiVersion: postgres.example.com/v1alpha1
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
 kind: PostgresCluster
 metadata:
   name: my-cluster
@@ -331,7 +331,7 @@ Per-pod resource resize status (Kubernetes 1.35+).
 ## Full Example
 
 ```yaml
-apiVersion: postgres.example.com/v1alpha1
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
 kind: PostgresCluster
 metadata:
   name: production-db
@@ -434,7 +434,7 @@ The operator applies these labels to all managed resources:
 | `app.kubernetes.io/instance` | Cluster name |
 | `app.kubernetes.io/component` | Component name (postgresql, pgbouncer) |
 | `app.kubernetes.io/managed-by` | "postgres-operator" |
-| `postgres.example.com/cluster` | Cluster name |
+| `postgres-operator.smoketurner.com/cluster` | Cluster name |
 
 ### Patroni Labels
 

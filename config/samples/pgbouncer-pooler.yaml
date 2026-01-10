@@ -1,6 +1,6 @@
 # PostgreSQL cluster with PgBouncer connection pooling
 # PgBouncer is deployed as a separate Deployment (not a sidecar)
-apiVersion: postgres.example.com/v1alpha1
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
 kind: PostgresCluster
 metadata:
   name: pg-pooled

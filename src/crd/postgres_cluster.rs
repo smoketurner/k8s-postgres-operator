@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 /// PostgresCluster is the Schema for the postgresclusters API
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[kube(
-    group = "postgres.example.com",
+    group = "postgres-operator.smoketurner.com",
     version = "v1alpha1",
     kind = "PostgresCluster",
     plural = "postgresclusters",

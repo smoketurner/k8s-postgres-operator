@@ -13,7 +13,7 @@
 #    kubectl create secret generic gcs-backup-credentials \
 #      --from-file=GOOGLE_APPLICATION_CREDENTIALS=./service-account.json
 #
-apiVersion: postgres.example.com/v1alpha1
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
 kind: PostgresCluster
 metadata:
   name: production-gcs-backup

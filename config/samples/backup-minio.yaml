@@ -12,7 +12,7 @@
 #      --from-literal=AWS_ACCESS_KEY_ID=minioadmin \
 #      --from-literal=AWS_SECRET_ACCESS_KEY=minioadmin
 #
-apiVersion: postgres.example.com/v1alpha1
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
 kind: PostgresCluster
 metadata:
   name: backup-to-minio

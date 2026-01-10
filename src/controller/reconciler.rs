@@ -34,11 +34,11 @@ use crate::crd::{ClusterPhase, PostgresCluster};
 use crate::resources::{backup, patroni, pdb, pgbouncer, secret, service};
 
 /// Finalizer name for cleanup
-pub const FINALIZER: &str = "postgres.example.com/finalizer";
+pub const FINALIZER: &str = "postgres-operator.smoketurner.com/finalizer";
 
 /// Annotation to trigger a manual backup
 /// Value should be a unique identifier (e.g., timestamp) to distinguish triggers
-pub const BACKUP_TRIGGER_ANNOTATION: &str = "postgres.example.com/trigger-backup";
+pub const BACKUP_TRIGGER_ANNOTATION: &str = "postgres-operator.smoketurner.com/trigger-backup";
 
 /// Tracks which critical resources are missing for a cluster
 #[derive(Debug, Default)]
@@ -928,7 +928,7 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
 /// Get the Patroni leader pod name
 async fn get_patroni_leader(api: &Api<Pod>, cluster_name: &str) -> Option<String> {
     let label_selector = format!(
-        "postgres.example.com/cluster={},spilo-role=master",
+        "postgres-operator.smoketurner.com/cluster={},spilo-role=master",
         cluster_name
     );
 
@@ -944,7 +944,7 @@ async fn get_patroni_leader(api: &Api<Pod>, cluster_name: &str) -> Option<String
 /// Get Patroni replica pod names
 async fn get_patroni_replicas(api: &Api<Pod>, cluster_name: &str) -> Vec<String> {
     let label_selector = format!(
-        "postgres.example.com/cluster={},spilo-role=replica",
+        "postgres-operator.smoketurner.com/cluster={},spilo-role=replica",
         cluster_name
     );
 
@@ -1180,7 +1180,7 @@ async fn check_creating_timeout(
 
     // Timeout exceeded, check for specific issues
     // Check if PVCs are stuck pending
-    let label_selector = format!("postgres.example.com/cluster={}", cluster_name);
+    let label_selector = format!("postgres-operator.smoketurner.com/cluster={}", cluster_name);
     if let Ok(pvcs) = pvc_api
         .list(&ListParams::default().labels(&label_selector))
         .await
@@ -1584,7 +1584,7 @@ pub async fn get_pod_info(
     cluster_name: &str,
 ) -> Result<Vec<crate::crd::PodInfo>> {
     let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
-    let label_selector = format!("postgres.example.com/cluster={}", cluster_name);
+    let label_selector = format!("postgres-operator.smoketurner.com/cluster={}", cluster_name);
     let lp = ListParams::default().labels(&label_selector);
 
     let pod_list = pods.list(&lp).await?;
@@ -1646,7 +1646,7 @@ pub async fn get_pod_resize_status(
     use crate::crd::{PodResizeStatus, PodResourceResizeStatus, ResourceList};
 
     let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
-    let label_selector = format!("postgres.example.com/cluster={}", cluster_name);
+    let label_selector = format!("postgres-operator.smoketurner.com/cluster={}", cluster_name);
     let lp = ListParams::default().labels(&label_selector);
 
     let pod_list = pods.list(&lp).await?;

@@ -58,7 +58,7 @@ The operator integrates with [WAL-G](https://github.com/wal-g/wal-g) through the
 Add a `backup` section to your PostgresCluster spec:
 
 ```yaml
-apiVersion: postgres.example.com/v1alpha1
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
 kind: PostgresCluster
 metadata:
   name: my-cluster
@@ -275,7 +275,7 @@ Connect to a pod and use WAL-G:
 
 ```bash
 # Get pod name
-kubectl get pods -l postgres.example.com/cluster=my-cluster
+kubectl get pods -l postgres-operator.smoketurner.com/cluster=my-cluster
 
 # List backups
 kubectl exec -it my-cluster-0 -- su postgres -c "wal-g backup-list"
@@ -311,7 +311,7 @@ The recommended approach is to create a new cluster and restore into it. This is
 
 ```yaml
 # restore-cluster.yaml
-apiVersion: postgres.example.com/v1alpha1
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
 kind: PostgresCluster
 metadata:
   name: my-cluster-restored
@@ -385,7 +385,7 @@ kubectl scale postgrescluster my-cluster --replicas=0
 
 2. **Delete PVCs (data will be lost!):**
 ```bash
-kubectl delete pvc -l postgres.example.com/cluster=my-cluster
+kubectl delete pvc -l postgres-operator.smoketurner.com/cluster=my-cluster
 ```
 
 3. **Scale back up and perform restore:**

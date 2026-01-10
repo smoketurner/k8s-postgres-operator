@@ -1,6 +1,6 @@
 # Primary + read replica configuration
 # Provides a read replica for scaling reads and basic failover capability
-apiVersion: postgres.example.com/v1alpha1
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
 kind: PostgresCluster
 metadata:
   name: pg-replicated

@@ -112,7 +112,7 @@ where
 fn has_finalizer() -> impl kube::runtime::wait::Condition<PostgresCluster> {
     |obj: Option<&PostgresCluster>| {
         obj.and_then(|c| c.metadata.finalizers.as_ref())
-            .map(|f| f.contains(&"postgres.example.com/finalizer".to_string()))
+            .map(|f| f.contains(&"postgres-operator.smoketurner.com/finalizer".to_string()))
             .unwrap_or(false)
     }
 }
@@ -234,7 +234,7 @@ async fn test_finalizer_added() {
 
     let cluster = api.get("test-fin").await.expect("get");
     let finalizers = cluster.metadata.finalizers.as_ref().unwrap();
-    assert!(finalizers.contains(&"postgres.example.com/finalizer".to_string()));
+    assert!(finalizers.contains(&"postgres-operator.smoketurner.com/finalizer".to_string()));
 
     api.delete("test-fin", &DeleteParams::default()).await.ok();
     ns.cleanup().await.ok();

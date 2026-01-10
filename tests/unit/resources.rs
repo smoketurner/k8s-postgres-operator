@@ -154,7 +154,7 @@ mod patroni_statefulset_tests {
             Some(&"my-cluster".to_string())
         );
         assert_eq!(
-            labels.get("postgres.example.com/ha-mode"),
+            labels.get("postgres-operator.smoketurner.com/ha-mode"),
             Some(&"patroni".to_string())
         );
         assert_eq!(
@@ -343,7 +343,7 @@ mod service_tests {
         // Patroni uses spilo-role label
         assert_eq!(selector.get("spilo-role"), Some(&"master".to_string()));
         assert_eq!(
-            selector.get("postgres.example.com/cluster"),
+            selector.get("postgres-operator.smoketurner.com/cluster"),
             Some(&"my-cluster".to_string())
         );
     }
@@ -655,11 +655,11 @@ mod pgbouncer_deployment_tests {
             Some(&"pgbouncer".to_string())
         );
         assert_eq!(
-            labels.get("postgres.example.com/pooler"),
+            labels.get("postgres-operator.smoketurner.com/pooler"),
             Some(&"true".to_string())
         );
         assert_eq!(
-            labels.get("postgres.example.com/cluster"),
+            labels.get("postgres-operator.smoketurner.com/cluster"),
             Some(&"my-cluster".to_string())
         );
     }
@@ -825,7 +825,7 @@ mod pgbouncer_service_tests {
 
         let selector = svc.spec.as_ref().unwrap().selector.as_ref().unwrap();
         assert_eq!(
-            selector.get("postgres.example.com/pooler"),
+            selector.get("postgres-operator.smoketurner.com/pooler"),
             Some(&"true".to_string())
         );
     }

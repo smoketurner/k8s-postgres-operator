@@ -25,6 +25,8 @@
       "Bash(kubectl auth:*)",
       "Bash(kubectl config:*)",
       "Bash(kubectl cluster-info:*)",
+      "Bash(kubectl exec:*)",
+      "Bash(kubectl port-forward:*)",
       "Bash(docker build:*)",
       "Bash(docker images:*)",
       "Bash(docker tag:*)",
@@ -42,8 +44,6 @@
       "Read(**/secrets/**)",
       "Read(**/*secret*)",
       "Read(**/*credential*)",
-      "Bash(kubectl exec:*)",
-      "Bash(kubectl port-forward:*)",
       "Bash(docker run:*)"
     ]
   },

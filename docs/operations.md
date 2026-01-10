@@ -7,7 +7,7 @@ This guide covers day-2 operations for managing PostgreSQL clusters with the ope
 ### Creating a Cluster
 
 ```yaml
-apiVersion: postgres.example.com/v1alpha1
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
 kind: PostgresCluster
 metadata:
   name: my-cluster
@@ -34,7 +34,7 @@ kubectl get pgc my-cluster -w
 kubectl describe pgc my-cluster
 
 # Check pods
-kubectl get pods -l postgres.example.com/cluster=my-cluster
+kubectl get pods -l postgres-operator.smoketurner.com/cluster=my-cluster
 ```
 
 ### Deleting a Cluster
@@ -302,10 +302,10 @@ groups:
 **Check**:
 ```bash
 # Pod status
-kubectl get pods -l postgres.example.com/cluster=my-cluster
+kubectl get pods -l postgres-operator.smoketurner.com/cluster=my-cluster
 
 # PVC status (storage issues)
-kubectl get pvc -l postgres.example.com/cluster=my-cluster
+kubectl get pvc -l postgres-operator.smoketurner.com/cluster=my-cluster
 
 # Pod events
 kubectl describe pod my-cluster-0
@@ -438,7 +438,7 @@ Before draining a node:
 
 1. Check PodDisruptionBudget:
    ```bash
-   kubectl get pdb -l postgres.example.com/cluster=my-cluster
+   kubectl get pdb -l postgres-operator.smoketurner.com/cluster=my-cluster
    ```
 
 2. If primary is on the node, switchover first:

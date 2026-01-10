@@ -35,7 +35,7 @@ make deploy
 ### Create a PostgreSQL Cluster
 
 ```yaml
-apiVersion: postgres.example.com/v1alpha1
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
 kind: PostgresCluster
 metadata:
   name: my-postgres
@@ -105,7 +105,7 @@ The operator automatically detects Kubernetes version and enables these features
 ### Example: Production HA Cluster
 
 ```yaml
-apiVersion: postgres.example.com/v1alpha1
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
 kind: PostgresCluster
 metadata:
   name: production-db
@@ -172,7 +172,7 @@ kubectl create secret generic aws-backup-credentials \
 ```
 
 ```yaml
-apiVersion: postgres.example.com/v1alpha1
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
 kind: PostgresCluster
 metadata:
   name: my-postgres
@@ -407,10 +407,10 @@ The operator uses least-privilege RBAC:
 
 ```bash
 # Check pod status
-kubectl get pods -l postgres.example.com/cluster=my-postgres
+kubectl get pods -l postgres-operator.smoketurner.com/cluster=my-postgres
 
 # Check PVC status (storage class issues)
-kubectl get pvc -l postgres.example.com/cluster=my-postgres
+kubectl get pvc -l postgres-operator.smoketurner.com/cluster=my-postgres
 
 # Check operator logs
 kubectl logs -n postgres-operator-system deploy/postgres-operator
@@ -433,7 +433,7 @@ kubectl get endpoints my-postgres
 kubectl get svc my-postgres-primary
 
 # Check if pods are ready
-kubectl get pods -l postgres.example.com/cluster=my-postgres
+kubectl get pods -l postgres-operator.smoketurner.com/cluster=my-postgres
 
 # Test connectivity
 kubectl run test --rm -it --image=busybox -- nc -zv my-postgres-primary 5432

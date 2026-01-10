@@ -1,6 +1,6 @@
 # Production-ready PostgreSQL cluster with HA, TLS, and connection pooling
 # This example shows a fully-featured configuration
-apiVersion: postgres.example.com/v1alpha1
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
 kind: PostgresCluster
 metadata:
   name: production-db
