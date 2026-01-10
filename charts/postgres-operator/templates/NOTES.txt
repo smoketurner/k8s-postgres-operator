@@ -1,0 +1,39 @@
+PostgreSQL Operator has been installed.
+
+1. Verify the operator is running:
+
+   kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "postgres-operator.name" . }}
+
+2. Create a PostgreSQL cluster:
+
+   cat <<EOF | kubectl apply -f -
+   apiVersion: postgres.example.com/v1alpha1
+   kind: PostgresCluster
+   metadata:
+     name: my-postgres
+   spec:
+     version: "16"
+     replicas: 3
+     storage:
+       size: 10Gi
+   EOF
+
+3. Check the cluster status:
+
+   kubectl get postgresclusters
+   kubectl describe pgc my-postgres
+
+4. Connect to PostgreSQL:
+
+   # Get the password
+   kubectl get secret my-postgres-credentials -o jsonpath='{.data.password}' | base64 -d
+
+   # Connect to the primary (read-write)
+   kubectl run psql --rm -it --image=postgres:16 -- \
+     psql -h my-postgres-primary -U postgres
+
+   # Connect to replicas (read-only)
+   kubectl run psql --rm -it --image=postgres:16 -- \
+     psql -h my-postgres-repl -U postgres
+
+For more information, visit: https://github.com/smoketurner/k8s-postgres-operator

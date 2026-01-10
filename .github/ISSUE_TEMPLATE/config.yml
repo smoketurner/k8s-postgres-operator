@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & Discussions
+    url: https://github.com/smoketurner/k8s-postgres-operator/discussions
+    about: Ask questions and discuss ideas in GitHub Discussions
+  - name: Documentation
+    url: https://github.com/smoketurner/k8s-postgres-operator/tree/main/docs
+    about: Read the documentation for usage guides and API reference

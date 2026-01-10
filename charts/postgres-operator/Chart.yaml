@@ -1,0 +1,25 @@
+apiVersion: v2
+name: postgres-operator
+description: A Kubernetes operator for managing PostgreSQL clusters with high availability using Patroni
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.26.0-0"
+home: https://github.com/smoketurner/k8s-postgres-operator
+sources:
+  - https://github.com/smoketurner/k8s-postgres-operator
+keywords:
+  - postgresql
+  - postgres
+  - database
+  - operator
+  - patroni
+  - high-availability
+maintainers:
+  - name: PostgreSQL Operator Team
+    email: maintainers@example.com
+annotations:
+  artifacthub.io/license: MIT
+  artifacthub.io/operator: "true"
+  artifacthub.io/operatorCapabilities: Full Lifecycle
+  artifacthub.io/category: database
