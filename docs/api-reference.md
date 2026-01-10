@@ -257,6 +257,9 @@ The status subresource is read-only and managed by the operator.
 | `lastErrorTime` | string | Timestamp of last error |
 | `phaseStartedAt` | string | When current phase started |
 | `previousReplicas` | integer | Previous replica count |
+| `pods` | [][PodInfo](#podinfo) | Per-pod tracking info (K8s 1.35+) |
+| `resize_status` | [][PodResourceResizeStatus](#podresourceresizestatus) | Resource resize status (K8s 1.35+) |
+| `all_pods_synced` | boolean | True when all pods have applied current spec (K8s 1.35+) |
 
 ### Phase Values
 
@@ -292,6 +295,38 @@ The status subresource is read-only and managed by the operator.
 | Degraded | Running but with issues |
 | ConfigurationValid | Spec passes validation |
 | ReplicasReady | All replicas synchronized |
+| PodGenerationSynced | All pods have applied their spec (K8s 1.35+) |
+
+### PodInfo
+
+Per-pod tracking information (Kubernetes 1.35+).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Pod name |
+| `generation` | integer | Pod metadata.generation |
+| `observed_generation` | integer | Pod status.observedGeneration (when kubelet processed spec) |
+| `spec_applied` | boolean | True when observedGeneration >= generation |
+
+### PodResourceResizeStatus
+
+Per-pod resource resize status (Kubernetes 1.35+).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `pod_name` | string | Pod name |
+| `status` | string | Resize status: NotInProgress, Proposed, InProgress, Infeasible |
+| `allocated_cpu` | string | Currently allocated CPU |
+| `allocated_memory` | string | Currently allocated memory |
+
+**Resize Status Values:**
+
+| Status | Description |
+|--------|-------------|
+| NotInProgress | No resize pending |
+| Proposed | Resize requested, waiting for kubelet |
+| InProgress | Kubelet is applying the resize |
+| Infeasible | Cannot resize (insufficient node resources) |
 
 ## Full Example
 

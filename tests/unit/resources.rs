@@ -1672,7 +1672,10 @@ mod resize_policy_tests {
         // Verify original fields are preserved
         assert_eq!(deployment_with_policy.metadata.name, original_name);
         assert_eq!(
-            deployment_with_policy.spec.as_ref().and_then(|s| s.replicas),
+            deployment_with_policy
+                .spec
+                .as_ref()
+                .and_then(|s| s.replicas),
             original_replicas
         );
     }

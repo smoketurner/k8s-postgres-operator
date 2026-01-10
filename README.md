@@ -7,6 +7,7 @@ A Kubernetes operator for managing PostgreSQL clusters with high availability us
 - **High Availability**: Automatic failover using Patroni with Kubernetes-native leader election
 - **Declarative Configuration**: Manage PostgreSQL clusters using Kubernetes custom resources
 - **Automatic Scaling**: Scale replicas up or down with automatic replication setup
+- **In-Place Resource Resizing**: CPU/memory changes without pod restarts (Kubernetes 1.35+)
 - **Connection Pooling**: Optional PgBouncer sidecar for connection pooling
 - **TLS Support**: Encrypted connections with certificate management
 - **Backup Configuration**: S3, GCS, and Azure blob storage backup destinations
@@ -80,6 +81,18 @@ kubectl describe pgc my-postgres
 | `pgbouncer.enabled` | boolean | Enable PgBouncer sidecar | false |
 | `metrics.enabled` | boolean | Enable metrics exporter | false |
 | `backup` | object | Backup configuration | none |
+
+### Kubernetes 1.35+ Features
+
+When running on Kubernetes 1.35+, the operator leverages these enhanced capabilities:
+
+| Feature | Description |
+|---------|-------------|
+| **In-Place Resource Resizing** | Change CPU/memory without pod restarts using container resize policies |
+| **Pod Generation Tracking** | Monitor `pod.status.observedGeneration` for spec sync status |
+| **Resize Status Monitoring** | Track resize progress via `pod.status.resize` (Proposed, InProgress, Infeasible) |
+
+The operator automatically detects Kubernetes version and enables these features when available. On older clusters, resource changes trigger rolling restarts as usual.
 
 ### Replica Configurations
 

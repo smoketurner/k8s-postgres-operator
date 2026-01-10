@@ -390,7 +390,10 @@ mod k8s_135_condition_tests {
 
     #[test]
     fn test_pod_generation_synced_condition_type() {
-        assert_eq!(condition_types::POD_GENERATION_SYNCED, "PodGenerationSynced");
+        assert_eq!(
+            condition_types::POD_GENERATION_SYNCED,
+            "PodGenerationSynced"
+        );
     }
 
     #[test]

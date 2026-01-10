@@ -116,6 +116,35 @@ spec:
       memory: "8Gi"
 ```
 
+**Kubernetes 1.35+ (In-Place Resizing):**
+
+On Kubernetes 1.35+, the operator supports in-place resource resizing:
+
+```bash
+# Update resources without pod restarts
+kubectl patch pgc my-cluster --type merge -p '{"spec":{"resources":{"requests":{"cpu":"4"}}}}'
+
+# Monitor resize progress
+kubectl get pgc my-cluster -o jsonpath='{.status.resize_status}' | jq .
+```
+
+| Resource | Default Behavior | Notes |
+|----------|------------------|-------|
+| CPU | Resize in-place | No restart required |
+| Memory | Container restart | Requires cgroup update |
+
+Check resize status:
+
+```bash
+# View per-pod resize status
+kubectl get pgc my-cluster -o yaml | grep -A 20 resize_status
+
+# Check if all pods are synced
+kubectl get pgc my-cluster -o jsonpath='{.status.all_pods_synced}'
+```
+
+**Kubernetes < 1.35:**
+
 Changes trigger a rolling restart of pods.
 
 ## Version Upgrades

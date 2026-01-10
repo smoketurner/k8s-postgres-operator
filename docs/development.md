@@ -8,9 +8,9 @@ This guide covers setting up a development environment and contributing to the P
 
 | Tool | Version | Purpose |
 |------|---------|---------|
-| Rust | 1.88+ | Build the operator |
+| Rust | 1.92+ | Build the operator (uses Rust 2024 edition) |
 | Docker | 20.10+ | Build container images |
-| kubectl | 1.26+ | Interact with Kubernetes |
+| kubectl | 1.26+ | Interact with Kubernetes (1.35+ for in-place resizing) |
 | kind/k3d/minikube | Latest | Local Kubernetes cluster |
 | Helm | 3.8+ | Chart development |
 

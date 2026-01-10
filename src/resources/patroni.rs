@@ -843,10 +843,7 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
 ///     },
 /// ]),
 /// ```
-pub fn add_resize_policy_to_statefulset(
-    sts: StatefulSet,
-    restart_on_resize: bool,
-) -> StatefulSet {
+pub fn add_resize_policy_to_statefulset(sts: StatefulSet, restart_on_resize: bool) -> StatefulSet {
     let policy = if restart_on_resize {
         "RestartContainer"
     } else {
@@ -865,17 +862,14 @@ pub fn add_resize_policy_to_statefulset(
     };
 
     // Navigate to containers and add resizePolicy
-    if let Some(spec) = sts_json.get_mut("spec") {
-        if let Some(template) = spec.get_mut("template") {
-            if let Some(pod_spec) = template.get_mut("spec") {
-                if let Some(containers) = pod_spec.get_mut("containers") {
-                    if let Some(containers_arr) = containers.as_array_mut() {
-                        for container in containers_arr {
-                            container["resizePolicy"] = resize_policy.clone();
-                        }
-                    }
-                }
-            }
+    if let Some(spec) = sts_json.get_mut("spec")
+        && let Some(template) = spec.get_mut("template")
+        && let Some(pod_spec) = template.get_mut("spec")
+        && let Some(containers) = pod_spec.get_mut("containers")
+        && let Some(containers_arr) = containers.as_array_mut()
+    {
+        for container in containers_arr {
+            container["resizePolicy"] = resize_policy.clone();
         }
     }
 

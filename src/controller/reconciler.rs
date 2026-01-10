@@ -1071,10 +1071,7 @@ pub async fn get_pod_info(
 
         // Get observedGeneration from pod status (Kubernetes 1.35+ feature)
         // This field indicates when the kubelet has processed the pod spec
-        let observed_generation = pod
-            .status
-            .as_ref()
-            .and_then(|s| s.observed_generation);
+        let observed_generation = pod.status.as_ref().and_then(|s| s.observed_generation);
 
         // Pod spec is applied when observedGeneration matches generation
         let spec_applied = match (generation, observed_generation) {
@@ -1135,15 +1132,12 @@ pub async fn get_pod_resize_status(
 
         // Get resize status from pod conditions (Kubernetes 1.35+)
         // The resize field is in status.resize
-        let resize_str = pod
-            .status
-            .as_ref()
-            .and_then(|s| {
-                // The resize field is a string in the pod status
-                // We access it via JSON since k8s-openapi v1_34 doesn't have it
-                let status_json = serde_json::to_value(s).ok()?;
-                status_json.get("resize")?.as_str().map(|s| s.to_string())
-            });
+        let resize_str = pod.status.as_ref().and_then(|s| {
+            // The resize field is a string in the pod status
+            // We access it via JSON since k8s-openapi v1_34 doesn't have it
+            let status_json = serde_json::to_value(s).ok()?;
+            status_json.get("resize")?.as_str().map(|s| s.to_string())
+        });
 
         let status = match resize_str.as_deref() {
             Some("InProgress") => PodResizeStatus::InProgress,
@@ -1165,7 +1159,10 @@ pub async fn get_pod_resize_status(
                 let container_json = serde_json::to_value(c).ok()?;
                 let allocated = container_json.get("allocatedResources")?;
 
-                let cpu = allocated.get("cpu").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let cpu = allocated
+                    .get("cpu")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
                 let memory = allocated
                     .get("memory")
                     .and_then(|v| v.as_str())
@@ -1201,7 +1198,10 @@ pub fn all_pods_synced(pod_infos: &[crate::crd::PodInfo]) -> bool {
 
 /// Check if any pod has a resize in progress.
 pub fn any_resize_in_progress(resize_statuses: &[crate::crd::PodResourceResizeStatus]) -> bool {
-    resize_statuses
-        .iter()
-        .any(|s| matches!(s.status, crate::crd::PodResizeStatus::InProgress | crate::crd::PodResizeStatus::Proposed))
+    resize_statuses.iter().any(|s| {
+        matches!(
+            s.status,
+            crate::crd::PodResizeStatus::InProgress | crate::crd::PodResizeStatus::Proposed
+        )
+    })
 }

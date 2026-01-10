@@ -260,11 +260,7 @@ impl<'a> StatusManager<'a> {
                 .as_ref()
                 .map(|s| s.resize_status.clone())
                 .unwrap_or_default(),
-            all_pods_synced: self
-                .cluster
-                .status
-                .as_ref()
-                .and_then(|s| s.all_pods_synced),
+            all_pods_synced: self.cluster.status.as_ref().and_then(|s| s.all_pods_synced),
         };
 
         self.update(status).await
@@ -393,11 +389,7 @@ impl<'a> StatusManager<'a> {
                 .as_ref()
                 .map(|s| s.resize_status.clone())
                 .unwrap_or_default(),
-            all_pods_synced: self
-                .cluster
-                .status
-                .as_ref()
-                .and_then(|s| s.all_pods_synced),
+            all_pods_synced: self.cluster.status.as_ref().and_then(|s| s.all_pods_synced),
         };
 
         self.update(status).await
@@ -446,9 +438,7 @@ impl<'a> StatusManager<'a> {
             pgbouncer_enabled: self.cluster.spec.pgbouncer.as_ref().map(|p| p.enabled),
             pgbouncer_ready_replicas: existing_status.and_then(|s| s.pgbouncer_ready_replicas),
             // Kubernetes 1.35+ pod tracking and resize status
-            pods: existing_status
-                .map(|s| s.pods.clone())
-                .unwrap_or_default(),
+            pods: existing_status.map(|s| s.pods.clone()).unwrap_or_default(),
             resize_status: existing_status
                 .map(|s| s.resize_status.clone())
                 .unwrap_or_default(),

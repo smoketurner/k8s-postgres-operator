@@ -136,6 +136,21 @@ The operator maintains Kubernetes-standard conditions:
 | Degraded | Running but with issues |
 | ConfigurationValid | Spec passes validation |
 | ReplicasReady | All replicas synchronized |
+| PodGenerationSynced | All pods have applied their spec (K8s 1.35+) |
+
+#### Kubernetes 1.35+ Enhanced Status Tracking
+
+On Kubernetes 1.35+, the operator tracks additional pod-level status:
+
+**Pod Generation Tracking:**
+- `pod.status.observedGeneration` indicates when kubelet has processed a pod spec
+- The operator compares `metadata.generation` with `observedGeneration` to detect sync status
+- Enables precise detection of when pod changes are fully applied
+
+**In-Place Resource Resize Status:**
+- `pod.status.resize` field tracks resize progress per pod
+- States: `Proposed` (pending), `InProgress` (resizing), `Infeasible` (cannot resize)
+- Container-level `allocatedResources` shows current resource allocation
 
 ### Custom Resource Definition (`src/crd/`)
 
@@ -233,6 +248,33 @@ const FINALIZER: &str = "postgres.example.com/finalizer";
 - Prevents premature resource deletion
 - Allows cleanup of external resources
 - Guarantees deletion order
+
+### In-Place Resource Resizing (Kubernetes 1.35+)
+
+The operator supports in-place pod resource resizing introduced in Kubernetes 1.35:
+
+**How it works:**
+1. When `spec.resources` changes, the operator updates the StatefulSet
+2. Kubernetes applies `resizePolicy` to determine resize behavior per resource
+3. Pods resize in-place without restart (for `NotRequired` policy)
+4. The operator monitors `pod.status.resize` for progress
+
+**Resize Policies:**
+```yaml
+resizePolicy:
+  - resourceName: cpu
+    restartPolicy: NotRequired   # Resize without restart
+  - resourceName: memory
+    restartPolicy: RestartContainer  # Restart required for memory
+```
+
+**Status Tracking:**
+- `status.resize_status[]` shows per-pod resize state
+- `status.pods[]` tracks generation sync status
+- `status.all_pods_synced` indicates when all pods reflect current spec
+
+**Fallback Behavior:**
+On Kubernetes < 1.35, resource changes trigger standard rolling restarts via StatefulSet update strategy.
 
 ## High Availability
 
