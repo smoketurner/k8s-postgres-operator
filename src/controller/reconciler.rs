@@ -16,12 +16,14 @@ use k8s_openapi::api::core::v1::{
     ConfigMap, Endpoints, PersistentVolumeClaim, Pod, Secret, Service, ServiceAccount,
 };
 use k8s_openapi::api::rbac::v1::{Role, RoleBinding};
-use kube::api::{DeleteParams, ListParams, Patch, PatchParams};
+use kube::api::{AttachParams, DeleteParams, ListParams, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::{Api, ResourceExt};
 use serde::de::DeserializeOwned;
+use tokio::io::AsyncReadExt;
 use tracing::{debug, error, info, instrument, warn};
 
+use crate::controller::backup_status::{BackupEvent, BackupStatusCollector, detect_backup_events};
 use crate::controller::context::Context;
 use crate::controller::error::{BackoffConfig, Error, Result};
 use crate::controller::state_machine::{
@@ -29,10 +31,14 @@ use crate::controller::state_machine::{
 };
 use crate::controller::status::{StatusManager, spec_changed};
 use crate::crd::{ClusterPhase, PostgresCluster};
-use crate::resources::{patroni, pdb, pgbouncer, secret, service};
+use crate::resources::{backup, patroni, pdb, pgbouncer, secret, service};
 
 /// Finalizer name for cleanup
 pub const FINALIZER: &str = "postgres.example.com/finalizer";
+
+/// Annotation to trigger a manual backup
+/// Value should be a unique identifier (e.g., timestamp) to distinguish triggers
+pub const BACKUP_TRIGGER_ANNOTATION: &str = "postgres.example.com/trigger-backup";
 
 /// Tracks which critical resources are missing for a cluster
 #[derive(Debug, Default)]
@@ -318,6 +324,54 @@ async fn check_and_update_status(
     // Build transition context for potential state changes
     let transition_ctx = TransitionContext::new(ready_replicas, cluster.spec.replicas);
 
+    // Collect backup status if backups are enabled and cluster is running
+    let collected_backup_status =
+        if current_phase == ClusterPhase::Running && backup::is_backup_enabled(cluster) {
+            let collector = BackupStatusCollector::new(ctx.client.clone(), ns, &name);
+            match collector.collect(cluster).await {
+                Ok(backup_status) => {
+                    debug!(
+                        cluster = %name,
+                        backup_count = ?backup_status.backup_count,
+                        wal_healthy = ?backup_status.wal_archiving_healthy,
+                        "Collected backup status"
+                    );
+
+                    // Detect and emit backup events
+                    let previous_backup = cluster.status.as_ref().and_then(|s| s.backup.as_ref());
+                    let events = detect_backup_events(previous_backup, &backup_status);
+                    for event in events {
+                        emit_backup_event(ctx, cluster, &event).await;
+                    }
+
+                    Some(backup_status)
+                }
+                Err(e) => {
+                    debug!(
+                        cluster = %name,
+                        error = %e,
+                        "Failed to collect backup status (non-fatal)"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+    // Check for manual backup trigger annotation
+    if current_phase == ClusterPhase::Running
+        && backup::is_backup_enabled(cluster)
+        && let Err(e) = check_and_trigger_manual_backup(cluster, ctx, ns).await
+    {
+        // Log but don't fail the reconciliation for backup trigger errors
+        warn!(
+            cluster = %name,
+            error = %e,
+            "Failed to process manual backup trigger"
+        );
+    }
+
     // Check if cluster has become degraded while running
     if current_phase == ClusterPhase::Running && transition_ctx.is_degraded() {
         let event = ClusterEvent::ReplicasDegraded;
@@ -338,12 +392,13 @@ async fn check_and_update_status(
         }
     } else if ready_replicas >= cluster.spec.replicas {
         status_manager
-            .set_running(
+            .set_running_with_backup(
                 ready_replicas,
                 cluster.spec.replicas,
                 primary_pod,
                 replica_pods,
                 &cluster.spec.version,
+                collected_backup_status,
             )
             .await?;
     }
@@ -481,6 +536,105 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
         }
     }
 
+    // Validate backup configuration if enabled
+    if let Some(ref backup_spec) = cluster.spec.backup {
+        // Validate credentials secret exists
+        let credentials_secret_name = backup_spec.credentials_secret_name();
+        let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
+        if secrets_api
+            .get_opt(credentials_secret_name)
+            .await?
+            .is_none()
+        {
+            let destination_type = backup_spec.destination.destination_type();
+            warn!(
+                "Backup credentials secret '{}' not found for {} destination on cluster {}",
+                credentials_secret_name, destination_type, name
+            );
+            status_manager
+                .set_failed(
+                    "BackupCredentialsNotFound",
+                    &format!(
+                        "Backup credentials secret '{}' not found for {} destination",
+                        credentials_secret_name, destination_type
+                    ),
+                )
+                .await?;
+            ctx.publish_warning_event(
+                cluster,
+                "BackupCredentialsNotFound",
+                "Validation",
+                Some(format!(
+                    "Backup credentials secret '{}' not found for {} destination",
+                    credentials_secret_name, destination_type
+                )),
+            )
+            .await;
+            return Ok(Action::requeue(Duration::from_secs(30)));
+        }
+
+        // Validate encryption key secret if encryption is enabled
+        if let Some(ref encryption) = backup_spec.encryption
+            && encryption.enabled
+        {
+            if let Some(ref key_secret_name) = encryption.key_secret {
+                if secrets_api.get_opt(key_secret_name).await?.is_none() {
+                    warn!(
+                        "Backup encryption key secret '{}' not found for cluster {}",
+                        key_secret_name, name
+                    );
+                    status_manager
+                        .set_failed(
+                            "EncryptionKeyNotFound",
+                            &format!(
+                                "Backup encryption key secret '{}' not found",
+                                key_secret_name
+                            ),
+                        )
+                        .await?;
+                    ctx.publish_warning_event(
+                        cluster,
+                        "EncryptionKeyNotFound",
+                        "Validation",
+                        Some(format!(
+                            "Backup encryption key secret '{}' not found",
+                            key_secret_name
+                        )),
+                    )
+                    .await;
+                    return Ok(Action::requeue(Duration::from_secs(30)));
+                }
+            } else {
+                // Encryption enabled but no key secret specified
+                warn!(
+                    "Backup encryption enabled but no key secret specified for cluster {}",
+                    name
+                );
+                status_manager
+                    .set_failed(
+                        "EncryptionKeyNotSpecified",
+                        "Backup encryption is enabled but no key secret is specified",
+                    )
+                    .await?;
+                ctx.publish_warning_event(
+                    cluster,
+                    "EncryptionKeyNotSpecified",
+                    "Validation",
+                    Some("Backup encryption is enabled but no key secret is specified".to_string()),
+                )
+                .await;
+                return Ok(Action::requeue(Duration::from_secs(30)));
+            }
+        }
+
+        info!(
+            "Backup configured for cluster {}: {} destination, schedule '{}'",
+            name,
+            backup_spec.destination.destination_type(),
+            backup_spec.schedule
+        );
+    }
+
     // Ensure Secret exists (credentials)
     let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
     let secret_name = format!("{}-credentials", name);
@@ -587,6 +741,28 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
         .as_ref()
         .and_then(|s| s.retry_count)
         .unwrap_or(0);
+
+    // Collect pod generation tracking info (Kubernetes 1.35+ feature)
+    // This tracks whether kubelet has processed pod spec changes
+    let pod_infos = get_pod_info(ctx, ns, &name).await.unwrap_or_default();
+    transition_ctx.total_pods = i32::try_from(pod_infos.len()).unwrap_or(0);
+    transition_ctx.synced_pods =
+        i32::try_from(pod_infos.iter().filter(|p| p.spec_applied).count()).unwrap_or(0);
+
+    // Check for in-place resize status (Kubernetes 1.35+ feature)
+    let resize_statuses = get_pod_resize_status(ctx, ns, &name)
+        .await
+        .unwrap_or_default();
+    transition_ctx.resize_in_progress = any_resize_in_progress(&resize_statuses);
+
+    if !all_pods_synced(&pod_infos) {
+        debug!(
+            cluster = %name,
+            synced = transition_ctx.synced_pods,
+            total = transition_ctx.total_pods,
+            "Waiting for pod specs to be applied by kubelet"
+        );
+    }
 
     // Determine the event based on current state
     let event = determine_event(&current_phase, &transition_ctx, false, previous_replicas);
@@ -1046,6 +1222,320 @@ async fn emit_state_transition_event(
         ctx.publish_normal_event(cluster, reason, "StateTransition", note)
             .await;
     }
+}
+
+/// Emit a Kubernetes Event for a backup-related event
+async fn emit_backup_event(ctx: &Context, cluster: &PostgresCluster, event: &BackupEvent) {
+    match event {
+        BackupEvent::BackupCompleted { name, size_bytes } => {
+            let size_str = size_bytes
+                .map(|s| format!(" ({} bytes)", s))
+                .unwrap_or_default();
+            ctx.publish_normal_event(
+                cluster,
+                "BackupCompleted",
+                "Backup",
+                Some(format!("Backup {} completed{}", name, size_str)),
+            )
+            .await;
+        }
+        BackupEvent::BackupFailed { error } => {
+            ctx.publish_warning_event(
+                cluster,
+                "BackupFailed",
+                "Backup",
+                Some(format!("Backup failed: {}", error)),
+            )
+            .await;
+        }
+        BackupEvent::WALArchivingHealthy => {
+            ctx.publish_normal_event(
+                cluster,
+                "WALArchivingHealthy",
+                "WALArchive",
+                Some("WAL archiving recovered and is healthy".to_string()),
+            )
+            .await;
+        }
+        BackupEvent::WALArchivingFailed => {
+            ctx.publish_warning_event(
+                cluster,
+                "WALArchivingFailed",
+                "WALArchive",
+                Some("WAL archiving is not healthy".to_string()),
+            )
+            .await;
+        }
+    }
+}
+
+/// Check for and handle manual backup trigger annotation
+///
+/// Returns true if a backup was triggered or status was updated, false otherwise.
+/// The backup is executed asynchronously in the pod.
+///
+/// This function also checks if a previously triggered "running" backup has completed
+/// by comparing the current backup list with the trigger timestamp.
+async fn check_and_trigger_manual_backup(
+    cluster: &PostgresCluster,
+    ctx: &Context,
+    ns: &str,
+) -> Result<bool> {
+    let name = cluster.name_any();
+
+    // First, check if there's a "running" backup that might have completed
+    let current_status = cluster
+        .status
+        .as_ref()
+        .and_then(|s| s.backup.as_ref())
+        .and_then(|b| b.last_manual_backup_status.as_deref());
+
+    let last_trigger = cluster
+        .status
+        .as_ref()
+        .and_then(|s| s.backup.as_ref())
+        .and_then(|b| b.last_manual_backup_trigger.clone());
+
+    // Check if we need to poll for completion of a running backup
+    if current_status == Some("running")
+        && let Some(ref trigger_value) = last_trigger
+        && let Some(backup_status) = cluster.status.as_ref().and_then(|s| s.backup.as_ref())
+        && let Some(ref backup_time) = backup_status.last_backup_time
+        && backup_time > trigger_value
+    {
+        info!(
+            cluster = %name,
+            trigger = %trigger_value,
+            backup_time = %backup_time,
+            "Manual backup completed"
+        );
+        update_manual_backup_status(cluster, ctx, ns, trigger_value, "completed").await?;
+        ctx.publish_normal_event(
+            cluster,
+            "ManualBackupCompleted",
+            "Backup",
+            Some(format!(
+                "Manual backup completed for trigger: {}",
+                trigger_value
+            )),
+        )
+        .await;
+        return Ok(true);
+    }
+
+    // Check if backup trigger annotation is present
+    let trigger_value = cluster
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(BACKUP_TRIGGER_ANNOTATION))
+        .cloned();
+
+    let Some(trigger_value) = trigger_value else {
+        return Ok(false);
+    };
+
+    if last_trigger.as_ref() == Some(&trigger_value) {
+        // Already processed this trigger (may still be running)
+        debug!(
+            cluster = %name,
+            trigger = %trigger_value,
+            status = ?current_status,
+            "Manual backup trigger already processed"
+        );
+        return Ok(false);
+    }
+
+    // Check if backups are enabled
+    if !backup::is_backup_enabled(cluster) {
+        warn!(
+            cluster = %name,
+            "Manual backup triggered but backups are not configured"
+        );
+        ctx.publish_warning_event(
+            cluster,
+            "ManualBackupFailed",
+            "Backup",
+            Some("Manual backup failed: backups are not configured".to_string()),
+        )
+        .await;
+        return Ok(false);
+    }
+
+    info!(
+        cluster = %name,
+        trigger = %trigger_value,
+        "Processing manual backup trigger"
+    );
+
+    // Find the primary pod to run the backup on
+    let pods_api: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
+    let primary_pod = get_patroni_leader(&pods_api, &name).await;
+
+    let Some(primary_pod) = primary_pod else {
+        warn!(
+            cluster = %name,
+            "Cannot trigger manual backup: no primary pod found"
+        );
+        ctx.publish_warning_event(
+            cluster,
+            "ManualBackupFailed",
+            "Backup",
+            Some("Manual backup failed: no primary pod available".to_string()),
+        )
+        .await;
+        return Ok(false);
+    };
+
+    // Execute the backup command
+    match exec_manual_backup(ctx, ns, &primary_pod).await {
+        Ok(_) => {
+            info!(
+                cluster = %name,
+                pod = %primary_pod,
+                "Manual backup started successfully"
+            );
+            ctx.publish_normal_event(
+                cluster,
+                "ManualBackupStarted",
+                "Backup",
+                Some(format!(
+                    "Manual backup triggered: {} (on pod {})",
+                    trigger_value, primary_pod
+                )),
+            )
+            .await;
+
+            // Update status with the trigger value
+            update_manual_backup_status(cluster, ctx, ns, &trigger_value, "running").await?;
+        }
+        Err(e) => {
+            error!(
+                cluster = %name,
+                pod = %primary_pod,
+                error = %e,
+                "Manual backup failed to start"
+            );
+            ctx.publish_warning_event(
+                cluster,
+                "ManualBackupFailed",
+                "Backup",
+                Some(format!("Manual backup failed: {}", e)),
+            )
+            .await;
+
+            // Update status with error
+            update_manual_backup_status(cluster, ctx, ns, &trigger_value, "failed").await?;
+        }
+    }
+
+    Ok(true)
+}
+
+/// Execute a manual backup on a pod using wal-g
+async fn exec_manual_backup(ctx: &Context, ns: &str, pod_name: &str) -> Result<()> {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    const EXEC_TIMEOUT: Duration = Duration::from_secs(30);
+
+    let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
+
+    let attach_params = AttachParams {
+        container: Some("postgres".to_string()),
+        stdin: false,
+        stdout: true,
+        stderr: true,
+        tty: false,
+        ..Default::default()
+    };
+
+    // Use Spilo's backup script which handles WAL-G environment properly
+    // This runs the backup in the background within the container
+    let command = vec![
+        "su".to_string(),
+        "postgres".to_string(),
+        "-c".to_string(),
+        // Run backup in background with nohup to prevent blocking
+        "nohup /scripts/postgres_backup.sh > /tmp/manual_backup.log 2>&1 &".to_string(),
+    ];
+
+    let mut attached = timeout(EXEC_TIMEOUT, pods.exec(pod_name, command, &attach_params))
+        .await
+        .map_err(|_| {
+            Error::BackupExecFailed(format!(
+                "Backup exec timed out after {} seconds",
+                EXEC_TIMEOUT.as_secs()
+            ))
+        })??;
+
+    // Read any output (should be minimal since we're running in background)
+    // Important: Don't ignore read errors - they could indicate command failure
+    if let Some(mut stdout) = attached.stdout() {
+        let mut output = Vec::new();
+        stdout
+            .read_to_end(&mut output)
+            .await
+            .map_err(|e| Error::BackupExecFailed(format!("Failed to read backup output: {}", e)))?;
+        if !output.is_empty() {
+            debug!(
+                "Manual backup command output: {}",
+                String::from_utf8_lossy(&output)
+            );
+        }
+    }
+
+    // Wait for the command to complete (just the nohup wrapper)
+    if let Some(status_channel) = attached.take_status()
+        && let Some(result) = status_channel.await
+        && let Some(status) = result.status
+        && status != "Success"
+    {
+        return Err(Error::BackupExecFailed(format!(
+            "Backup command failed with status: {}",
+            status
+        )));
+    }
+
+    Ok(())
+}
+
+/// Update the manual backup status in the cluster status
+async fn update_manual_backup_status(
+    cluster: &PostgresCluster,
+    ctx: &Context,
+    ns: &str,
+    trigger_value: &str,
+    status: &str,
+) -> Result<()> {
+    let api: Api<PostgresCluster> = Api::namespaced(ctx.client.clone(), ns);
+    let name = cluster.name_any();
+
+    // Patch the backup status with the trigger value
+    let patch = serde_json::json!({
+        "status": {
+            "backup": {
+                "lastManualBackupTrigger": trigger_value,
+                "lastManualBackupStatus": status
+            }
+        }
+    });
+
+    api.patch_status(
+        &name,
+        &PatchParams::apply("postgres-operator"),
+        &Patch::Merge(&patch),
+    )
+    .await?;
+
+    debug!(
+        cluster = %name,
+        trigger = %trigger_value,
+        status = %status,
+        "Updated manual backup status"
+    );
+
+    Ok(())
 }
 
 /// Get pod generation and sync info for Kubernetes 1.35+ pod generation tracking (KEP-5067).

@@ -113,24 +113,37 @@ spec:
                   description: Custom PostgreSQL configuration parameters
                 backup:
                   type: object
+                  description: |
+                    Backup configuration for continuous archiving and point-in-time recovery (PITR).
+                    Uses WAL-G for continuous WAL archiving and scheduled base backups.
                   x-kubernetes-validations:
                     # If backup is configured with a destination, schedule is required
                     - rule: "!has(self.destination) || has(self.schedule)"
                       message: "backup.schedule is required when backup.destination is configured"
+                    # If encryption is enabled, keySecret is required
+                    - rule: "!has(self.encryption) || !self.encryption.enabled || has(self.encryption.keySecret)"
+                      message: "backup.encryption.keySecret is required when encryption is enabled"
                   properties:
                     schedule:
                       type: string
-                      description: Backup schedule in cron format
+                      description: |
+                        Backup schedule in cron format (e.g., "0 2 * * *" for 2 AM daily).
+                        Base backups are created on this schedule.
+                        WAL archiving happens continuously regardless of this schedule.
                     retention:
                       type: object
+                      description: Retention policy for backups (uses Spilo's backup retention)
                       properties:
                         count:
                           type: integer
+                          description: Number of base backups to retain (uses BACKUP_NUM_TO_RETAIN)
                           minimum: 1
                         maxAge:
                           type: string
+                          description: Maximum age of backups (e.g., "7d", "30d", "1w")
                     destination:
                       type: object
+                      description: Cloud storage destination for backups
                       x-kubernetes-validations:
                         # S3 requires bucket, region, and credentialsSecret
                         - rule: "self.type != 'S3' || (has(self.bucket) && has(self.region) && has(self.credentialsSecret))"
@@ -146,6 +159,7 @@ spec:
                       properties:
                         type:
                           type: string
+                          description: Cloud storage type
                           enum:
                             - S3
                             - GCS
@@ -155,10 +169,10 @@ spec:
                           description: Bucket name for S3 or GCS
                         region:
                           type: string
-                          description: AWS region for S3
+                          description: AWS region for S3 (e.g., "us-east-1")
                         endpoint:
                           type: string
-                          description: Custom S3-compatible endpoint URL
+                          description: Custom S3-compatible endpoint URL (for MinIO, etc.)
                         container:
                           type: string
                           description: Azure blob container name
@@ -167,7 +181,93 @@ spec:
                           description: Azure storage account name
                         credentialsSecret:
                           type: string
-                          description: Name of secret containing cloud credentials
+                          description: |
+                            Name of secret containing cloud credentials.
+                            For S3: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (optional: AWS_SESSION_TOKEN)
+                            For GCS: GOOGLE_APPLICATION_CREDENTIALS (service account JSON)
+                            For Azure: AZURE_STORAGE_ACCESS_KEY or AZURE_STORAGE_SAS_TOKEN
+                        path:
+                          type: string
+                          description: Path prefix within the bucket/container (default is namespace/cluster-name)
+                        disableSse:
+                          type: boolean
+                          description: Disable S3 server-side encryption
+                          default: false
+                        forcePathStyle:
+                          type: boolean
+                          description: Force path-style URLs for S3 (required for some S3-compatible storage)
+                          default: false
+                        environment:
+                          type: string
+                          description: Azure environment name (e.g., "AzurePublicCloud")
+                    walArchiving:
+                      type: object
+                      description: WAL archiving configuration (enabled by default when backup is configured)
+                      properties:
+                        enabled:
+                          type: boolean
+                          description: Enable WAL archiving
+                          default: true
+                        restoreTimeout:
+                          type: integer
+                          description: Timeout for WAL restore operations in seconds (0 to disable)
+                          minimum: 0
+                    encryption:
+                      type: object
+                      description: Backup encryption configuration
+                      properties:
+                        enabled:
+                          type: boolean
+                          description: Enable backup encryption
+                        method:
+                          type: string
+                          description: Encryption method
+                          enum:
+                            - aes256
+                            - pgp
+                          default: aes256
+                        keySecret:
+                          type: string
+                          description: |
+                            Secret containing encryption key.
+                            For AES: expects key named 'encryption-key'
+                            For PGP: expects key named 'pgp-key'
+                    compression:
+                      type: string
+                      description: Compression method for backups
+                      enum:
+                        - lz4
+                        - lzma
+                        - brotli
+                        - zstd
+                        - none
+                      default: lz4
+                    backupFromReplica:
+                      type: boolean
+                      description: Take backups from replica instead of primary (reduces primary load)
+                      default: false
+                    uploadConcurrency:
+                      type: integer
+                      description: Number of concurrent upload streams
+                      minimum: 1
+                      maximum: 64
+                      default: 16
+                    downloadConcurrency:
+                      type: integer
+                      description: Number of concurrent download streams for restore
+                      minimum: 1
+                      maximum: 64
+                      default: 10
+                    enableDeltaBackups:
+                      type: boolean
+                      description: Enable delta backups (only changed pages since last backup)
+                      default: false
+                    deltaMaxSteps:
+                      type: integer
+                      description: Maximum delta backup steps before forcing full backup
+                      minimum: 1
+                      maximum: 10
+                      default: 3
                 pgbouncer:
                   type: object
                   description: PgBouncer connection pooler configuration (deployed as separate Deployment)
@@ -332,8 +432,53 @@ spec:
                   type: array
                   items:
                     type: string
-                lastBackup:
-                  type: string
+                backup:
+                  type: object
+                  description: Backup status information
+                  properties:
+                    enabled:
+                      type: boolean
+                      description: Whether backups are currently configured and enabled
+                    destinationType:
+                      type: string
+                      description: Backup destination type (S3, GCS, Azure)
+                    lastBackupTime:
+                      type: string
+                      description: Timestamp of the last successful base backup (RFC3339)
+                    lastBackupSizeBytes:
+                      type: integer
+                      format: int64
+                      description: Size of the last backup in bytes
+                    lastBackupName:
+                      type: string
+                      description: Name/ID of the last backup
+                    oldestBackupTime:
+                      type: string
+                      description: Timestamp of the oldest available backup (RFC3339)
+                    backupCount:
+                      type: integer
+                      description: Number of available base backups
+                    lastWalArchived:
+                      type: string
+                      description: Last WAL file archived successfully
+                    lastWalArchiveTime:
+                      type: string
+                      description: Time of last WAL archive (RFC3339)
+                    walArchivingHealthy:
+                      type: boolean
+                      description: Whether WAL archiving is healthy
+                    lastError:
+                      type: string
+                      description: Last backup error message, if any
+                    lastErrorTime:
+                      type: string
+                      description: Time of last error (RFC3339)
+                    recoveryWindowStart:
+                      type: string
+                      description: Point-in-time recovery window start (oldest recoverable point)
+                    recoveryWindowEnd:
+                      type: string
+                      description: Point-in-time recovery window end (most recent recoverable point)
                 observedGeneration:
                   type: integer
                   format: int64

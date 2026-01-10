@@ -61,10 +61,103 @@ pub struct PostgresClusterSpec {
     /// Service configuration for external access
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<ServiceSpec>,
+
+    /// Restore configuration for bootstrapping from an existing backup.
+    /// When specified, the cluster will be initialized by restoring from the
+    /// specified backup source instead of creating a fresh database.
+    /// This is only used during initial cluster creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore: Option<RestoreSpec>,
 }
 
 fn default_replicas() -> i32 {
     1
+}
+
+/// Restore configuration for bootstrapping a cluster from an existing backup.
+///
+/// This uses Spilo's CLONE_WITH_WALG functionality to restore from a WAL-G backup.
+/// The restore is only performed during initial cluster creation.
+///
+/// # Example
+/// ```yaml
+/// restore:
+///   source:
+///     s3:
+///       prefix: s3://my-bucket/default/production-db
+///       region: us-east-1
+///       credentialsSecret: aws-backup-creds
+///   recoveryTarget:
+///     time: "2024-01-15T14:30:00Z"  # Point-in-time recovery
+/// ```
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreSpec {
+    /// Source backup location for the restore operation
+    pub source: RestoreSource,
+
+    /// Recovery target for point-in-time recovery (PITR).
+    /// If not specified, restores to the latest available state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_target: Option<RecoveryTarget>,
+}
+
+/// Source location for restore operations.
+///
+/// Specifies where to find the backup to restore from.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum RestoreSource {
+    /// Restore from an S3-compatible backup
+    #[serde(rename = "s3")]
+    S3 {
+        /// Full S3 prefix path (e.g., "s3://bucket/path/to/backup")
+        prefix: String,
+        /// AWS region
+        region: String,
+        /// Secret containing AWS credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+        credentials_secret: String,
+        /// Custom endpoint for S3-compatible storage (e.g., MinIO)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint: Option<String>,
+    },
+    /// Restore from a Google Cloud Storage backup
+    #[serde(rename = "gcs")]
+    Gcs {
+        /// Full GCS prefix path (e.g., "gs://bucket/path/to/backup")
+        prefix: String,
+        /// Secret containing GCS credentials (GOOGLE_APPLICATION_CREDENTIALS)
+        credentials_secret: String,
+    },
+    /// Restore from an Azure Blob Storage backup
+    #[serde(rename = "azure")]
+    Azure {
+        /// Full Azure prefix path (e.g., "azure://container/path/to/backup")
+        prefix: String,
+        /// Azure storage account name
+        storage_account: String,
+        /// Secret containing Azure credentials
+        credentials_secret: String,
+    },
+}
+
+/// Recovery target for point-in-time recovery (PITR).
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum RecoveryTarget {
+    /// Restore to a specific timestamp (ISO 8601 format).
+    /// Example: "2024-01-15T14:30:00Z"
+    #[serde(rename = "time")]
+    Time(String),
+
+    /// Restore to a specific backup by name.
+    /// Example: "base_00000001000000000000000A"
+    #[serde(rename = "backup")]
+    Backup(String),
+
+    /// Restore to a specific timeline.
+    #[serde(rename = "timeline")]
+    Timeline(i32),
 }
 
 /// Storage configuration for PostgreSQL data volumes
@@ -112,29 +205,218 @@ pub struct ResourceList {
     pub memory: Option<String>,
 }
 
-/// Backup configuration (Phase 0.2)
+/// Backup configuration for continuous archiving and point-in-time recovery (PITR).
+///
+/// This integrates with WAL-G (default) or WAL-E for:
+/// - Continuous WAL archiving to cloud storage (S3, GCS, Azure)
+/// - Scheduled base backups (full physical backups)
+/// - Point-in-time recovery from any moment between backups
+///
+/// # Example
+/// ```yaml
+/// backup:
+///   schedule: "0 2 * * *"  # Daily at 2 AM
+///   retention:
+///     count: 7
+///     maxAge: "30d"
+///   destination:
+///     type: S3
+///     bucket: my-postgres-backups
+///     region: us-east-1
+///     credentialsSecret: aws-backup-credentials
+/// ```
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupSpec {
-    /// Backup schedule in cron format
+    /// Backup schedule in cron format (e.g., "0 2 * * *" for 2 AM daily).
+    /// Base backups are created on this schedule.
+    /// WAL archiving happens continuously regardless of this schedule.
     pub schedule: String,
 
     /// Retention policy for backups
     pub retention: RetentionPolicy,
 
-    /// Backup destination
+    /// Backup destination (S3, GCS, or Azure)
     pub destination: BackupDestination,
+
+    /// WAL archiving configuration.
+    /// WAL archiving is enabled by default when backup is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wal_archiving: Option<WalArchivingSpec>,
+
+    /// Encryption configuration for backups.
+    /// When enabled, backups are encrypted at rest using the specified method.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<EncryptionSpec>,
+
+    /// Compression method for backups.
+    /// Default: lz4 (fast compression with good ratio)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compression: Option<CompressionMethod>,
+
+    /// Take backups from replica instead of primary.
+    /// Reduces load on the primary server.
+    /// Default: false
+    #[serde(default)]
+    pub backup_from_replica: bool,
+
+    /// Number of concurrent upload streams for WAL-G.
+    /// Higher values increase upload speed but use more resources.
+    /// Default: 16
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_concurrency: Option<i32>,
+
+    /// Number of concurrent download streams for restore.
+    /// Default: 10
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_concurrency: Option<i32>,
+
+    /// Enable delta backups (WAL-G feature).
+    /// Delta backups only store pages changed since the last backup.
+    /// Reduces backup size and time but increases restore complexity.
+    /// Default: false
+    #[serde(default)]
+    pub enable_delta_backups: bool,
+
+    /// Maximum number of delta backup steps before forcing a full backup.
+    /// Only used when enable_delta_backups is true.
+    /// Default: 3
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delta_max_steps: Option<i32>,
+}
+
+impl BackupSpec {
+    /// Returns the compression method name for WAL-G configuration.
+    pub fn compression_method(&self) -> &str {
+        self.compression
+            .as_ref()
+            .map(CompressionMethod::as_str)
+            .unwrap_or("lz4")
+    }
+
+    /// Returns the upload concurrency value.
+    pub fn upload_concurrency(&self) -> i32 {
+        self.upload_concurrency.unwrap_or(16)
+    }
+
+    /// Returns the download concurrency value.
+    pub fn download_concurrency(&self) -> i32 {
+        self.download_concurrency.unwrap_or(10)
+    }
+
+    /// Returns the delta max steps value.
+    pub fn delta_max_steps(&self) -> i32 {
+        self.delta_max_steps.unwrap_or(3)
+    }
+
+    /// Returns the credentials secret name for the backup destination.
+    pub fn credentials_secret_name(&self) -> &str {
+        match &self.destination {
+            BackupDestination::S3 {
+                credentials_secret, ..
+            } => credentials_secret,
+            BackupDestination::GCS {
+                credentials_secret, ..
+            } => credentials_secret,
+            BackupDestination::Azure {
+                credentials_secret, ..
+            } => credentials_secret,
+        }
+    }
+}
+
+/// WAL archiving configuration for continuous backup
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WalArchivingSpec {
+    /// Enable WAL archiving. Default: true when backup is configured.
+    #[serde(default = "default_wal_archiving_enabled")]
+    pub enabled: bool,
+
+    /// Timeout for WAL restore operations in seconds.
+    /// Set to 0 to disable timeout.
+    /// Default: disabled (0)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_timeout: Option<i32>,
+}
+
+fn default_wal_archiving_enabled() -> bool {
+    true
+}
+
+/// Encryption configuration for backups
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EncryptionSpec {
+    /// Enable backup encryption
+    pub enabled: bool,
+
+    /// Encryption method to use
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<EncryptionMethod>,
+
+    /// Secret containing encryption key.
+    /// For AES: expects a key named 'encryption-key' with the raw key bytes.
+    /// For PGP: expects a key named 'pgp-key' with the PGP public key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_secret: Option<String>,
+}
+
+/// Encryption method for backups
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum EncryptionMethod {
+    /// AES-256-CTR encryption using libsodium (recommended)
+    #[default]
+    #[serde(rename = "aes256")]
+    Aes256,
+    /// PGP encryption
+    #[serde(rename = "pgp")]
+    Pgp,
+}
+
+/// Compression method for backups
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CompressionMethod {
+    /// LZ4 compression - fast with good compression ratio (recommended)
+    #[default]
+    Lz4,
+    /// LZMA compression - slow but highest compression ratio
+    Lzma,
+    /// Brotli compression - good balance of speed and ratio
+    Brotli,
+    /// Zstandard compression - excellent compression with good speed
+    Zstd,
+    /// No compression
+    None,
+}
+
+impl CompressionMethod {
+    /// Returns the WAL-G compression method name.
+    pub fn as_str(&self) -> &str {
+        match self {
+            CompressionMethod::Lz4 => "lz4",
+            CompressionMethod::Lzma => "lzma",
+            CompressionMethod::Brotli => "brotli",
+            CompressionMethod::Zstd => "zstd",
+            CompressionMethod::None => "none",
+        }
+    }
 }
 
 /// Retention policy for backups
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RetentionPolicy {
-    /// Number of backups to retain
+    /// Number of base backups to retain.
+    /// Older backups and their associated WAL files are automatically deleted.
+    /// Uses Spilo's BACKUP_NUM_TO_RETAIN environment variable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count: Option<i32>,
 
-    /// Maximum age of backups (e.g., "7d", "30d")
+    /// Maximum age of backups (e.g., "7d", "30d", "1w").
+    /// Backups older than this are automatically deleted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_age: Option<String>,
 }
@@ -146,23 +428,170 @@ pub struct RetentionPolicy {
 pub enum BackupDestination {
     /// Amazon S3 backup destination
     S3 {
+        /// S3 bucket name
         bucket: String,
+        /// AWS region (e.g., "us-east-1")
         region: String,
+        /// Custom S3 endpoint URL (for S3-compatible storage like MinIO)
         #[serde(default, skip_serializing_if = "Option::is_none")]
         endpoint: Option<String>,
+        /// Secret containing AWS credentials.
+        /// Expected keys: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+        /// Optional: AWS_SESSION_TOKEN for temporary credentials
         credentials_secret: String,
+        /// Path prefix within the bucket (e.g., "backups/prod-cluster")
+        /// Default: cluster name
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        /// Disable server-side encryption
+        #[serde(default)]
+        disable_sse: bool,
+        /// Force path-style URLs (required for some S3-compatible storage)
+        #[serde(default)]
+        force_path_style: bool,
     },
     /// Google Cloud Storage backup destination
     GCS {
+        /// GCS bucket name
         bucket: String,
+        /// Secret containing GCS credentials.
+        /// Expected key: GOOGLE_APPLICATION_CREDENTIALS (JSON service account key)
         credentials_secret: String,
+        /// Path prefix within the bucket
+        /// Default: cluster name
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
     },
     /// Azure Blob Storage backup destination
     Azure {
+        /// Azure container name
         container: String,
+        /// Azure storage account name
         storage_account: String,
+        /// Secret containing Azure credentials.
+        /// Expected keys: AZURE_STORAGE_ACCESS_KEY or AZURE_STORAGE_SAS_TOKEN
+        /// For service principal: AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID
         credentials_secret: String,
+        /// Path prefix within the container
+        /// Default: cluster name
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        /// Azure environment name (e.g., "AzurePublicCloud", "AzureUSGovernmentCloud")
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        environment: Option<String>,
     },
+}
+
+impl BackupDestination {
+    /// Returns the WAL-G prefix URL for this destination.
+    pub fn wal_g_prefix(&self, cluster_name: &str, namespace: &str) -> String {
+        match self {
+            BackupDestination::S3 { bucket, path, .. } => {
+                let base_path = path
+                    .clone()
+                    .unwrap_or_else(|| format!("{}/{}", namespace, cluster_name));
+                format!("s3://{}/{}", bucket, base_path)
+            }
+            BackupDestination::GCS { bucket, path, .. } => {
+                let base_path = path
+                    .clone()
+                    .unwrap_or_else(|| format!("{}/{}", namespace, cluster_name));
+                format!("gs://{}/{}", bucket, base_path)
+            }
+            BackupDestination::Azure {
+                container,
+                storage_account,
+                path,
+                ..
+            } => {
+                let base_path = path
+                    .clone()
+                    .unwrap_or_else(|| format!("{}/{}", namespace, cluster_name));
+                // WAL-G Azure format: azure://container/path
+                // Storage account is set via environment variable
+                let _ = storage_account; // Used in env var, not in URL
+                format!("azure://{}/{}", container, base_path)
+            }
+        }
+    }
+
+    /// Returns the destination type as a string.
+    pub fn destination_type(&self) -> &'static str {
+        match self {
+            BackupDestination::S3 { .. } => "S3",
+            BackupDestination::GCS { .. } => "GCS",
+            BackupDestination::Azure { .. } => "Azure",
+        }
+    }
+}
+
+/// Backup status information
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupStatus {
+    /// Whether backups are currently configured and enabled
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Backup destination type (S3, GCS, Azure)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_type: Option<String>,
+
+    /// Timestamp of the last successful base backup (RFC3339)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_backup_time: Option<String>,
+
+    /// Size of the last backup in bytes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_backup_size_bytes: Option<i64>,
+
+    /// Name/ID of the last backup
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_backup_name: Option<String>,
+
+    /// Timestamp of the oldest available backup (RFC3339)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_backup_time: Option<String>,
+
+    /// Number of available base backups
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_count: Option<i32>,
+
+    /// Last WAL file archived successfully
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_wal_archived: Option<String>,
+
+    /// Time of last WAL archive (RFC3339)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_wal_archive_time: Option<String>,
+
+    /// Whether WAL archiving is healthy (recent WAL files are being archived)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wal_archiving_healthy: Option<bool>,
+
+    /// Last backup error message, if any
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+
+    /// Time of last error (RFC3339)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error_time: Option<String>,
+
+    /// Point-in-time recovery window start (oldest recoverable point, RFC3339)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_window_start: Option<String>,
+
+    /// Point-in-time recovery window end (most recent recoverable point, RFC3339)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_window_end: Option<String>,
+
+    /// Timestamp of the last manually triggered backup request (from annotation)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_manual_backup_trigger: Option<String>,
+
+    /// Status of the last manual backup: pending, running, completed, failed
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_manual_backup_status: Option<String>,
 }
 
 /// PgBouncer connection pooling configuration (deployed as separate Deployment)
@@ -362,9 +791,9 @@ pub struct PostgresClusterStatus {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replica_pods: Vec<String>,
 
-    /// Timestamp of the last successful backup
+    /// Backup status information
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_backup: Option<String>,
+    pub backup: Option<BackupStatus>,
 
     /// Observed generation of the resource
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -423,6 +852,36 @@ pub struct PostgresClusterStatus {
     /// Whether all pods have applied their latest spec (observedGeneration == generation)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub all_pods_synced: Option<bool>,
+
+    /// Source backup information if this cluster was restored from a backup.
+    /// This is set after a successful restore and prevents re-restore on subsequent reconciles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored_from: Option<RestoredFromInfo>,
+}
+
+/// Information about the backup a cluster was restored from
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoredFromInfo {
+    /// The prefix path of the backup source (e.g., "s3://bucket/path")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_prefix: Option<String>,
+
+    /// The backup type (S3, GCS, Azure)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_type: Option<String>,
+
+    /// The recovery target time if PITR was used
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_target_time: Option<String>,
+
+    /// Timestamp when the restore was initiated
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_started_at: Option<String>,
+
+    /// Timestamp when the restore completed
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_completed_at: Option<String>,
 }
 
 /// Cluster lifecycle phase
