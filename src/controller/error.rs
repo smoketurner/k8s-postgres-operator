@@ -30,6 +30,9 @@ pub enum Error {
     #[error("Validation error: {0}")]
     ValidationError(String),
 
+    #[error("Backup execution failed: {0}")]
+    BackupExecFailed(String),
+
     #[error("Transient error (will retry): {0}")]
     TransientError(String),
 
@@ -74,6 +77,8 @@ impl Error {
             // Configuration and validation errors are permanent
             Error::InvalidConfig(_) => false,
             Error::ValidationError(_) => false,
+            // Backup execution failures are retryable
+            Error::BackupExecFailed(_) => true,
             // Other errors default to retryable
             Error::SerializationError(_) => false,
             Error::MissingObjectKey(_) => false,

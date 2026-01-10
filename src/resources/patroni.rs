@@ -606,6 +606,20 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
         volume_mounts.extend(backup::generate_backup_volume_mounts(cluster));
     }
 
+    // Restore configuration (WAL-G clone)
+    // Add restore environment variables for bootstrapping from backup
+    // Note: These are only used during initial cluster creation
+    if backup::is_restore_configured(cluster) {
+        // Add restore environment variables
+        env_vars.extend(backup::generate_restore_env_vars(cluster));
+
+        // Add restore volumes (e.g., GCS credentials)
+        volumes.extend(backup::generate_restore_volumes(cluster));
+
+        // Add restore volume mounts
+        volume_mounts.extend(backup::generate_restore_volume_mounts(cluster));
+    }
+
     // Startup probe - Patroni REST API
     let startup_probe = Probe {
         http_get: Some(HTTPGetAction {
@@ -765,11 +779,20 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
         ..Default::default()
     };
 
-    // Update strategy
+    // Update strategy - calculate maxUnavailable based on replica count
+    // For single replica: 0 (no disruption allowed during updates)
+    // For 2 replicas: 1 (one at a time)
+    // For 3+ replicas: allow up to half to update in parallel while maintaining quorum
+    let max_unavailable = match replicas {
+        1 => 0,                             // Single replica - no disruption
+        2 => 1,                             // Two replicas - one at a time
+        n => std::cmp::max(1, (n - 1) / 2), // Keep quorum: at most (n-1)/2
+    };
+
     let update_strategy = StatefulSetUpdateStrategy {
         type_: Some("RollingUpdate".to_string()),
         rolling_update: Some(RollingUpdateStatefulSetStrategy {
-            max_unavailable: Some(IntOrString::Int(1)),
+            max_unavailable: Some(IntOrString::Int(max_unavailable)),
             partition: Some(0),
         }),
     };

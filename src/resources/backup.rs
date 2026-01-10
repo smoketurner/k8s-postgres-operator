@@ -43,7 +43,9 @@ use k8s_openapi::api::core::v1::{
     EnvVar, EnvVarSource, KeyToPath, SecretKeySelector, SecretVolumeSource, Volume, VolumeMount,
 };
 
-use crate::crd::{BackupDestination, EncryptionMethod, PostgresCluster};
+use crate::crd::{
+    BackupDestination, EncryptionMethod, PostgresCluster, RecoveryTarget, RestoreSource,
+};
 
 /// GCS credentials mount path inside the container
 const GCS_CREDENTIALS_PATH: &str = "/var/secrets/google";
@@ -515,6 +517,248 @@ pub fn generate_backup_env_vars(cluster: &PostgresCluster) -> Vec<EnvVar> {
     env_vars
 }
 
+/// Generate restore-related environment variables for Spilo/WAL-G clone.
+///
+/// This configures Spilo's CLONE_WITH_WALG functionality to bootstrap
+/// the cluster from an existing backup. These variables are only used
+/// during initial cluster creation.
+///
+/// Returns a vector of environment variables to add to the StatefulSet pod spec.
+pub fn generate_restore_env_vars(cluster: &PostgresCluster) -> Vec<EnvVar> {
+    let Some(ref restore) = cluster.spec.restore else {
+        return Vec::new();
+    };
+
+    let mut env_vars = Vec::new();
+
+    // Enable WAL-G clone method
+    env_vars.push(EnvVar {
+        name: "CLONE_METHOD".to_string(),
+        value: Some("CLONE_WITH_WALG".to_string()),
+        ..Default::default()
+    });
+    env_vars.push(EnvVar {
+        name: "CLONE_WITH_WALG".to_string(),
+        value: Some("true".to_string()),
+        ..Default::default()
+    });
+
+    // Configure source-specific variables
+    match &restore.source {
+        RestoreSource::S3 {
+            prefix,
+            region,
+            credentials_secret,
+            endpoint,
+        } => {
+            env_vars.push(EnvVar {
+                name: "CLONE_WALG_S3_PREFIX".to_string(),
+                value: Some(prefix.clone()),
+                ..Default::default()
+            });
+            env_vars.push(EnvVar {
+                name: "CLONE_AWS_REGION".to_string(),
+                value: Some(region.clone()),
+                ..Default::default()
+            });
+
+            // Custom endpoint for S3-compatible storage
+            if let Some(endpoint_url) = endpoint {
+                env_vars.push(EnvVar {
+                    name: "CLONE_AWS_ENDPOINT".to_string(),
+                    value: Some(endpoint_url.clone()),
+                    ..Default::default()
+                });
+            }
+
+            // AWS credentials from secret
+            env_vars.push(EnvVar {
+                name: "CLONE_AWS_ACCESS_KEY_ID".to_string(),
+                value_from: Some(EnvVarSource {
+                    secret_key_ref: Some(SecretKeySelector {
+                        name: credentials_secret.clone(),
+                        key: "AWS_ACCESS_KEY_ID".to_string(),
+                        optional: Some(false),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            env_vars.push(EnvVar {
+                name: "CLONE_AWS_SECRET_ACCESS_KEY".to_string(),
+                value_from: Some(EnvVarSource {
+                    secret_key_ref: Some(SecretKeySelector {
+                        name: credentials_secret.clone(),
+                        key: "AWS_SECRET_ACCESS_KEY".to_string(),
+                        optional: Some(false),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        }
+        RestoreSource::Gcs {
+            prefix,
+            credentials_secret,
+        } => {
+            env_vars.push(EnvVar {
+                name: "CLONE_WALG_GS_PREFIX".to_string(),
+                value: Some(prefix.clone()),
+                ..Default::default()
+            });
+
+            // GCS credentials path (mounted as volume)
+            env_vars.push(EnvVar {
+                name: "CLONE_GOOGLE_APPLICATION_CREDENTIALS".to_string(),
+                value: Some(format!("{}/{}", GCS_CREDENTIALS_PATH, GCS_CREDENTIALS_FILE)),
+                ..Default::default()
+            });
+
+            // Note: The actual volume must be mounted separately
+            // We use the same credentials volume as for backups
+            let _ = credentials_secret; // Used for volume mount
+        }
+        RestoreSource::Azure {
+            prefix,
+            storage_account,
+            credentials_secret,
+        } => {
+            env_vars.push(EnvVar {
+                name: "CLONE_WALG_AZ_PREFIX".to_string(),
+                value: Some(prefix.clone()),
+                ..Default::default()
+            });
+            env_vars.push(EnvVar {
+                name: "CLONE_AZURE_STORAGE_ACCOUNT".to_string(),
+                value: Some(storage_account.clone()),
+                ..Default::default()
+            });
+
+            // Azure credentials from secret (try access key first)
+            env_vars.push(EnvVar {
+                name: "CLONE_AZURE_STORAGE_ACCESS_KEY".to_string(),
+                value_from: Some(EnvVarSource {
+                    secret_key_ref: Some(SecretKeySelector {
+                        name: credentials_secret.clone(),
+                        key: "AZURE_STORAGE_ACCESS_KEY".to_string(),
+                        optional: Some(true),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        }
+    }
+
+    // Recovery target configuration
+    if let Some(ref target) = restore.recovery_target {
+        match target {
+            RecoveryTarget::Time(time) => {
+                env_vars.push(EnvVar {
+                    name: "CLONE_TARGET_TIME".to_string(),
+                    value: Some(time.clone()),
+                    ..Default::default()
+                });
+            }
+            RecoveryTarget::Backup(backup_name) => {
+                // WAL-G uses BACKUP_NAME for specific backup restore
+                env_vars.push(EnvVar {
+                    name: "CLONE_TARGET_BACKUP".to_string(),
+                    value: Some(backup_name.clone()),
+                    ..Default::default()
+                });
+            }
+            RecoveryTarget::Timeline(timeline) => {
+                env_vars.push(EnvVar {
+                    name: "CLONE_TARGET_TIMELINE".to_string(),
+                    value: Some(timeline.to_string()),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    env_vars
+}
+
+/// Generate restore-related volumes for the StatefulSet.
+///
+/// Creates volumes needed for restore operations (e.g., GCS credentials).
+pub fn generate_restore_volumes(cluster: &PostgresCluster) -> Vec<Volume> {
+    let Some(ref restore) = cluster.spec.restore else {
+        return Vec::new();
+    };
+
+    let mut volumes = Vec::new();
+
+    // GCS credentials volume for restore
+    if let RestoreSource::Gcs {
+        credentials_secret, ..
+    } = &restore.source
+    {
+        volumes.push(Volume {
+            name: "restore-gcs-credentials".to_string(),
+            secret: Some(SecretVolumeSource {
+                secret_name: Some(credentials_secret.clone()),
+                items: Some(vec![KeyToPath {
+                    key: "GOOGLE_APPLICATION_CREDENTIALS".to_string(),
+                    path: GCS_CREDENTIALS_FILE.to_string(),
+                    mode: Some(0o400),
+                }]),
+                default_mode: Some(0o400),
+                optional: Some(false),
+            }),
+            ..Default::default()
+        });
+    }
+
+    volumes
+}
+
+/// Generate restore-related volume mounts for the container.
+pub fn generate_restore_volume_mounts(cluster: &PostgresCluster) -> Vec<VolumeMount> {
+    let Some(ref restore) = cluster.spec.restore else {
+        return Vec::new();
+    };
+
+    let mut mounts = Vec::new();
+
+    // GCS credentials mount for restore
+    if matches!(restore.source, RestoreSource::Gcs { .. }) {
+        mounts.push(VolumeMount {
+            name: "restore-gcs-credentials".to_string(),
+            mount_path: GCS_CREDENTIALS_PATH.to_string(),
+            read_only: Some(true),
+            ..Default::default()
+        });
+    }
+
+    mounts
+}
+
+/// Check if restore is configured for a cluster.
+pub fn is_restore_configured(cluster: &PostgresCluster) -> bool {
+    cluster.spec.restore.is_some()
+}
+
+/// Get restore information for status update
+pub fn get_restore_info(cluster: &PostgresCluster) -> Option<(String, String, Option<String>)> {
+    let restore = cluster.spec.restore.as_ref()?;
+
+    let (source_type, source_prefix) = match &restore.source {
+        RestoreSource::S3 { prefix, .. } => ("S3".to_string(), prefix.clone()),
+        RestoreSource::Gcs { prefix, .. } => ("GCS".to_string(), prefix.clone()),
+        RestoreSource::Azure { prefix, .. } => ("Azure".to_string(), prefix.clone()),
+    };
+
+    let recovery_target_time = restore.recovery_target.as_ref().and_then(|t| match t {
+        RecoveryTarget::Time(time) => Some(time.clone()),
+        _ => None,
+    });
+
+    Some((source_type, source_prefix, recovery_target_time))
+}
+
 /// Generate backup-related volumes for the StatefulSet.
 ///
 /// This creates volumes for:
@@ -666,6 +910,7 @@ mod tests {
                 tls: None,
                 metrics: None,
                 service: None,
+                restore: None,
             },
             status: None,
         }
@@ -719,7 +964,7 @@ mod tests {
         let prefix_var = env_vars
             .iter()
             .find(|e| e.name == "WALG_S3_PREFIX")
-            .unwrap();
+            .expect("WALG_S3_PREFIX env var should be present for S3 backup");
         assert_eq!(
             prefix_var.value.as_deref(),
             Some("s3://my-bucket/test-ns/test-cluster")
@@ -763,7 +1008,7 @@ mod tests {
         let prefix_var = env_vars
             .iter()
             .find(|e| e.name == "WALG_GS_PREFIX")
-            .unwrap();
+            .expect("WALG_GS_PREFIX env var should be present for GCS backup");
         assert_eq!(
             prefix_var.value.as_deref(),
             Some("gs://gcs-bucket/backups/prod")
@@ -773,14 +1018,16 @@ mod tests {
         let compression_var = env_vars
             .iter()
             .find(|e| e.name == "WALG_COMPRESSION_METHOD")
-            .unwrap();
+            .expect("WALG_COMPRESSION_METHOD env var should be present when compression is set");
         assert_eq!(compression_var.value.as_deref(), Some("zstd"));
 
         // Check concurrency
         let upload_var = env_vars
             .iter()
             .find(|e| e.name == "WALG_UPLOAD_CONCURRENCY")
-            .unwrap();
+            .expect(
+                "WALG_UPLOAD_CONCURRENCY env var should be present when upload_concurrency is set",
+            );
         assert_eq!(upload_var.value.as_deref(), Some("8"));
     }
 
@@ -827,7 +1074,9 @@ mod tests {
         let delta_var = env_vars
             .iter()
             .find(|e| e.name == "WALG_DELTA_MAX_STEPS")
-            .unwrap();
+            .expect(
+                "WALG_DELTA_MAX_STEPS env var should be present when delta backups are enabled",
+            );
         assert_eq!(delta_var.value.as_deref(), Some("5"));
     }
 
@@ -1032,7 +1281,9 @@ mod tests {
         let days_var = env_vars
             .iter()
             .find(|e| e.name == "WALG_BACKUP_RETENTION_DAYS")
-            .unwrap();
+            .expect(
+                "WALG_BACKUP_RETENTION_DAYS env var should be present for time-based retention",
+            );
         assert_eq!(days_var.value.as_deref(), Some("30"));
     }
 }

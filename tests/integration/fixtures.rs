@@ -324,6 +324,7 @@ impl PostgresClusterBuilder {
                 tls: self.tls,
                 metrics: self.metrics,
                 service: self.service,
+                restore: None,
             },
             status: None,
         }

@@ -61,10 +61,103 @@ pub struct PostgresClusterSpec {
     /// Service configuration for external access
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<ServiceSpec>,
+
+    /// Restore configuration for bootstrapping from an existing backup.
+    /// When specified, the cluster will be initialized by restoring from the
+    /// specified backup source instead of creating a fresh database.
+    /// This is only used during initial cluster creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore: Option<RestoreSpec>,
 }
 
 fn default_replicas() -> i32 {
     1
+}
+
+/// Restore configuration for bootstrapping a cluster from an existing backup.
+///
+/// This uses Spilo's CLONE_WITH_WALG functionality to restore from a WAL-G backup.
+/// The restore is only performed during initial cluster creation.
+///
+/// # Example
+/// ```yaml
+/// restore:
+///   source:
+///     s3:
+///       prefix: s3://my-bucket/default/production-db
+///       region: us-east-1
+///       credentialsSecret: aws-backup-creds
+///   recoveryTarget:
+///     time: "2024-01-15T14:30:00Z"  # Point-in-time recovery
+/// ```
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreSpec {
+    /// Source backup location for the restore operation
+    pub source: RestoreSource,
+
+    /// Recovery target for point-in-time recovery (PITR).
+    /// If not specified, restores to the latest available state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_target: Option<RecoveryTarget>,
+}
+
+/// Source location for restore operations.
+///
+/// Specifies where to find the backup to restore from.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum RestoreSource {
+    /// Restore from an S3-compatible backup
+    #[serde(rename = "s3")]
+    S3 {
+        /// Full S3 prefix path (e.g., "s3://bucket/path/to/backup")
+        prefix: String,
+        /// AWS region
+        region: String,
+        /// Secret containing AWS credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+        credentials_secret: String,
+        /// Custom endpoint for S3-compatible storage (e.g., MinIO)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint: Option<String>,
+    },
+    /// Restore from a Google Cloud Storage backup
+    #[serde(rename = "gcs")]
+    Gcs {
+        /// Full GCS prefix path (e.g., "gs://bucket/path/to/backup")
+        prefix: String,
+        /// Secret containing GCS credentials (GOOGLE_APPLICATION_CREDENTIALS)
+        credentials_secret: String,
+    },
+    /// Restore from an Azure Blob Storage backup
+    #[serde(rename = "azure")]
+    Azure {
+        /// Full Azure prefix path (e.g., "azure://container/path/to/backup")
+        prefix: String,
+        /// Azure storage account name
+        storage_account: String,
+        /// Secret containing Azure credentials
+        credentials_secret: String,
+    },
+}
+
+/// Recovery target for point-in-time recovery (PITR).
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum RecoveryTarget {
+    /// Restore to a specific timestamp (ISO 8601 format).
+    /// Example: "2024-01-15T14:30:00Z"
+    #[serde(rename = "time")]
+    Time(String),
+
+    /// Restore to a specific backup by name.
+    /// Example: "base_00000001000000000000000A"
+    #[serde(rename = "backup")]
+    Backup(String),
+
+    /// Restore to a specific timeline.
+    #[serde(rename = "timeline")]
+    Timeline(i32),
 }
 
 /// Storage configuration for PostgreSQL data volumes
@@ -491,6 +584,14 @@ pub struct BackupStatus {
     /// Point-in-time recovery window end (most recent recoverable point, RFC3339)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_window_end: Option<String>,
+
+    /// Timestamp of the last manually triggered backup request (from annotation)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_manual_backup_trigger: Option<String>,
+
+    /// Status of the last manual backup: pending, running, completed, failed
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_manual_backup_status: Option<String>,
 }
 
 /// PgBouncer connection pooling configuration (deployed as separate Deployment)
@@ -751,6 +852,36 @@ pub struct PostgresClusterStatus {
     /// Whether all pods have applied their latest spec (observedGeneration == generation)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub all_pods_synced: Option<bool>,
+
+    /// Source backup information if this cluster was restored from a backup.
+    /// This is set after a successful restore and prevents re-restore on subsequent reconciles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored_from: Option<RestoredFromInfo>,
+}
+
+/// Information about the backup a cluster was restored from
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoredFromInfo {
+    /// The prefix path of the backup source (e.g., "s3://bucket/path")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_prefix: Option<String>,
+
+    /// The backup type (S3, GCS, Azure)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_type: Option<String>,
+
+    /// The recovery target time if PITR was used
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_target_time: Option<String>,
+
+    /// Timestamp when the restore was initiated
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_started_at: Option<String>,
+
+    /// Timestamp when the restore completed
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_completed_at: Option<String>,
 }
 
 /// Cluster lifecycle phase

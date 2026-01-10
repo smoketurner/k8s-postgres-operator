@@ -281,6 +281,12 @@ impl<'a> StatusManager<'a> {
                 .map(|s| s.resize_status.clone())
                 .unwrap_or_default(),
             all_pods_synced: self.cluster.status.as_ref().and_then(|s| s.all_pods_synced),
+            // Preserve restore status
+            restored_from: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.restored_from.clone()),
         };
 
         self.update(status).await
@@ -338,6 +344,12 @@ impl<'a> StatusManager<'a> {
             pods: vec![],
             resize_status: vec![],
             all_pods_synced: None,
+            // Preserve restore status
+            restored_from: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.restored_from.clone()),
         };
 
         self.update(status).await
@@ -406,6 +418,12 @@ impl<'a> StatusManager<'a> {
                 .map(|s| s.resize_status.clone())
                 .unwrap_or_default(),
             all_pods_synced: self.cluster.status.as_ref().and_then(|s| s.all_pods_synced),
+            // Preserve restore status
+            restored_from: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.restored_from.clone()),
         };
 
         self.update(status).await
@@ -459,6 +477,8 @@ impl<'a> StatusManager<'a> {
                 .map(|s| s.resize_status.clone())
                 .unwrap_or_default(),
             all_pods_synced: existing_status.and_then(|s| s.all_pods_synced),
+            // Preserve restore status
+            restored_from: existing_status.and_then(|s| s.restored_from.clone()),
         };
 
         self.update(status).await
@@ -514,6 +534,12 @@ impl<'a> StatusManager<'a> {
             pods: vec![],
             resize_status: vec![],
             all_pods_synced: None,
+            // Preserve restore status
+            restored_from: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.restored_from.clone()),
         };
 
         self.update(status).await

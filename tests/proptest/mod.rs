@@ -231,6 +231,7 @@ fn valid_spec() -> impl Strategy<Value = PostgresClusterSpec> {
                     tls,
                     metrics: None,
                     service: None,
+                    restore: None,
                 }
             },
         )
@@ -363,6 +364,7 @@ proptest! {
             tls: None,
             metrics: None,
             service: None,
+            restore: None,
         };
         let cluster = cluster_from_spec(spec);
         let result = validate_spec(&cluster);
@@ -386,6 +388,7 @@ proptest! {
             tls: None,
             metrics: None,
             service: None,
+            restore: None,
         };
         let cluster = cluster_from_spec(spec);
         let result = validate_spec(&cluster);
@@ -409,6 +412,7 @@ proptest! {
             tls: None,
             metrics: None,
             service: None,
+            restore: None,
         };
         let cluster = cluster_from_spec(spec);
         let result = validate_spec(&cluster);
@@ -483,6 +487,7 @@ proptest! {
             tls: None,
             metrics: None,
             service: None,
+            restore: None,
         };
         let cluster = cluster_from_spec(spec);
         let pdb_resource = pdb::generate_pdb(&cluster);
@@ -518,6 +523,7 @@ proptest! {
             tls: None,
             metrics: None,
             service: None,
+            restore: None,
         };
         let cluster = cluster_from_spec(spec);
         let sts = patroni::generate_patroni_statefulset(&cluster);
@@ -554,6 +560,7 @@ mod edge_case_tests {
             tls: None,
             metrics: None,
             service: None,
+            restore: None,
         };
         let cluster = cluster_from_spec(spec);
 
@@ -585,6 +592,7 @@ mod edge_case_tests {
             tls: None,
             metrics: None,
             service: None,
+            restore: None,
         });
 
         cluster.status = Some(PostgresClusterStatus {
