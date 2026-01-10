@@ -17,8 +17,8 @@ RUN mkdir src && \
 
 COPY src ./src
 
-# Build the actual application (touch to invalidate cache)
-RUN touch src/main.rs src/lib.rs && cargo build --release
+# Build the actual application
+RUN cargo build --release
 
 # Runtime stage - scratch for minimal image
 FROM scratch
