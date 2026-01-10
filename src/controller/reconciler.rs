@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use k8s_openapi::api::apps::v1::StatefulSet;
+use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
 use k8s_openapi::api::core::v1::{
     ConfigMap, Endpoints, PersistentVolumeClaim, Pod, Secret, Service, ServiceAccount,
 };
@@ -29,10 +29,111 @@ use crate::controller::state_machine::{
 };
 use crate::controller::status::{StatusManager, spec_changed};
 use crate::crd::{ClusterPhase, PostgresCluster};
-use crate::resources::{patroni, pdb, secret, service};
+use crate::resources::{patroni, pdb, pgbouncer, secret, service};
 
 /// Finalizer name for cleanup
 pub const FINALIZER: &str = "postgres.example.com/finalizer";
+
+/// Tracks which critical resources are missing for a cluster
+#[derive(Debug, Default)]
+struct MissingResources {
+    secret: bool,
+    rbac: bool,
+    configmap: bool,
+    services: bool,
+    statefulset: bool,
+    pgbouncer: bool,
+}
+
+impl MissingResources {
+    fn any_missing(&self) -> bool {
+        self.secret || self.rbac || self.configmap || self.services || self.statefulset || self.pgbouncer
+    }
+}
+
+impl std::fmt::Display for MissingResources {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "secret: {}, rbac: {}, configmap: {}, services: {}, statefulset: {}, pgbouncer: {}",
+            self.secret, self.rbac, self.configmap, self.services, self.statefulset, self.pgbouncer
+        )
+    }
+}
+
+/// Check which critical resources are missing for a cluster
+async fn check_missing_resources(
+    cluster: &PostgresCluster,
+    ctx: &Context,
+    ns: &str,
+) -> Result<MissingResources> {
+    let name = cluster.name_any();
+
+    // Check Secret
+    let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
+    let secret = secrets_api
+        .get_opt(&format!("{}-credentials", name))
+        .await?
+        .is_none();
+
+    // Check RBAC resources
+    let sa_api: Api<ServiceAccount> = Api::namespaced(ctx.client.clone(), ns);
+    let role_api: Api<Role> = Api::namespaced(ctx.client.clone(), ns);
+    let rb_api: Api<RoleBinding> = Api::namespaced(ctx.client.clone(), ns);
+    let rbac_name = format!("{}-patroni", name);
+    let rbac = sa_api.get_opt(&rbac_name).await?.is_none()
+        || role_api.get_opt(&rbac_name).await?.is_none()
+        || rb_api.get_opt(&rbac_name).await?.is_none();
+
+    // Check ConfigMap
+    let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), ns);
+    let configmap = cm_api
+        .get_opt(&format!("{}-patroni-config", name))
+        .await?
+        .is_none();
+
+    // Check Services
+    let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
+    let services = svc_api.get_opt(&format!("{}-primary", name)).await?.is_none()
+        || svc_api.get_opt(&format!("{}-repl", name)).await?.is_none()
+        || svc_api
+            .get_opt(&format!("{}-headless", name))
+            .await?
+            .is_none();
+
+    // Check StatefulSet
+    let sts_api: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), ns);
+    let statefulset = sts_api.get_opt(&name).await?.is_none();
+
+    // Check PgBouncer Deployments if enabled
+    let deploy_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), ns);
+    let pgbouncer = if pgbouncer::is_pgbouncer_enabled(cluster) {
+        let pooler_missing = deploy_api
+            .get_opt(&format!("{}-pooler", name))
+            .await?
+            .is_none();
+        let replica_pooler_missing = if pgbouncer::is_replica_pooler_enabled(cluster) {
+            deploy_api
+                .get_opt(&format!("{}-pooler-repl", name))
+                .await?
+                .is_none()
+        } else {
+            false
+        };
+        pooler_missing || replica_pooler_missing
+    } else {
+        false
+    };
+
+    Ok(MissingResources {
+        secret,
+        rbac,
+        configmap,
+        services,
+        statefulset,
+        pgbouncer,
+    })
+}
 
 /// Timeout for cluster stuck in Creating state (10 minutes)
 /// After this duration, the cluster will transition to Failed state
@@ -70,47 +171,11 @@ pub async fn reconcile(cluster: Arc<PostgresCluster>, ctx: Arc<Context>) -> Resu
 
     // Check if critical owned resources exist
     // If they're missing, we need full reconciliation to recreate them
-    let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
-    let secret_name = format!("{}-credentials", name);
-    let secret_missing = secrets_api.get_opt(&secret_name).await?.is_none();
-
-    // Check RBAC resources
-    let sa_api: Api<ServiceAccount> = Api::namespaced(ctx.client.clone(), &ns);
-    let role_api: Api<Role> = Api::namespaced(ctx.client.clone(), &ns);
-    let rb_api: Api<RoleBinding> = Api::namespaced(ctx.client.clone(), &ns);
-    let rbac_name = format!("{}-patroni", name);
-    let sa_missing = sa_api.get_opt(&rbac_name).await?.is_none();
-    let role_missing = role_api.get_opt(&rbac_name).await?.is_none();
-    let rb_missing = rb_api.get_opt(&rbac_name).await?.is_none();
-    let rbac_missing = sa_missing || role_missing || rb_missing;
-
-    // Check ConfigMap
-    let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &ns);
-    let cm_name = format!("{}-patroni-config", name);
-    let cm_missing = cm_api.get_opt(&cm_name).await?.is_none();
-
-    // Check Services
-    let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), &ns);
-    let primary_svc_missing = svc_api
-        .get_opt(&format!("{}-primary", name))
-        .await?
-        .is_none();
-    let replicas_svc_missing = svc_api.get_opt(&format!("{}-repl", name)).await?.is_none();
-    let headless_svc_missing = svc_api
-        .get_opt(&format!("{}-headless", name))
-        .await?
-        .is_none();
-    let svc_missing = primary_svc_missing || replicas_svc_missing || headless_svc_missing;
+    let missing = check_missing_resources(&cluster, &ctx, &ns).await?;
 
     // Skip full reconciliation if spec hasn't changed, cluster is running, AND
     // all critical resources exist
-    if !is_spec_changed
-        && current_phase == ClusterPhase::Running
-        && !secret_missing
-        && !rbac_missing
-        && !cm_missing
-        && !svc_missing
-    {
+    if !is_spec_changed && current_phase == ClusterPhase::Running && !missing.any_missing() {
         debug!(
             "Spec unchanged for {} (generation: {:?}, observed: {:?}), checking status only",
             name,
@@ -122,10 +187,10 @@ pub async fn reconcile(cluster: Arc<PostgresCluster>, ctx: Arc<Context>) -> Resu
     }
 
     // Log why we're doing full reconciliation
-    if secret_missing || rbac_missing || cm_missing || svc_missing {
+    if missing.any_missing() {
         info!(
-            "Critical resource missing for {} (secret: {}, rbac: {}, configmap: {}, services: {}), performing full reconciliation",
-            name, secret_missing, rbac_missing, cm_missing, svc_missing
+            "Critical resource missing for {} ({}), performing full reconciliation",
+            name, missing
         );
     }
 
@@ -341,6 +406,74 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
         return Ok(Action::await_change());
     }
 
+    // Validate TLS configuration if enabled
+    if let Some(ref tls) = cluster.spec.tls {
+        if tls.enabled {
+            // If TLS is enabled but no cert_secret is specified, that's a warning
+            // (Spilo will generate self-signed certs)
+            if tls.cert_secret.is_none() {
+                info!(
+                    "TLS enabled for {} but no cert_secret specified - Spilo will use self-signed certificates",
+                    name
+                );
+            } else if let Some(ref cert_secret_name) = tls.cert_secret {
+                // Validate that the cert secret exists
+                let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
+                if secrets_api.get_opt(cert_secret_name).await?.is_none() {
+                    warn!(
+                        "TLS cert_secret '{}' not found for cluster {}",
+                        cert_secret_name, name
+                    );
+                    status_manager
+                        .set_failed(
+                            "TLSSecretNotFound",
+                            &format!("TLS certificate secret '{}' not found", cert_secret_name),
+                        )
+                        .await?;
+                    ctx.publish_warning_event(
+                        cluster,
+                        "TLSSecretNotFound",
+                        "Validation",
+                        Some(format!(
+                            "TLS certificate secret '{}' not found",
+                            cert_secret_name
+                        )),
+                    )
+                    .await;
+                    return Ok(Action::requeue(Duration::from_secs(30)));
+                }
+            }
+
+            // Validate CA secret if specified
+            if let Some(ref ca_secret_name) = tls.ca_secret {
+                let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
+                if secrets_api.get_opt(ca_secret_name).await?.is_none() {
+                    warn!(
+                        "TLS ca_secret '{}' not found for cluster {}",
+                        ca_secret_name, name
+                    );
+                    status_manager
+                        .set_failed(
+                            "TLSCASecretNotFound",
+                            &format!("TLS CA certificate secret '{}' not found", ca_secret_name),
+                        )
+                        .await?;
+                    ctx.publish_warning_event(
+                        cluster,
+                        "TLSCASecretNotFound",
+                        "Validation",
+                        Some(format!(
+                            "TLS CA certificate secret '{}' not found",
+                            ca_secret_name
+                        )),
+                    )
+                    .await;
+                    return Ok(Action::requeue(Duration::from_secs(30)));
+                }
+            }
+        }
+    }
+
     // Ensure Secret exists (credentials)
     let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
     let secret_name = format!("{}-credentials", name);
@@ -382,6 +515,38 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
 
     let headless_svc = service::generate_headless_service(cluster);
     apply_resource(ctx, ns, &headless_svc).await?;
+
+    // Apply PgBouncer resources if enabled
+    if pgbouncer::is_pgbouncer_enabled(cluster) {
+        info!("PgBouncer is enabled for cluster {}", name);
+
+        // Apply PgBouncer ConfigMap
+        let pgbouncer_config = pgbouncer::generate_pgbouncer_configmap(cluster);
+        apply_resource(ctx, ns, &pgbouncer_config).await?;
+
+        // Apply PgBouncer Deployment
+        let pgbouncer_deployment = pgbouncer::generate_pgbouncer_deployment(cluster);
+        apply_resource(ctx, ns, &pgbouncer_deployment).await?;
+
+        // Apply PgBouncer Service
+        let pgbouncer_svc = pgbouncer::generate_pgbouncer_service(cluster);
+        apply_resource(ctx, ns, &pgbouncer_svc).await?;
+
+        // Apply replica pooler if enabled
+        if pgbouncer::is_replica_pooler_enabled(cluster) {
+            info!("Replica PgBouncer pooler is enabled for cluster {}", name);
+
+            let pgbouncer_replica_config = pgbouncer::generate_pgbouncer_replica_configmap(cluster);
+            apply_resource(ctx, ns, &pgbouncer_replica_config).await?;
+
+            let pgbouncer_replica_deployment =
+                pgbouncer::generate_pgbouncer_replica_deployment(cluster);
+            apply_resource(ctx, ns, &pgbouncer_replica_deployment).await?;
+
+            let pgbouncer_replica_svc = pgbouncer::generate_pgbouncer_replica_service(cluster);
+            apply_resource(ctx, ns, &pgbouncer_replica_svc).await?;
+        }
+    }
 
     // Check StatefulSet status
     let sts_api: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), ns);

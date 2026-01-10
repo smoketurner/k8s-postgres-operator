@@ -15,8 +15,8 @@ use k8s_openapi::api::apps::v1::{
 use k8s_openapi::api::core::v1::{
     Affinity, ConfigMap, Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction,
     PersistentVolumeClaim, PersistentVolumeClaimSpec, PodAffinityTerm, PodAntiAffinity, PodSpec,
-    PodTemplateSpec, Probe, ResourceRequirements, SecretKeySelector, SecurityContext,
-    ServiceAccount, Volume, VolumeMount, WeightedPodAffinityTerm,
+    PodTemplateSpec, Probe, ResourceRequirements, SecretKeySelector, SecretVolumeSource,
+    SecurityContext, ServiceAccount, Volume, VolumeMount, WeightedPodAffinityTerm,
 };
 use k8s_openapi::api::rbac::v1::{Role, RoleBinding, RoleRef, Subject};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -146,7 +146,7 @@ namespace: {ns}
 kubernetes:
   use_endpoints: true
   scope_label: postgres.example.com/cluster
-  role_label: postgres.example.com/role
+  role_label: spilo-role
   labels:
     application: spilo
     postgres.example.com/cluster: {cluster_name}
@@ -384,7 +384,7 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
     // Environment variables for Spilo
     // Based on Zalando's postgres-operator configuration
     // See: https://github.com/zalando/postgres-operator/blob/master/pkg/cluster/k8sres.go
-    let env_vars = vec![
+    let mut env_vars = vec![
         // Cluster scope name
         EnvVar {
             name: "SCOPE".to_string(),
@@ -471,7 +471,7 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
         },
         EnvVar {
             name: "KUBERNETES_ROLE_LABEL".to_string(),
-            value: Some("postgres.example.com/role".to_string()),
+            value: Some("spilo-role".to_string()),
             ..Default::default()
         },
         EnvVar {
@@ -490,15 +490,101 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
         },
     ];
 
-    // Volume mounts - only data volume needed, Spilo config is via env vars
-    let volume_mounts = vec![VolumeMount {
+    // Volume mounts - data volume is always needed
+    let mut volume_mounts = vec![VolumeMount {
         name: "data".to_string(),
         mount_path: "/var/lib/postgresql/data".to_string(),
         ..Default::default()
     }];
 
-    // No additional volumes needed - Spilo generates its config from env vars
-    let volumes: Vec<Volume> = vec![];
+    // Volumes
+    let mut volumes: Vec<Volume> = vec![];
+
+    // TLS configuration
+    if let Some(ref tls) = cluster.spec.tls {
+        if tls.enabled {
+            // Get filenames with defaults
+            let cert_file = tls
+                .certificate_file
+                .as_deref()
+                .unwrap_or("tls.crt")
+                .to_string();
+            let key_file = tls
+                .private_key_file
+                .as_deref()
+                .unwrap_or("tls.key")
+                .to_string();
+
+            // Add TLS certificate volume if cert_secret is specified
+            if let Some(ref cert_secret) = tls.cert_secret {
+                volumes.push(Volume {
+                    name: "tls-certs".to_string(),
+                    secret: Some(SecretVolumeSource {
+                        secret_name: Some(cert_secret.clone()),
+                        default_mode: Some(0o640),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                });
+
+                volume_mounts.push(VolumeMount {
+                    name: "tls-certs".to_string(),
+                    mount_path: "/tls".to_string(),
+                    read_only: Some(true),
+                    ..Default::default()
+                });
+
+                // Spilo TLS environment variables
+                env_vars.push(EnvVar {
+                    name: "SSL_CERTIFICATE_FILE".to_string(),
+                    value: Some(format!("/tls/{}", cert_file)),
+                    ..Default::default()
+                });
+                env_vars.push(EnvVar {
+                    name: "SSL_PRIVATE_KEY_FILE".to_string(),
+                    value: Some(format!("/tls/{}", key_file)),
+                    ..Default::default()
+                });
+            }
+
+            // Add separate CA secret volume if specified
+            if let Some(ref ca_secret) = tls.ca_secret {
+                let ca_file = tls.ca_file.as_deref().unwrap_or("ca.crt").to_string();
+
+                volumes.push(Volume {
+                    name: "tls-ca".to_string(),
+                    secret: Some(SecretVolumeSource {
+                        secret_name: Some(ca_secret.clone()),
+                        default_mode: Some(0o640),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                });
+
+                volume_mounts.push(VolumeMount {
+                    name: "tls-ca".to_string(),
+                    mount_path: "/tlsca".to_string(),
+                    read_only: Some(true),
+                    ..Default::default()
+                });
+
+                env_vars.push(EnvVar {
+                    name: "SSL_CA_FILE".to_string(),
+                    value: Some(format!("/tlsca/{}", ca_file)),
+                    ..Default::default()
+                });
+            } else if tls.cert_secret.is_some() {
+                // CA file in the same secret as cert/key
+                if let Some(ref ca_file) = tls.ca_file {
+                    env_vars.push(EnvVar {
+                        name: "SSL_CA_FILE".to_string(),
+                        value: Some(format!("/tls/{}", ca_file)),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+    }
 
     // Startup probe - Patroni REST API
     let startup_probe = Probe {

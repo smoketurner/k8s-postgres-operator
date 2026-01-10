@@ -3,8 +3,10 @@
 //! Tests for Patroni StatefulSet, Service, Secret, and PDB generation.
 //! All PostgreSQL clusters use Patroni for consistent management.
 
-use postgres_operator::crd::{PostgresCluster, PostgresClusterSpec, StorageSpec};
-use postgres_operator::resources::{patroni, pdb, secret, service};
+use postgres_operator::crd::{
+    PgBouncerSpec, PostgresCluster, PostgresClusterSpec, StorageSpec, TLSSpec,
+};
+use postgres_operator::resources::{patroni, pdb, pgbouncer, secret, service};
 
 /// Helper to create a test cluster
 fn create_test_cluster(name: &str, namespace: &str, replicas: i32) -> PostgresCluster {
@@ -33,6 +35,80 @@ fn create_test_cluster(name: &str, namespace: &str, replicas: i32) -> PostgresCl
         },
         status: None,
     }
+}
+
+/// Helper to create a test cluster with TLS enabled
+fn create_test_cluster_with_tls(name: &str, namespace: &str, replicas: i32) -> PostgresCluster {
+    let mut cluster = create_test_cluster(name, namespace, replicas);
+    cluster.spec.tls = Some(TLSSpec {
+        enabled: true,
+        cert_secret: Some("my-tls-secret".to_string()),
+        ca_secret: None,
+        certificate_file: None,
+        private_key_file: None,
+        ca_file: None,
+    });
+    cluster
+}
+
+/// Helper to create a test cluster with TLS and custom filenames
+fn create_test_cluster_with_tls_custom_files(
+    name: &str,
+    namespace: &str,
+    replicas: i32,
+) -> PostgresCluster {
+    let mut cluster = create_test_cluster(name, namespace, replicas);
+    cluster.spec.tls = Some(TLSSpec {
+        enabled: true,
+        cert_secret: Some("my-tls-secret".to_string()),
+        ca_secret: Some("my-ca-secret".to_string()),
+        certificate_file: Some("server.crt".to_string()),
+        private_key_file: Some("server.key".to_string()),
+        ca_file: Some("root.crt".to_string()),
+    });
+    cluster
+}
+
+/// Helper to create a test cluster with PgBouncer enabled
+fn create_test_cluster_with_pgbouncer(
+    name: &str,
+    namespace: &str,
+    replicas: i32,
+) -> PostgresCluster {
+    let mut cluster = create_test_cluster(name, namespace, replicas);
+    cluster.spec.pgbouncer = Some(PgBouncerSpec {
+        enabled: true,
+        replicas: 2,
+        pool_mode: "transaction".to_string(),
+        max_db_connections: 60,
+        default_pool_size: 20,
+        max_client_conn: 10000,
+        image: None,
+        resources: None,
+        enable_replica_pooler: false,
+    });
+    cluster
+}
+
+/// Helper to create a test cluster with PgBouncer and replica pooler
+fn create_test_cluster_with_pgbouncer_replica(
+    name: &str,
+    namespace: &str,
+    replicas: i32,
+) -> PostgresCluster {
+    let mut cluster = create_test_cluster(name, namespace, replicas);
+    cluster.spec.pgbouncer = Some(PgBouncerSpec {
+        enabled: true,
+        replicas: 2,
+        pool_mode: "transaction".to_string(),
+        max_db_connections: 60,
+        default_pool_size: 20,
+        max_client_conn: 10000,
+        image: None,
+        resources: None,
+        enable_replica_pooler: true,
+    });
+    cluster
 }
 
 mod patroni_statefulset_tests {
@@ -406,5 +482,488 @@ mod pdb_tests {
         let owner_refs = pdb_resource.metadata.owner_references.as_ref().unwrap();
         assert_eq!(owner_refs.len(), 1);
         assert_eq!(owner_refs[0].kind, "PostgresCluster");
+    }
+}
+
+// =============================================================================
+// TLS Tests
+// =============================================================================
+
+mod tls_statefulset_tests {
+    use super::*;
+
+    #[test]
+    fn test_tls_disabled_no_volumes() {
+        let cluster = create_test_cluster("my-cluster", "default", 1);
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+
+        let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+        let volumes = pod_spec.volumes.as_ref();
+
+        // Without TLS, should have no volumes (or empty)
+        assert!(volumes.is_none() || volumes.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_tls_enabled_adds_volume() {
+        let cluster = create_test_cluster_with_tls("my-cluster", "default", 1);
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+
+        let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+        let volumes = pod_spec.volumes.as_ref().unwrap();
+
+        // Should have tls-certs volume
+        let tls_volume = volumes.iter().find(|v| v.name == "tls-certs");
+        assert!(tls_volume.is_some(), "TLS volume should exist");
+
+        let secret_source = tls_volume.unwrap().secret.as_ref().unwrap();
+        assert_eq!(
+            secret_source.secret_name,
+            Some("my-tls-secret".to_string())
+        );
+    }
+
+    #[test]
+    fn test_tls_enabled_adds_volume_mount() {
+        let cluster = create_test_cluster_with_tls("my-cluster", "default", 1);
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+
+        let containers = &sts
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers;
+        let volume_mounts = containers[0].volume_mounts.as_ref().unwrap();
+
+        // Should have tls-certs mount at /tls
+        let tls_mount = volume_mounts.iter().find(|m| m.name == "tls-certs");
+        assert!(tls_mount.is_some(), "TLS volume mount should exist");
+        assert_eq!(tls_mount.unwrap().mount_path, "/tls");
+        assert_eq!(tls_mount.unwrap().read_only, Some(true));
+    }
+
+    #[test]
+    fn test_tls_enabled_adds_env_vars() {
+        let cluster = create_test_cluster_with_tls("my-cluster", "default", 1);
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+
+        let containers = &sts
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers;
+        let env_vars = containers[0].env.as_ref().unwrap();
+
+        // Should have SSL_CERTIFICATE_FILE and SSL_PRIVATE_KEY_FILE env vars
+        let cert_env = env_vars.iter().find(|e| e.name == "SSL_CERTIFICATE_FILE");
+        let key_env = env_vars.iter().find(|e| e.name == "SSL_PRIVATE_KEY_FILE");
+
+        assert!(cert_env.is_some(), "SSL_CERTIFICATE_FILE should be set");
+        assert!(key_env.is_some(), "SSL_PRIVATE_KEY_FILE should be set");
+
+        assert_eq!(cert_env.unwrap().value, Some("/tls/tls.crt".to_string()));
+        assert_eq!(key_env.unwrap().value, Some("/tls/tls.key".to_string()));
+    }
+
+    #[test]
+    fn test_tls_custom_filenames() {
+        let cluster = create_test_cluster_with_tls_custom_files("my-cluster", "default", 1);
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+
+        let containers = &sts
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers;
+        let env_vars = containers[0].env.as_ref().unwrap();
+
+        // Should use custom filenames
+        let cert_env = env_vars.iter().find(|e| e.name == "SSL_CERTIFICATE_FILE");
+        let key_env = env_vars.iter().find(|e| e.name == "SSL_PRIVATE_KEY_FILE");
+        let ca_env = env_vars.iter().find(|e| e.name == "SSL_CA_FILE");
+
+        assert_eq!(cert_env.unwrap().value, Some("/tls/server.crt".to_string()));
+        assert_eq!(key_env.unwrap().value, Some("/tls/server.key".to_string()));
+        assert!(ca_env.is_some(), "SSL_CA_FILE should be set");
+        // CA is in separate secret, so mounted at /tlsca
+        assert_eq!(ca_env.unwrap().value, Some("/tlsca/root.crt".to_string()));
+    }
+
+    #[test]
+    fn test_tls_separate_ca_secret_adds_second_volume() {
+        let cluster = create_test_cluster_with_tls_custom_files("my-cluster", "default", 1);
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+
+        let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+        let volumes = pod_spec.volumes.as_ref().unwrap();
+
+        // Should have both tls-certs and tls-ca volumes
+        let tls_volume = volumes.iter().find(|v| v.name == "tls-certs");
+        let ca_volume = volumes.iter().find(|v| v.name == "tls-ca");
+
+        assert!(tls_volume.is_some(), "TLS certs volume should exist");
+        assert!(ca_volume.is_some(), "TLS CA volume should exist");
+
+        let ca_secret = ca_volume.unwrap().secret.as_ref().unwrap();
+        assert_eq!(ca_secret.secret_name, Some("my-ca-secret".to_string()));
+    }
+}
+
+// =============================================================================
+// PgBouncer Tests
+// =============================================================================
+
+mod pgbouncer_deployment_tests {
+    use super::*;
+    use kube::ResourceExt;
+
+    #[test]
+    fn test_pgbouncer_deployment_name() {
+        let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
+
+        assert_eq!(deployment.name_any(), "my-cluster-pooler");
+    }
+
+    #[test]
+    fn test_pgbouncer_deployment_replicas() {
+        let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
+
+        let spec = deployment.spec.as_ref().unwrap();
+        assert_eq!(spec.replicas, Some(2));
+    }
+
+    #[test]
+    fn test_pgbouncer_deployment_labels() {
+        let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
+
+        let labels = deployment.metadata.labels.as_ref().unwrap();
+        assert_eq!(
+            labels.get("app.kubernetes.io/component"),
+            Some(&"pgbouncer".to_string())
+        );
+        assert_eq!(
+            labels.get("postgres.example.com/pooler"),
+            Some(&"true".to_string())
+        );
+        assert_eq!(
+            labels.get("postgres.example.com/cluster"),
+            Some(&"my-cluster".to_string())
+        );
+    }
+
+    #[test]
+    fn test_pgbouncer_deployment_owner_reference() {
+        let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
+
+        let owner_refs = deployment.metadata.owner_references.as_ref().unwrap();
+        assert_eq!(owner_refs.len(), 1);
+        assert_eq!(owner_refs[0].kind, "PostgresCluster");
+        assert_eq!(owner_refs[0].name, "my-cluster");
+    }
+
+    #[test]
+    fn test_pgbouncer_deployment_port() {
+        let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
+
+        let containers = &deployment
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers;
+        let ports = containers[0].ports.as_ref().unwrap();
+
+        assert_eq!(ports[0].container_port, 6432);
+        assert_eq!(ports[0].name, Some("pgbouncer".to_string()));
+    }
+
+    #[test]
+    fn test_pgbouncer_deployment_has_probes() {
+        let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
+
+        let container = &deployment
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0];
+
+        assert!(
+            container.readiness_probe.is_some(),
+            "Readiness probe should exist"
+        );
+        assert!(
+            container.liveness_probe.is_some(),
+            "Liveness probe should exist"
+        );
+    }
+
+    #[test]
+    fn test_pgbouncer_deployment_security_context() {
+        let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
+
+        let container = &deployment
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0];
+
+        let security = container.security_context.as_ref().unwrap();
+        assert_eq!(security.run_as_non_root, Some(true));
+        assert_eq!(security.allow_privilege_escalation, Some(false));
+    }
+}
+
+mod pgbouncer_configmap_tests {
+    use super::*;
+    use kube::ResourceExt;
+
+    #[test]
+    fn test_pgbouncer_configmap_name() {
+        let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
+        let cm = pgbouncer::generate_pgbouncer_configmap(&cluster);
+
+        assert_eq!(cm.name_any(), "my-cluster-pgbouncer-config");
+    }
+
+    #[test]
+    fn test_pgbouncer_configmap_contains_ini() {
+        let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
+        let cm = pgbouncer::generate_pgbouncer_configmap(&cluster);
+
+        let data = cm.data.as_ref().unwrap();
+        assert!(data.contains_key("pgbouncer.ini"));
+    }
+
+    #[test]
+    fn test_pgbouncer_configmap_pool_mode() {
+        let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
+        let cm = pgbouncer::generate_pgbouncer_configmap(&cluster);
+
+        let data = cm.data.as_ref().unwrap();
+        let ini = data.get("pgbouncer.ini").unwrap();
+
+        assert!(ini.contains("pool_mode = transaction"));
+    }
+
+    #[test]
+    fn test_pgbouncer_configmap_connects_to_primary() {
+        let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
+        let cm = pgbouncer::generate_pgbouncer_configmap(&cluster);
+
+        let data = cm.data.as_ref().unwrap();
+        let ini = data.get("pgbouncer.ini").unwrap();
+
+        // Should connect to the primary service
+        assert!(ini.contains("host=my-cluster-primary"));
+    }
+
+    #[test]
+    fn test_pgbouncer_configmap_owner_reference() {
+        let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
+        let cm = pgbouncer::generate_pgbouncer_configmap(&cluster);
+
+        let owner_refs = cm.metadata.owner_references.as_ref().unwrap();
+        assert_eq!(owner_refs.len(), 1);
+        assert_eq!(owner_refs[0].kind, "PostgresCluster");
+    }
+}
+
+mod pgbouncer_service_tests {
+    use super::*;
+    use kube::ResourceExt;
+
+    #[test]
+    fn test_pgbouncer_service_name() {
+        let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
+        let svc = pgbouncer::generate_pgbouncer_service(&cluster);
+
+        assert_eq!(svc.name_any(), "my-cluster-pooler");
+    }
+
+    #[test]
+    fn test_pgbouncer_service_port() {
+        let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
+        let svc = pgbouncer::generate_pgbouncer_service(&cluster);
+
+        let ports = svc.spec.as_ref().unwrap().ports.as_ref().unwrap();
+        assert_eq!(ports[0].port, 6432);
+        assert_eq!(ports[0].name, Some("pgbouncer".to_string()));
+    }
+
+    #[test]
+    fn test_pgbouncer_service_selector() {
+        let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
+        let svc = pgbouncer::generate_pgbouncer_service(&cluster);
+
+        let selector = svc.spec.as_ref().unwrap().selector.as_ref().unwrap();
+        assert_eq!(
+            selector.get("postgres.example.com/pooler"),
+            Some(&"true".to_string())
+        );
+    }
+}
+
+mod pgbouncer_replica_tests {
+    use super::*;
+    use kube::ResourceExt;
+
+    #[test]
+    fn test_pgbouncer_replica_configmap_connects_to_replicas() {
+        let cluster = create_test_cluster_with_pgbouncer_replica("my-cluster", "default", 3);
+        let cm = pgbouncer::generate_pgbouncer_replica_configmap(&cluster);
+
+        let data = cm.data.as_ref().unwrap();
+        let ini = data.get("pgbouncer.ini").unwrap();
+
+        // Should connect to the replica service
+        assert!(ini.contains("host=my-cluster-repl"));
+    }
+
+    #[test]
+    fn test_pgbouncer_replica_deployment_name() {
+        let cluster = create_test_cluster_with_pgbouncer_replica("my-cluster", "default", 3);
+        let deployment = pgbouncer::generate_pgbouncer_replica_deployment(&cluster);
+
+        assert_eq!(deployment.name_any(), "my-cluster-pooler-repl");
+    }
+
+    #[test]
+    fn test_pgbouncer_replica_service_name() {
+        let cluster = create_test_cluster_with_pgbouncer_replica("my-cluster", "default", 3);
+        let svc = pgbouncer::generate_pgbouncer_replica_service(&cluster);
+
+        assert_eq!(svc.name_any(), "my-cluster-pooler-repl");
+    }
+}
+
+mod pgbouncer_helper_tests {
+    use super::*;
+
+    #[test]
+    fn test_is_pgbouncer_enabled_true() {
+        let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
+        assert!(pgbouncer::is_pgbouncer_enabled(&cluster));
+    }
+
+    #[test]
+    fn test_is_pgbouncer_enabled_false() {
+        let cluster = create_test_cluster("my-cluster", "default", 3);
+        assert!(!pgbouncer::is_pgbouncer_enabled(&cluster));
+    }
+
+    #[test]
+    fn test_is_replica_pooler_enabled_true() {
+        let cluster = create_test_cluster_with_pgbouncer_replica("my-cluster", "default", 3);
+        assert!(pgbouncer::is_replica_pooler_enabled(&cluster));
+    }
+
+    #[test]
+    fn test_is_replica_pooler_enabled_false() {
+        let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
+        assert!(!pgbouncer::is_replica_pooler_enabled(&cluster));
+    }
+}
+
+// =============================================================================
+// Combined TLS + PgBouncer Tests
+// =============================================================================
+
+mod tls_pgbouncer_integration_tests {
+    use super::*;
+
+    fn create_cluster_with_tls_and_pgbouncer(
+        name: &str,
+        namespace: &str,
+        replicas: i32,
+    ) -> PostgresCluster {
+        let mut cluster = create_test_cluster_with_pgbouncer(name, namespace, replicas);
+        cluster.spec.tls = Some(TLSSpec {
+            enabled: true,
+            cert_secret: Some("my-tls-secret".to_string()),
+            ca_secret: None,
+            certificate_file: None,
+            private_key_file: None,
+            ca_file: None,
+        });
+        cluster
+    }
+
+    #[test]
+    fn test_pgbouncer_with_tls_has_tls_volume() {
+        let cluster = create_cluster_with_tls_and_pgbouncer("my-cluster", "default", 3);
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
+
+        let pod_spec = deployment
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap();
+        let volumes = pod_spec.volumes.as_ref().unwrap();
+
+        // PgBouncer should also have TLS volume when TLS is enabled
+        let tls_volume = volumes.iter().find(|v| v.name == "tls-certs");
+        assert!(
+            tls_volume.is_some(),
+            "PgBouncer should have TLS volume when TLS is enabled"
+        );
+    }
+
+    #[test]
+    fn test_pgbouncer_with_tls_has_tls_env_vars() {
+        let cluster = create_cluster_with_tls_and_pgbouncer("my-cluster", "default", 3);
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
+
+        let containers = &deployment
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers;
+        let env_vars = containers[0].env.as_ref().unwrap();
+
+        // Should have TLS-related env vars
+        let tls_mode = env_vars
+            .iter()
+            .find(|e| e.name == "PGBOUNCER_CLIENT_TLS_SSLMODE");
+        assert!(
+            tls_mode.is_some(),
+            "PgBouncer should have TLS sslmode env var"
+        );
     }
 }

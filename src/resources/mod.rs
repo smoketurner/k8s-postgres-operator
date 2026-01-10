@@ -1,6 +1,7 @@
 pub mod common;
 pub mod patroni;
 pub mod pdb;
+pub mod pgbouncer;
 pub mod secret;
 pub mod service;
 

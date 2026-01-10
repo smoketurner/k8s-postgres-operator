@@ -1,0 +1,39 @@
+# PostgreSQL cluster with PgBouncer connection pooling
+# PgBouncer is deployed as a separate Deployment (not a sidecar)
+apiVersion: postgres.example.com/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: pg-pooled
+  namespace: default
+spec:
+  version: "16"
+  replicas: 3
+  storage:
+    size: 10Gi
+  pgbouncer:
+    enabled: true
+    replicas: 2  # Number of PgBouncer instances
+    poolMode: transaction  # session, transaction, or statement
+    maxDbConnections: 60   # Total connections distributed across instances
+    defaultPoolSize: 20    # Per user/database pair
+    maxClientConn: 10000   # Per PgBouncer instance
+    # Optional: enable separate pooler for read replicas
+    enableReplicaPooler: true
+    # Optional: custom image
+    # image: bitnami/pgbouncer:1.23.1
+    # Optional: resource limits
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "256Mi"
+  postgresqlParams:
+    max_connections: "200"
+---
+# Connection endpoints when PgBouncer is enabled:
+#   Primary (through pooler):  pg-pooled-pooler:6432
+#   Primary (direct):          pg-pooled-primary:5432
+#   Replicas (through pooler): pg-pooled-pooler-repl:6432 (if enableReplicaPooler=true)
+#   Replicas (direct):         pg-pooled-repl:5432

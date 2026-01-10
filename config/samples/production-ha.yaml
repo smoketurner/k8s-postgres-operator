@@ -1,0 +1,56 @@
+# Production-ready PostgreSQL cluster with HA, TLS, and connection pooling
+# This example shows a fully-featured configuration
+apiVersion: postgres.example.com/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: production-db
+  namespace: default
+spec:
+  version: "16"
+  replicas: 3  # HA with automatic failover
+  storage:
+    size: 100Gi
+    storageClass: fast-ssd  # Use your cluster's SSD storage class
+  resources:
+    requests:
+      cpu: "2"
+      memory: "4Gi"
+    limits:
+      cpu: "4"
+      memory: "8Gi"
+  postgresqlParams:
+    max_connections: "500"
+    shared_buffers: "1GB"
+    effective_cache_size: "3GB"
+    work_mem: "32MB"
+    maintenance_work_mem: "512MB"
+    wal_buffers: "64MB"
+    checkpoint_completion_target: "0.9"
+    random_page_cost: "1.1"  # For SSDs
+  # TLS encryption
+  tls:
+    enabled: true
+    certSecret: production-db-tls
+  # Connection pooling
+  pgbouncer:
+    enabled: true
+    replicas: 2
+    poolMode: transaction
+    maxDbConnections: 100
+    defaultPoolSize: 25
+    maxClientConn: 10000
+    enableReplicaPooler: true
+    resources:
+      requests:
+        cpu: "250m"
+        memory: "256Mi"
+      limits:
+        cpu: "1"
+        memory: "512Mi"
+  # Service configuration
+  service:
+    type: LoadBalancer
+    loadBalancerSourceRanges:
+      - 10.0.0.0/8
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-internal: "true"

@@ -157,52 +157,92 @@ pub enum BackupDestination {
     },
 }
 
-/// PgBouncer connection pooling configuration (Phase 0.3)
+/// PgBouncer connection pooling configuration (deployed as separate Deployment)
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PgBouncerSpec {
-    /// Enable PgBouncer sidecar
+    /// Enable PgBouncer connection pooler
     pub enabled: bool,
 
-    /// Pool mode: session, transaction, or statement
+    /// Number of PgBouncer replicas (default: 2)
+    #[serde(default = "default_pgbouncer_replicas")]
+    pub replicas: i32,
+
+    /// Pool mode: session, transaction, or statement (default: transaction)
     #[serde(default = "default_pool_mode")]
     pub pool_mode: String,
 
-    /// Maximum client connections
+    /// Total max database connections distributed across all instances (default: 60)
+    #[serde(default = "default_max_db_connections")]
+    pub max_db_connections: i32,
+
+    /// Default pool size per user/database pair (default: 20)
+    #[serde(default = "default_pool_size")]
+    pub default_pool_size: i32,
+
+    /// Maximum client connections per PgBouncer instance (default: 10000)
     #[serde(default = "default_max_client_conn")]
     pub max_client_conn: i32,
 
-    /// Default pool size per user/database pair
-    #[serde(default = "default_pool_size")]
-    pub default_pool_size: i32,
+    /// PgBouncer container image (default: bitnami/pgbouncer:latest)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+
+    /// Resource requirements for PgBouncer pods
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ResourceRequirements>,
+
+    /// Enable connection pooler for replica connections (creates separate pooler)
+    #[serde(default)]
+    pub enable_replica_pooler: bool,
+}
+
+fn default_pgbouncer_replicas() -> i32 {
+    2
 }
 
 fn default_pool_mode() -> String {
     "transaction".to_string()
 }
 
+fn default_max_db_connections() -> i32 {
+    60
+}
+
 fn default_max_client_conn() -> i32 {
-    100
+    10000
 }
 
 fn default_pool_size() -> i32 {
     20
 }
 
-/// TLS configuration (Phase 0.3)
+/// TLS configuration for PostgreSQL connections
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TLSSpec {
     /// Enable TLS for PostgreSQL connections
     pub enabled: bool,
 
-    /// Secret containing TLS certificate and key
+    /// Secret containing TLS certificate and key (keys: tls.crt, tls.key)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cert_secret: Option<String>,
 
-    /// Secret containing CA certificate
+    /// Secret containing CA certificate for client verification (key: ca.crt)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca_secret: Option<String>,
+
+    /// Certificate filename in the secret (default: tls.crt)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_file: Option<String>,
+
+    /// Private key filename in the secret (default: tls.key)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_key_file: Option<String>,
+
+    /// CA certificate filename in the secret (default: ca.crt)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_file: Option<String>,
 }
 
 /// Metrics configuration (Phase 0.3)
@@ -351,6 +391,18 @@ pub struct PostgresClusterStatus {
     /// Used to prevent version downgrades which cause data incompatibility
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_version: Option<String>,
+
+    /// Whether TLS is currently enabled on the cluster
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_enabled: Option<bool>,
+
+    /// Whether PgBouncer pooler is currently enabled
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pgbouncer_enabled: Option<bool>,
+
+    /// Number of ready PgBouncer replicas
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pgbouncer_ready_replicas: Option<i32>,
 }
 
 /// Cluster lifecycle phase

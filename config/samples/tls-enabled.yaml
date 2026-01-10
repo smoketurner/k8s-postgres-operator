@@ -1,0 +1,34 @@
+# PostgreSQL cluster with TLS encryption
+# Requires a TLS secret to be created beforehand:
+#   kubectl create secret tls my-postgres-tls --cert=server.crt --key=server.key
+apiVersion: postgres.example.com/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: pg-tls
+  namespace: default
+spec:
+  version: "16"
+  replicas: 3
+  storage:
+    size: 10Gi
+  tls:
+    enabled: true
+    certSecret: my-postgres-tls
+    # Optional: separate CA secret for client certificate verification
+    # caSecret: my-postgres-ca
+    # Optional: custom filenames in the secret (defaults shown)
+    # certificateFile: tls.crt
+    # privateKeyFile: tls.key
+    # caFile: ca.crt
+  postgresqlParams:
+    max_connections: "200"
+---
+# Example TLS secret (for reference - generate your own certs!)
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: my-postgres-tls
+# type: kubernetes.io/tls
+# data:
+#   tls.crt: <base64-encoded-certificate>
+#   tls.key: <base64-encoded-private-key>

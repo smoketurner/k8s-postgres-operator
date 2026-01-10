@@ -207,6 +207,10 @@ impl<'a> StatusManager<'a> {
             phase_started_at,
             // Set current version when cluster becomes running
             current_version: Some(version.to_string()),
+            // TLS and PgBouncer status
+            tls_enabled: self.cluster.spec.tls.as_ref().map(|t| t.enabled),
+            pgbouncer_enabled: self.cluster.spec.pgbouncer.as_ref().map(|p| p.enabled),
+            pgbouncer_ready_replicas: None, // Updated by reconciler when checking deployment
         };
 
         self.update(status).await
@@ -256,6 +260,10 @@ impl<'a> StatusManager<'a> {
                 .status
                 .as_ref()
                 .and_then(|s| s.current_version.clone()),
+            // TLS and PgBouncer status
+            tls_enabled: self.cluster.spec.tls.as_ref().map(|t| t.enabled),
+            pgbouncer_enabled: self.cluster.spec.pgbouncer.as_ref().map(|p| p.enabled),
+            pgbouncer_ready_replicas: None,
         };
 
         self.update(status).await
@@ -310,6 +318,10 @@ impl<'a> StatusManager<'a> {
                 .status
                 .as_ref()
                 .and_then(|s| s.current_version.clone()),
+            // TLS and PgBouncer status
+            tls_enabled: self.cluster.spec.tls.as_ref().map(|t| t.enabled),
+            pgbouncer_enabled: self.cluster.spec.pgbouncer.as_ref().map(|p| p.enabled),
+            pgbouncer_ready_replicas: None,
         };
 
         self.update(status).await
@@ -353,6 +365,10 @@ impl<'a> StatusManager<'a> {
             phase_started_at,
             // Preserve existing version when failed
             current_version: existing_status.and_then(|s| s.current_version.clone()),
+            // TLS and PgBouncer status
+            tls_enabled: self.cluster.spec.tls.as_ref().map(|t| t.enabled),
+            pgbouncer_enabled: self.cluster.spec.pgbouncer.as_ref().map(|p| p.enabled),
+            pgbouncer_ready_replicas: existing_status.and_then(|s| s.pgbouncer_ready_replicas),
         };
 
         self.update(status).await
@@ -404,6 +420,10 @@ impl<'a> StatusManager<'a> {
                 .status
                 .as_ref()
                 .and_then(|s| s.current_version.clone()),
+            // TLS and PgBouncer status
+            tls_enabled: None,
+            pgbouncer_enabled: None,
+            pgbouncer_ready_replicas: None,
         };
 
         self.update(status).await
