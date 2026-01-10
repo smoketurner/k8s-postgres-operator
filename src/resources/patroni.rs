@@ -27,6 +27,7 @@ use kube::core::ObjectMeta;
 use std::collections::BTreeMap;
 
 use crate::crd::PostgresCluster;
+use crate::resources::backup;
 use crate::resources::common::{owner_reference, patroni_labels};
 
 /// Default PostgreSQL parameters for HA operation
@@ -590,6 +591,19 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
                 });
             }
         }
+    }
+
+    // Backup configuration (WAL-G)
+    // Add backup environment variables, volumes, and mounts
+    if backup::is_backup_enabled(cluster) {
+        // Add backup environment variables
+        env_vars.extend(backup::generate_backup_env_vars(cluster));
+
+        // Add backup volumes (e.g., GCS credentials, encryption keys)
+        volumes.extend(backup::generate_backup_volumes(cluster));
+
+        // Add backup volume mounts
+        volume_mounts.extend(backup::generate_backup_volume_mounts(cluster));
     }
 
     // Startup probe - Patroni REST API

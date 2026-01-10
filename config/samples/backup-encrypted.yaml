@@ -1,0 +1,86 @@
+# PostgresCluster with encrypted backup configuration
+#
+# This example demonstrates encrypted backups using AES-256 encryption.
+# Backups are encrypted at rest in cloud storage, providing an additional
+# layer of security beyond cloud provider encryption.
+#
+# Prerequisites:
+# 1. Create cloud credentials secret (see backup-s3.yaml, backup-gcs.yaml, or backup-azure.yaml)
+# 2. Generate an encryption key (32 bytes for AES-256):
+#
+#    # Generate random 32-byte key
+#    openssl rand -base64 32 > encryption.key
+#
+#    # Create the encryption key secret
+#    kubectl create secret generic backup-encryption-key \
+#      --from-file=encryption-key=./encryption.key
+#
+# IMPORTANT: Store your encryption key securely! Without it, backups cannot be restored.
+#
+apiVersion: postgres.example.com/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: secure-backup
+spec:
+  version: "16"
+  replicas: 3
+
+  storage:
+    size: 100Gi
+    storageClass: fast-ssd
+
+  resources:
+    requests:
+      cpu: "1"
+      memory: "2Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+
+  backup:
+    schedule: "0 2 * * *"
+
+    retention:
+      count: 7
+
+    # S3 destination (can also be GCS or Azure)
+    destination:
+      type: S3
+      bucket: my-encrypted-backups
+      region: us-east-1
+      credentialsSecret: aws-backup-credentials
+
+    # Enable encryption
+    encryption:
+      enabled: true
+      # AES-256 is the default and recommended method
+      method: aes256
+      # Secret containing the encryption key
+      keySecret: backup-encryption-key
+
+    compression: zstd
+
+---
+# AWS credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: aws-backup-credentials
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: "AKIAIOSFODNN7EXAMPLE"
+  AWS_SECRET_ACCESS_KEY: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+
+---
+# Encryption key secret
+# IMPORTANT: Generate a new random key for each environment!
+# openssl rand -base64 32
+apiVersion: v1
+kind: Secret
+metadata:
+  name: backup-encryption-key
+type: Opaque
+data:
+  # This is a base64-encoded 32-byte random key
+  # Generate your own: openssl rand -base64 32 | base64
+  encryption-key: YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkwYWJjZGVmZ2hpamtsbW5vcHFyc3Q=

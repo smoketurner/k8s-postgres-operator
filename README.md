@@ -10,7 +10,7 @@ A Kubernetes operator for managing PostgreSQL clusters with high availability us
 - **In-Place Resource Resizing**: CPU/memory changes without pod restarts (Kubernetes 1.35+)
 - **Connection Pooling**: Optional PgBouncer sidecar for connection pooling
 - **TLS Support**: Encrypted connections with certificate management
-- **Backup Configuration**: S3, GCS, and Azure blob storage backup destinations
+- **Cloud Backups**: Continuous WAL archiving and scheduled base backups to S3, GCS, or Azure with point-in-time recovery (PITR)
 - **Metrics**: Prometheus-compatible metrics endpoint
 - **Zero-Downtime Updates**: Rolling updates with PodDisruptionBudgets
 
@@ -147,6 +147,71 @@ spec:
       region: us-east-1
       credentialsSecret: aws-credentials
 ```
+
+## Backup and Recovery
+
+The operator integrates with WAL-G for continuous backups with point-in-time recovery support.
+
+### Backup Features
+
+- **Continuous WAL archiving**: Every transaction is streamed to cloud storage
+- **Scheduled base backups**: Full physical backups on a cron schedule
+- **Point-in-time recovery (PITR)**: Restore to any moment between backups
+- **Multiple cloud providers**: AWS S3, Google Cloud Storage, Azure Blob Storage
+- **S3-compatible storage**: MinIO, Ceph RadosGW, Wasabi, etc.
+- **Encryption**: AES-256 or PGP encryption for backups at rest
+- **Delta backups**: Store only changed pages to reduce backup size
+
+### Quick Start: S3 Backup
+
+```bash
+# Create credentials secret
+kubectl create secret generic aws-backup-credentials \
+  --from-literal=AWS_ACCESS_KEY_ID=<your-key> \
+  --from-literal=AWS_SECRET_ACCESS_KEY=<your-secret>
+```
+
+```yaml
+apiVersion: postgres.example.com/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: my-postgres
+spec:
+  version: "16"
+  replicas: 3
+  storage:
+    size: 100Gi
+
+  backup:
+    schedule: "0 2 * * *"  # Daily at 2 AM
+    retention:
+      count: 7
+    destination:
+      type: S3
+      bucket: my-postgres-backups
+      region: us-east-1
+      credentialsSecret: aws-backup-credentials
+    compression: zstd
+    backupFromReplica: true
+```
+
+### Sample Configurations
+
+| File | Description |
+|------|-------------|
+| `config/samples/backup-s3.yaml` | AWS S3 backup |
+| `config/samples/backup-gcs.yaml` | Google Cloud Storage backup |
+| `config/samples/backup-azure.yaml` | Azure Blob Storage backup |
+| `config/samples/backup-minio.yaml` | MinIO (S3-compatible) backup |
+| `config/samples/backup-encrypted.yaml` | Encrypted backup |
+
+### Documentation
+
+See [docs/BACKUP_AND_RESTORE.md](docs/BACKUP_AND_RESTORE.md) for:
+- Detailed cloud provider setup instructions
+- Restore procedures
+- Point-in-time recovery examples
+- Troubleshooting guide
 
 ## Connecting to PostgreSQL
 

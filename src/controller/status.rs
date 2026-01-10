@@ -9,7 +9,7 @@ use kube::{Api, ResourceExt};
 
 use crate::controller::Context;
 use crate::controller::error::Result;
-use crate::crd::{ClusterPhase, Condition, PostgresCluster, PostgresClusterStatus};
+use crate::crd::{BackupStatus, ClusterPhase, Condition, PostgresCluster, PostgresClusterStatus};
 
 /// Standard condition types following Kubernetes conventions
 pub mod condition_types {
@@ -227,11 +227,7 @@ impl<'a> StatusManager<'a> {
             replicas: total_replicas,
             primary_pod,
             replica_pods,
-            last_backup: self
-                .cluster
-                .status
-                .as_ref()
-                .and_then(|s| s.last_backup.clone()),
+            backup: self.get_backup_status(),
             observed_generation: generation,
             conditions,
             // Clear error state on successful running
@@ -296,7 +292,7 @@ impl<'a> StatusManager<'a> {
             replicas: total_replicas,
             primary_pod,
             replica_pods: vec![],
-            last_backup: None,
+            backup: self.get_backup_status(),
             observed_generation: generation,
             conditions,
             retry_count: None,
@@ -354,11 +350,7 @@ impl<'a> StatusManager<'a> {
             replicas: total_replicas,
             primary_pod,
             replica_pods,
-            last_backup: self
-                .cluster
-                .status
-                .as_ref()
-                .and_then(|s| s.last_backup.clone()),
+            backup: self.get_backup_status(),
             observed_generation: generation,
             conditions,
             retry_count: self.cluster.status.as_ref().and_then(|s| s.retry_count),
@@ -423,7 +415,7 @@ impl<'a> StatusManager<'a> {
             replica_pods: existing_status
                 .map(|s| s.replica_pods.clone())
                 .unwrap_or_default(),
-            last_backup: existing_status.and_then(|s| s.last_backup.clone()),
+            backup: self.get_backup_status(),
             observed_generation: generation,
             conditions,
             retry_count: Some(current_retry + 1),
@@ -476,11 +468,7 @@ impl<'a> StatusManager<'a> {
             replicas: 0,
             primary_pod: None,
             replica_pods: vec![],
-            last_backup: self
-                .cluster
-                .status
-                .as_ref()
-                .and_then(|s| s.last_backup.clone()),
+            backup: self.get_backup_status(),
             observed_generation: generation,
             conditions,
             retry_count: None,
@@ -505,6 +493,32 @@ impl<'a> StatusManager<'a> {
         };
 
         self.update(status).await
+    }
+
+    /// Get the backup status, preserving existing status or generating from spec
+    fn get_backup_status(&self) -> Option<BackupStatus> {
+        // If backup is configured in spec, generate initial status if not present
+        if let Some(ref backup_spec) = self.cluster.spec.backup {
+            // Try to preserve existing backup status
+            if let Some(existing) = self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.backup.clone())
+            {
+                return Some(existing);
+            }
+
+            // Create initial backup status from spec
+            Some(BackupStatus {
+                enabled: true,
+                destination_type: Some(backup_spec.destination.destination_type().to_string()),
+                ..Default::default()
+            })
+        } else {
+            // No backup configured, preserve any existing status (shouldn't happen normally)
+            self.cluster.status.as_ref().and_then(|s| s.backup.clone())
+        }
     }
 
     /// Get the timestamp when the current phase started

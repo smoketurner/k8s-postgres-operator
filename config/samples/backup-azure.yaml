@@ -1,0 +1,94 @@
+# PostgresCluster with Azure Blob Storage backup configuration
+#
+# This example demonstrates continuous archiving to Azure with:
+# - Daily base backups at 4 AM
+# - Continuous WAL archiving for point-in-time recovery
+# - 10 backup retention policy
+# - Delta backups for reduced storage usage
+#
+# Prerequisites:
+# 1. Create an Azure Storage Account
+# 2. Create a container for backups
+# 3. Create a secret with storage account credentials:
+#
+#    kubectl create secret generic azure-backup-credentials \
+#      --from-literal=AZURE_STORAGE_ACCESS_KEY=<your-storage-key>
+#
+#    Or use a SAS token:
+#    kubectl create secret generic azure-backup-credentials \
+#      --from-literal=AZURE_STORAGE_SAS_TOKEN=<your-sas-token>
+#
+apiVersion: postgres.example.com/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: production-azure-backup
+spec:
+  version: "16"
+  replicas: 3
+
+  storage:
+    size: 100Gi
+    storageClass: managed-premium
+
+  resources:
+    requests:
+      cpu: "1"
+      memory: "2Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+
+  backup:
+    # Cron schedule for base backups (daily at 4 AM)
+    schedule: "0 4 * * *"
+
+    # Keep 10 most recent backups
+    retention:
+      count: 10
+
+    # Azure Blob Storage destination
+    destination:
+      type: Azure
+      container: postgres-backups
+      storageAccount: mypostgresbackups
+      credentialsSecret: azure-backup-credentials
+      # Optional: Azure environment (default: AzurePublicCloud)
+      # environment: AzureUSGovernmentCloud
+
+    # Use Brotli compression
+    compression: brotli
+
+    # Enable delta backups (store only changed pages)
+    # This reduces backup size and time significantly
+    enableDeltaBackups: true
+    deltaMaxSteps: 3  # Force full backup after 3 deltas
+
+    # Parallel upload
+    uploadConcurrency: 16
+
+---
+# Example using storage account access key
+apiVersion: v1
+kind: Secret
+metadata:
+  name: azure-backup-credentials
+type: Opaque
+stringData:
+  # Option 1: Storage Account Key (full access)
+  AZURE_STORAGE_ACCESS_KEY: "your-storage-account-key-base64"
+
+  # Option 2: SAS Token (recommended for limited access)
+  # AZURE_STORAGE_SAS_TOKEN: "?sv=2021-06-08&ss=b&srt=sco&sp=rwdlacup..."
+
+---
+# Alternative: Using Azure Service Principal for authentication
+# This is recommended for production workloads
+apiVersion: v1
+kind: Secret
+metadata:
+  name: azure-backup-credentials-sp
+type: Opaque
+stringData:
+  AZURE_CLIENT_ID: "your-application-client-id"
+  AZURE_CLIENT_SECRET: "your-application-client-secret"
+  AZURE_TENANT_ID: "your-azure-tenant-id"

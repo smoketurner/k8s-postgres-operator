@@ -481,6 +481,100 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
         }
     }
 
+    // Validate backup configuration if enabled
+    if let Some(ref backup_spec) = cluster.spec.backup {
+        // Validate credentials secret exists
+        let credentials_secret_name = backup_spec.credentials_secret_name();
+        let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
+        if secrets_api.get_opt(credentials_secret_name).await?.is_none() {
+            let destination_type = backup_spec.destination.destination_type();
+            warn!(
+                "Backup credentials secret '{}' not found for {} destination on cluster {}",
+                credentials_secret_name, destination_type, name
+            );
+            status_manager
+                .set_failed(
+                    "BackupCredentialsNotFound",
+                    &format!(
+                        "Backup credentials secret '{}' not found for {} destination",
+                        credentials_secret_name, destination_type
+                    ),
+                )
+                .await?;
+            ctx.publish_warning_event(
+                cluster,
+                "BackupCredentialsNotFound",
+                "Validation",
+                Some(format!(
+                    "Backup credentials secret '{}' not found for {} destination",
+                    credentials_secret_name, destination_type
+                )),
+            )
+            .await;
+            return Ok(Action::requeue(Duration::from_secs(30)));
+        }
+
+        // Validate encryption key secret if encryption is enabled
+        if let Some(ref encryption) = backup_spec.encryption
+            && encryption.enabled {
+                if let Some(ref key_secret_name) = encryption.key_secret {
+                    if secrets_api.get_opt(key_secret_name).await?.is_none() {
+                        warn!(
+                            "Backup encryption key secret '{}' not found for cluster {}",
+                            key_secret_name, name
+                        );
+                        status_manager
+                            .set_failed(
+                                "EncryptionKeyNotFound",
+                                &format!(
+                                    "Backup encryption key secret '{}' not found",
+                                    key_secret_name
+                                ),
+                            )
+                            .await?;
+                        ctx.publish_warning_event(
+                            cluster,
+                            "EncryptionKeyNotFound",
+                            "Validation",
+                            Some(format!(
+                                "Backup encryption key secret '{}' not found",
+                                key_secret_name
+                            )),
+                        )
+                        .await;
+                        return Ok(Action::requeue(Duration::from_secs(30)));
+                    }
+                } else {
+                    // Encryption enabled but no key secret specified
+                    warn!(
+                        "Backup encryption enabled but no key secret specified for cluster {}",
+                        name
+                    );
+                    status_manager
+                        .set_failed(
+                            "EncryptionKeyNotSpecified",
+                            "Backup encryption is enabled but no key secret is specified",
+                        )
+                        .await?;
+                    ctx.publish_warning_event(
+                        cluster,
+                        "EncryptionKeyNotSpecified",
+                        "Validation",
+                        Some("Backup encryption is enabled but no key secret is specified".to_string()),
+                    )
+                    .await;
+                    return Ok(Action::requeue(Duration::from_secs(30)));
+                }
+            }
+
+        info!(
+            "Backup configured for cluster {}: {} destination, schedule '{}'",
+            name,
+            backup_spec.destination.destination_type(),
+            backup_spec.schedule
+        );
+    }
+
     // Ensure Secret exists (credentials)
     let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
     let secret_name = format!("{}-credentials", name);

@@ -1,0 +1,120 @@
+# PostgresCluster with MinIO (S3-compatible) backup configuration
+#
+# This example demonstrates backups to MinIO or other S3-compatible storage
+# solutions like Ceph RadosGW, Wasabi, or self-hosted S3 servers.
+#
+# Prerequisites:
+# 1. Deploy MinIO in your cluster or have access to an S3-compatible endpoint
+# 2. Create a bucket for backups
+# 3. Create credentials secret:
+#
+#    kubectl create secret generic minio-backup-credentials \
+#      --from-literal=AWS_ACCESS_KEY_ID=minioadmin \
+#      --from-literal=AWS_SECRET_ACCESS_KEY=minioadmin
+#
+apiVersion: postgres.example.com/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: backup-to-minio
+spec:
+  version: "16"
+  replicas: 3
+
+  storage:
+    size: 50Gi
+    storageClass: standard
+
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "1"
+      memory: "2Gi"
+
+  backup:
+    # Hourly backups for testing
+    schedule: "0 * * * *"
+
+    retention:
+      count: 24  # Keep last 24 backups
+
+    # S3-compatible storage with custom endpoint
+    destination:
+      type: S3
+      bucket: postgres-backups
+      region: us-east-1  # Required but ignored for MinIO
+      endpoint: "http://minio.minio-system.svc.cluster.local:9000"
+      credentialsSecret: minio-backup-credentials
+      # Force path-style URLs (required for MinIO)
+      forcePathStyle: true
+      # Disable AWS SSE (MinIO has its own encryption)
+      disableSse: true
+
+    compression: lz4
+
+---
+# MinIO credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-backup-credentials
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: "minioadmin"
+  AWS_SECRET_ACCESS_KEY: "minioadmin"
+
+---
+# Example MinIO deployment for testing
+# In production, use the MinIO Operator or a managed service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: minio-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio:latest
+          args:
+            - server
+            - /data
+            - --console-address
+            - ":9001"
+          ports:
+            - containerPort: 9000
+            - containerPort: 9001
+          env:
+            - name: MINIO_ROOT_USER
+              value: "minioadmin"
+            - name: MINIO_ROOT_PASSWORD
+              value: "minioadmin"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: minio-system
+spec:
+  selector:
+    app: minio
+  ports:
+    - name: api
+      port: 9000
+    - name: console
+      port: 9001
