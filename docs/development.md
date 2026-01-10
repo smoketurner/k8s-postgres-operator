@@ -10,8 +10,8 @@ This guide covers setting up a development environment and contributing to the P
 |------|---------|---------|
 | Rust | 1.92+ | Build the operator (uses Rust 2024 edition) |
 | Docker | 20.10+ | Build container images |
-| kubectl | 1.26+ | Interact with Kubernetes (1.35+ for in-place resizing) |
-| kind/k3d/minikube | Latest | Local Kubernetes cluster |
+| kubectl | 1.35+ | Interact with Kubernetes cluster |
+| kind/k3d/minikube | Latest | Local Kubernetes cluster (must support K8s 1.35+) |
 | Helm | 3.8+ | Chart development |
 
 ### Install Rust

@@ -585,6 +585,43 @@ impl<'a> StatusManager<'a> {
             Some(chrono::Utc::now().to_rfc3339())
         }
     }
+
+    /// Update pod tracking status fields (Kubernetes 1.35+ features)
+    ///
+    /// This updates the pods, resize_status, and all_pods_synced fields
+    /// which track per-pod generation and in-place resource resize status.
+    pub async fn update_pod_tracking(
+        &self,
+        pods: Vec<crate::crd::PodInfo>,
+        resize_status: Vec<crate::crd::PodResourceResizeStatus>,
+    ) -> Result<()> {
+        let api: Api<PostgresCluster> = Api::namespaced(self.ctx.client.clone(), self.ns);
+        let name = self.cluster.name_any();
+
+        // Calculate all_pods_synced from pod info
+        let all_synced = if pods.is_empty() {
+            None
+        } else {
+            Some(pods.iter().all(|p| p.spec_applied))
+        };
+
+        let patch = serde_json::json!({
+            "status": {
+                "pods": pods,
+                "resize_status": resize_status,
+                "all_pods_synced": all_synced
+            }
+        });
+
+        api.patch_status(
+            &name,
+            &PatchParams::apply("postgres-operator"),
+            &Patch::Merge(&patch),
+        )
+        .await?;
+
+        Ok(())
+    }
 }
 
 /// Check if the cluster spec has changed by comparing observed generation

@@ -664,7 +664,15 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
     apply_resource(ctx, ns, &pdb).await?;
 
     // Ensure Patroni StatefulSet exists (single StatefulSet for all members)
+    // Apply resize policy for Kubernetes 1.35+ in-place resource resizing
+    let restart_on_resize = cluster
+        .spec
+        .resources
+        .as_ref()
+        .and_then(|r| r.restart_on_resize)
+        .unwrap_or(false);
     let sts = patroni::generate_patroni_statefulset(cluster);
+    let sts = patroni::add_resize_policy_to_statefulset(sts, restart_on_resize);
     apply_resource(ctx, ns, &sts).await?;
 
     // Ensure Patroni Services exist
@@ -685,8 +693,17 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
         let pgbouncer_config = pgbouncer::generate_pgbouncer_configmap(cluster);
         apply_resource(ctx, ns, &pgbouncer_config).await?;
 
-        // Apply PgBouncer Deployment
+        // Apply PgBouncer Deployment with resize policy for Kubernetes 1.35+
+        let pgbouncer_restart_on_resize = cluster
+            .spec
+            .pgbouncer
+            .as_ref()
+            .and_then(|p| p.resources.as_ref())
+            .and_then(|r| r.restart_on_resize)
+            .unwrap_or(false);
         let pgbouncer_deployment = pgbouncer::generate_pgbouncer_deployment(cluster);
+        let pgbouncer_deployment =
+            pgbouncer::add_resize_policy_to_deployment(pgbouncer_deployment, pgbouncer_restart_on_resize);
         apply_resource(ctx, ns, &pgbouncer_deployment).await?;
 
         // Apply PgBouncer Service
@@ -702,6 +719,10 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
 
             let pgbouncer_replica_deployment =
                 pgbouncer::generate_pgbouncer_replica_deployment(cluster);
+            let pgbouncer_replica_deployment = pgbouncer::add_resize_policy_to_deployment(
+                pgbouncer_replica_deployment,
+                pgbouncer_restart_on_resize,
+            );
             apply_resource(ctx, ns, &pgbouncer_replica_deployment).await?;
 
             let pgbouncer_replica_svc = pgbouncer::generate_pgbouncer_replica_service(cluster);
@@ -875,6 +896,20 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
                     .await?;
             }
         }
+    }
+
+    // Update pod tracking status (Kubernetes 1.35+ features)
+    // This updates pods, resize_status, and all_pods_synced fields
+    if let Err(e) = status_manager
+        .update_pod_tracking(pod_infos, resize_statuses)
+        .await
+    {
+        // Log but don't fail the reconciliation - this is supplementary status data
+        debug!(
+            cluster = %name,
+            error = %e,
+            "Failed to update pod tracking status (non-fatal)"
+        );
     }
 
     // Requeue interval based on current phase

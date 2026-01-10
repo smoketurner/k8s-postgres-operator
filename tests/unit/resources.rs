@@ -1618,8 +1618,8 @@ mod resize_policy_tests {
 
         let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
 
-        // Apply resize policy - PgBouncer always uses NotRequired
-        let deployment_with_policy = pgbouncer::add_resize_policy_to_deployment(deployment);
+        // Apply resize policy - PgBouncer uses NotRequired by default (in-place resize)
+        let deployment_with_policy = pgbouncer::add_resize_policy_to_deployment(deployment, false);
 
         // Serialize to JSON and verify resizePolicy was added
         let deployment_json = serde_json::to_value(&deployment_with_policy).unwrap();
@@ -1667,8 +1667,8 @@ mod resize_policy_tests {
         let original_name = deployment.metadata.name.clone();
         let original_replicas = deployment.spec.as_ref().and_then(|s| s.replicas);
 
-        // Apply resize policy
-        let deployment_with_policy = pgbouncer::add_resize_policy_to_deployment(deployment);
+        // Apply resize policy (with restart_on_resize=false for in-place resize)
+        let deployment_with_policy = pgbouncer::add_resize_policy_to_deployment(deployment, false);
 
         // Verify original fields are preserved
         assert_eq!(deployment_with_policy.metadata.name, original_name);

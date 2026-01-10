@@ -1013,10 +1013,16 @@ pub fn is_replica_pooler_enabled(cluster: &PostgresCluster) -> bool {
 ///     },
 /// ]),
 /// ```
-pub fn add_resize_policy_to_deployment(deployment: Deployment) -> Deployment {
+pub fn add_resize_policy_to_deployment(deployment: Deployment, restart_on_resize: bool) -> Deployment {
+    let policy = if restart_on_resize {
+        "RestartContainer"
+    } else {
+        "NotRequired"
+    };
+
     let resize_policy = serde_json::json!([
-        {"resourceName": "cpu", "restartPolicy": "NotRequired"},
-        {"resourceName": "memory", "restartPolicy": "NotRequired"}
+        {"resourceName": "cpu", "restartPolicy": policy},
+        {"resourceName": "memory", "restartPolicy": policy}
     ]);
 
     // Serialize to JSON Value

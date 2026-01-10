@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "kubernetes": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@anthropics/mcp-server-kubernetes"],
+      "env": {
+        "KUBECONFIG": "${KUBECONFIG:-~/.kube/config}"
+      }
+    }
+  }
+}

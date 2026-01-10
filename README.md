@@ -16,7 +16,7 @@ A Kubernetes operator for managing PostgreSQL clusters with high availability us
 
 ## Prerequisites
 
-- Kubernetes 1.26+ (tested up to 1.35)
+- Kubernetes 1.35+ (required for in-place resource resizing, pod generation tracking)
 - kubectl configured to access your cluster
 - Rust 1.92+ (for building from source)
 
