@@ -7,8 +7,20 @@ description = "A Kubernetes operator for managing PostgreSQL clusters"
 license = "MIT"
 
 [dependencies]
-# Kubernetes - using latest available k8s-openapi with latest supported K8s version
-# Note: v1_35 will be available when k8s-openapi is updated
+# Kubernetes
+# Note: Using v1_34 feature but targeting K8s 1.35 clusters.
+# New 1.35 fields (like resizePolicy) are added via JSON patching.
+#
+# TODO(k8s-openapi-upgrade): When k8s-openapi releases a version with v1_35 support:
+# 1. Update to: k8s-openapi = { version = "0.27", features = ["v1_35"] }
+# 2. In src/resources/patroni.rs:
+#    - Remove add_resize_policy_to_statefulset() function
+#    - Use native ContainerResizePolicy type directly in generate_patroni_statefulset()
+# 3. In src/resources/pgbouncer.rs:
+#    - Remove add_resize_policy_to_deployment() function
+#    - Use native ContainerResizePolicy type directly in generate_pgbouncer_deployment()
+# 4. Run `cargo check` to verify everything compiles
+# 5. Track progress at: https://github.com/Arnavion/k8s-openapi/issues
 kube = { version = "2", default-features = false, features = ["runtime", "derive", "client", "rustls-tls"] }
 k8s-openapi = { version = "0.26", features = ["v1_34"] }
 

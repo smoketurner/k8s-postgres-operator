@@ -1047,3 +1047,161 @@ async fn emit_state_transition_event(
             .await;
     }
 }
+
+/// Get pod generation and sync info for Kubernetes 1.35+ pod generation tracking (KEP-5067).
+///
+/// Returns a PodInfo struct with generation tracking data for each pod.
+/// The `spec_applied` field indicates whether the kubelet has processed the latest pod spec.
+#[instrument(skip(ctx))]
+pub async fn get_pod_info(
+    ctx: &Context,
+    ns: &str,
+    cluster_name: &str,
+) -> Result<Vec<crate::crd::PodInfo>> {
+    let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
+    let label_selector = format!("postgres.example.com/cluster={}", cluster_name);
+    let lp = ListParams::default().labels(&label_selector);
+
+    let pod_list = pods.list(&lp).await?;
+    let mut pod_infos = Vec::new();
+
+    for pod in pod_list.items {
+        let name = pod.metadata.name.clone().unwrap_or_default();
+        let generation = pod.metadata.generation;
+
+        // Get observedGeneration from pod status (Kubernetes 1.35+ feature)
+        // This field indicates when the kubelet has processed the pod spec
+        let observed_generation = pod
+            .status
+            .as_ref()
+            .and_then(|s| s.observed_generation);
+
+        // Pod spec is applied when observedGeneration matches generation
+        let spec_applied = match (generation, observed_generation) {
+            (Some(current_gen), Some(observed_gen)) => current_gen == observed_gen,
+            // If either is missing, assume spec is applied (backwards compatibility)
+            _ => true,
+        };
+
+        // Get role from spilo-role label
+        let role = pod
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|l| l.get("spilo-role").cloned());
+
+        // Check if pod is ready
+        let ready = pod
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.as_ref())
+            .and_then(|conds| conds.iter().find(|c| c.type_ == "Ready"))
+            .is_some_and(|c| c.status == "True");
+
+        pod_infos.push(crate::crd::PodInfo {
+            name,
+            generation,
+            observed_generation,
+            spec_applied,
+            role,
+            ready,
+        });
+    }
+
+    Ok(pod_infos)
+}
+
+/// Get resize status for pods (Kubernetes 1.35+ in-place resize, KEP-1287).
+///
+/// Returns the resize status for each pod, including allocated resources
+/// and whether resize is in progress, deferred, or infeasible.
+#[instrument(skip(ctx))]
+pub async fn get_pod_resize_status(
+    ctx: &Context,
+    ns: &str,
+    cluster_name: &str,
+) -> Result<Vec<crate::crd::PodResourceResizeStatus>> {
+    use crate::crd::{PodResizeStatus, PodResourceResizeStatus, ResourceList};
+
+    let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
+    let label_selector = format!("postgres.example.com/cluster={}", cluster_name);
+    let lp = ListParams::default().labels(&label_selector);
+
+    let pod_list = pods.list(&lp).await?;
+    let mut resize_statuses = Vec::new();
+
+    for pod in pod_list.items {
+        let pod_name = pod.metadata.name.clone().unwrap_or_default();
+
+        // Get resize status from pod conditions (Kubernetes 1.35+)
+        // The resize field is in status.resize
+        let resize_str = pod
+            .status
+            .as_ref()
+            .and_then(|s| {
+                // The resize field is a string in the pod status
+                // We access it via JSON since k8s-openapi v1_34 doesn't have it
+                let status_json = serde_json::to_value(s).ok()?;
+                status_json.get("resize")?.as_str().map(|s| s.to_string())
+            });
+
+        let status = match resize_str.as_deref() {
+            Some("InProgress") => PodResizeStatus::InProgress,
+            Some("Proposed") => PodResizeStatus::Proposed,
+            Some("Deferred") => PodResizeStatus::Deferred,
+            Some("Infeasible") => PodResizeStatus::Infeasible,
+            _ => PodResizeStatus::NoResize,
+        };
+
+        // Get allocated resources from container status
+        // This shows the actual resources assigned to the container after resize
+        let allocated_resources = pod
+            .status
+            .as_ref()
+            .and_then(|s| s.container_statuses.as_ref())
+            .and_then(|containers| containers.first())
+            .and_then(|c| {
+                // Access allocatedResources via JSON since k8s-openapi v1_34 doesn't have it
+                let container_json = serde_json::to_value(c).ok()?;
+                let allocated = container_json.get("allocatedResources")?;
+
+                let cpu = allocated.get("cpu").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let memory = allocated
+                    .get("memory")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                if cpu.is_some() || memory.is_some() {
+                    Some(ResourceList { cpu, memory })
+                } else {
+                    None
+                }
+            });
+
+        // Only include pods that have resize activity or allocated resources
+        if status != PodResizeStatus::NoResize || allocated_resources.is_some() {
+            resize_statuses.push(PodResourceResizeStatus {
+                pod_name,
+                status,
+                allocated_resources,
+                last_transition_time: Some(chrono::Utc::now().to_rfc3339()),
+                message: None,
+            });
+        }
+    }
+
+    Ok(resize_statuses)
+}
+
+/// Check if all pods have synced (observedGeneration == generation).
+/// Returns true if all pods are synced, false if any are pending.
+pub fn all_pods_synced(pod_infos: &[crate::crd::PodInfo]) -> bool {
+    pod_infos.iter().all(|p| p.spec_applied)
+}
+
+/// Check if any pod has a resize in progress.
+pub fn any_resize_in_progress(resize_statuses: &[crate::crd::PodResourceResizeStatus]) -> bool {
+    resize_statuses
+        .iter()
+        .any(|s| matches!(s.status, crate::crd::PodResizeStatus::InProgress | crate::crd::PodResizeStatus::Proposed))
+}

@@ -2,9 +2,9 @@ apiVersion: v2
 name: postgres-operator
 description: A Kubernetes operator for managing PostgreSQL clusters with high availability using Patroni
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
-kubeVersion: ">=1.26.0-0"
+version: 0.2.0
+appVersion: "0.2.0"
+kubeVersion: ">=1.35.0-0"
 home: https://github.com/smoketurner/k8s-postgres-operator
 sources:
   - https://github.com/smoketurner/k8s-postgres-operator

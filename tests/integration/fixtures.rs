@@ -95,6 +95,7 @@ impl PostgresClusterBuilder {
                 cpu: Some(cpu.to_string()),
                 memory: Some(memory.to_string()),
             }),
+            restart_on_resize: None,
         });
         self
     }
@@ -116,6 +117,7 @@ impl PostgresClusterBuilder {
                 cpu: Some(limit_cpu.to_string()),
                 memory: Some(limit_memory.to_string()),
             }),
+            restart_on_resize: None,
         });
         self
     }

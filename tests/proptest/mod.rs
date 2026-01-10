@@ -188,6 +188,7 @@ fn optional_resources() -> impl Strategy<Value = Option<ResourceRequirements>> {
                 cpu: Some("500m".to_string()),
                 memory: Some("512Mi".to_string()),
             }),
+            restart_on_resize: None,
         })),
         Just(Some(ResourceRequirements {
             requests: Some(ResourceList {
@@ -198,6 +199,7 @@ fn optional_resources() -> impl Strategy<Value = Option<ResourceRequirements>> {
                 cpu: Some("4".to_string()),
                 memory: Some("8Gi".to_string()),
             }),
+            restart_on_resize: None,
         })),
     ]
 }
@@ -423,6 +425,9 @@ proptest! {
             spec_changed: false,
             error_message: None,
             retry_count: 0,
+            synced_pods: 3,
+            total_pods: 3,
+            resize_in_progress: false,
         };
 
         // This should not panic, regardless of whether the transition is valid

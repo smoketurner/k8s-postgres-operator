@@ -23,6 +23,10 @@ pub mod condition_types {
     pub const CONFIG_VALID: &str = "ConfigurationValid";
     /// All replicas are synchronized
     pub const REPLICAS_READY: &str = "ReplicasReady";
+    /// Resource resize is in progress (Kubernetes 1.35+, KEP-1287)
+    pub const RESOURCE_RESIZE_IN_PROGRESS: &str = "ResourceResizeInProgress";
+    /// All pod specs have been applied by kubelet (Kubernetes 1.35+, KEP-5067)
+    pub const POD_GENERATION_SYNCED: &str = "PodGenerationSynced";
 }
 
 /// Condition status values
@@ -112,6 +116,41 @@ impl ConditionBuilder {
             condition_status::FALSE
         };
         self.set_condition(condition_types::DEGRADED, status, reason, message)
+    }
+
+    /// Set the ResourceResizeInProgress condition (Kubernetes 1.35+, KEP-1287)
+    pub fn resource_resize_in_progress(
+        self,
+        is_resizing: bool,
+        reason: &str,
+        message: &str,
+    ) -> Self {
+        let status = if is_resizing {
+            condition_status::TRUE
+        } else {
+            condition_status::FALSE
+        };
+        self.set_condition(
+            condition_types::RESOURCE_RESIZE_IN_PROGRESS,
+            status,
+            reason,
+            message,
+        )
+    }
+
+    /// Set the PodGenerationSynced condition (Kubernetes 1.35+, KEP-5067)
+    pub fn pod_generation_synced(self, is_synced: bool, reason: &str, message: &str) -> Self {
+        let status = if is_synced {
+            condition_status::TRUE
+        } else {
+            condition_status::FALSE
+        };
+        self.set_condition(
+            condition_types::POD_GENERATION_SYNCED,
+            status,
+            reason,
+            message,
+        )
     }
 
     /// Build the conditions list
@@ -207,6 +246,25 @@ impl<'a> StatusManager<'a> {
             tls_enabled: self.cluster.spec.tls.as_ref().map(|t| t.enabled),
             pgbouncer_enabled: self.cluster.spec.pgbouncer.as_ref().map(|p| p.enabled),
             pgbouncer_ready_replicas: None, // Updated by reconciler when checking deployment
+            // Kubernetes 1.35+ pod tracking and resize status
+            // These are populated by the reconciler's pod tracking functions
+            pods: self
+                .cluster
+                .status
+                .as_ref()
+                .map(|s| s.pods.clone())
+                .unwrap_or_default(),
+            resize_status: self
+                .cluster
+                .status
+                .as_ref()
+                .map(|s| s.resize_status.clone())
+                .unwrap_or_default(),
+            all_pods_synced: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.all_pods_synced),
         };
 
         self.update(status).await
@@ -260,6 +318,10 @@ impl<'a> StatusManager<'a> {
             tls_enabled: self.cluster.spec.tls.as_ref().map(|t| t.enabled),
             pgbouncer_enabled: self.cluster.spec.pgbouncer.as_ref().map(|p| p.enabled),
             pgbouncer_ready_replicas: None,
+            // Kubernetes 1.35+ pod tracking and resize status
+            pods: vec![],
+            resize_status: vec![],
+            all_pods_synced: None,
         };
 
         self.update(status).await
@@ -318,6 +380,24 @@ impl<'a> StatusManager<'a> {
             tls_enabled: self.cluster.spec.tls.as_ref().map(|t| t.enabled),
             pgbouncer_enabled: self.cluster.spec.pgbouncer.as_ref().map(|p| p.enabled),
             pgbouncer_ready_replicas: None,
+            // Kubernetes 1.35+ pod tracking and resize status
+            pods: self
+                .cluster
+                .status
+                .as_ref()
+                .map(|s| s.pods.clone())
+                .unwrap_or_default(),
+            resize_status: self
+                .cluster
+                .status
+                .as_ref()
+                .map(|s| s.resize_status.clone())
+                .unwrap_or_default(),
+            all_pods_synced: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.all_pods_synced),
         };
 
         self.update(status).await
@@ -365,6 +445,14 @@ impl<'a> StatusManager<'a> {
             tls_enabled: self.cluster.spec.tls.as_ref().map(|t| t.enabled),
             pgbouncer_enabled: self.cluster.spec.pgbouncer.as_ref().map(|p| p.enabled),
             pgbouncer_ready_replicas: existing_status.and_then(|s| s.pgbouncer_ready_replicas),
+            // Kubernetes 1.35+ pod tracking and resize status
+            pods: existing_status
+                .map(|s| s.pods.clone())
+                .unwrap_or_default(),
+            resize_status: existing_status
+                .map(|s| s.resize_status.clone())
+                .unwrap_or_default(),
+            all_pods_synced: existing_status.and_then(|s| s.all_pods_synced),
         };
 
         self.update(status).await
@@ -420,6 +508,10 @@ impl<'a> StatusManager<'a> {
             tls_enabled: None,
             pgbouncer_enabled: None,
             pgbouncer_ready_replicas: None,
+            // Kubernetes 1.35+ pod tracking and resize status
+            pods: vec![],
+            resize_status: vec![],
+            all_pods_synced: None,
         };
 
         self.update(status).await

@@ -75,6 +75,126 @@ mod transition_context_tests {
         assert!(!ctx.is_degraded());
         assert!(!ctx.no_replicas_ready());
     }
+
+    // Kubernetes 1.35+ pod sync and resize tests (KEP-1287, KEP-5067)
+
+    #[test]
+    fn test_new_context_has_k8s_135_defaults() {
+        let ctx = TransitionContext::new(3, 3);
+        assert_eq!(ctx.synced_pods, 0);
+        assert_eq!(ctx.total_pods, 0);
+        assert!(!ctx.resize_in_progress);
+    }
+
+    #[test]
+    fn test_all_pods_synced_when_no_pods() {
+        let ctx = TransitionContext::new(3, 3);
+        // When total_pods is 0, all_pods_synced should return true
+        assert!(ctx.all_pods_synced());
+    }
+
+    #[test]
+    fn test_all_pods_synced_true() {
+        let mut ctx = TransitionContext::new(3, 3);
+        ctx.synced_pods = 3;
+        ctx.total_pods = 3;
+        assert!(ctx.all_pods_synced());
+    }
+
+    #[test]
+    fn test_all_pods_synced_false() {
+        let mut ctx = TransitionContext::new(3, 3);
+        ctx.synced_pods = 2;
+        ctx.total_pods = 3;
+        assert!(!ctx.all_pods_synced());
+    }
+
+    #[test]
+    fn test_all_pods_synced_more_synced_than_total() {
+        // Edge case: more synced than total (shouldn't happen but should handle)
+        let mut ctx = TransitionContext::new(3, 3);
+        ctx.synced_pods = 4;
+        ctx.total_pods = 3;
+        assert!(ctx.all_pods_synced());
+    }
+
+    #[test]
+    fn test_is_resizing_false() {
+        let ctx = TransitionContext::new(3, 3);
+        assert!(!ctx.is_resizing());
+    }
+
+    #[test]
+    fn test_is_resizing_true() {
+        let mut ctx = TransitionContext::new(3, 3);
+        ctx.resize_in_progress = true;
+        assert!(ctx.is_resizing());
+    }
+
+    #[test]
+    fn test_ready_for_running_all_conditions_met() {
+        let mut ctx = TransitionContext::new(3, 3);
+        ctx.synced_pods = 3;
+        ctx.total_pods = 3;
+        ctx.resize_in_progress = false;
+        assert!(ctx.ready_for_running());
+    }
+
+    #[test]
+    fn test_ready_for_running_replicas_not_ready() {
+        let mut ctx = TransitionContext::new(2, 3);
+        ctx.synced_pods = 3;
+        ctx.total_pods = 3;
+        ctx.resize_in_progress = false;
+        assert!(!ctx.ready_for_running());
+    }
+
+    #[test]
+    fn test_ready_for_running_pods_not_synced() {
+        let mut ctx = TransitionContext::new(3, 3);
+        ctx.synced_pods = 2;
+        ctx.total_pods = 3;
+        ctx.resize_in_progress = false;
+        assert!(!ctx.ready_for_running());
+    }
+
+    #[test]
+    fn test_ready_for_running_resize_in_progress() {
+        let mut ctx = TransitionContext::new(3, 3);
+        ctx.synced_pods = 3;
+        ctx.total_pods = 3;
+        ctx.resize_in_progress = true;
+        assert!(!ctx.ready_for_running());
+    }
+
+    #[test]
+    fn test_ready_for_running_multiple_failures() {
+        let mut ctx = TransitionContext::new(2, 3);
+        ctx.synced_pods = 1;
+        ctx.total_pods = 3;
+        ctx.resize_in_progress = true;
+        // All three conditions fail
+        assert!(!ctx.ready_for_running());
+    }
+
+    #[test]
+    fn test_context_with_full_k8s_135_state() {
+        let mut ctx = TransitionContext::new(3, 3);
+        ctx.spec_changed = true;
+        ctx.error_message = None;
+        ctx.retry_count = 0;
+        ctx.synced_pods = 3;
+        ctx.total_pods = 3;
+        ctx.resize_in_progress = false;
+
+        // Verify all methods work together
+        assert!(ctx.all_replicas_ready());
+        assert!(!ctx.is_degraded());
+        assert!(!ctx.no_replicas_ready());
+        assert!(ctx.all_pods_synced());
+        assert!(!ctx.is_resizing());
+        assert!(ctx.ready_for_running());
+    }
 }
 
 mod updating_transitions {

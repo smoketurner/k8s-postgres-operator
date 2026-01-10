@@ -63,6 +63,12 @@ pub struct TransitionContext {
     pub error_message: Option<String>,
     /// Current retry count for backoff
     pub retry_count: i32,
+    /// Number of pods with synced spec (observedGeneration == generation) (Kubernetes 1.35+)
+    pub synced_pods: i32,
+    /// Total number of pods (Kubernetes 1.35+)
+    pub total_pods: i32,
+    /// Whether any pod has a resize in progress (Kubernetes 1.35+)
+    pub resize_in_progress: bool,
 }
 
 impl TransitionContext {
@@ -74,6 +80,9 @@ impl TransitionContext {
             spec_changed: false,
             error_message: None,
             retry_count: 0,
+            synced_pods: 0,
+            total_pods: 0,
+            resize_in_progress: false,
         }
     }
 
@@ -90,6 +99,23 @@ impl TransitionContext {
     /// Check if cluster has no ready replicas
     pub fn no_replicas_ready(&self) -> bool {
         self.ready_replicas == 0
+    }
+
+    /// Check if all pods have synced their spec (observedGeneration == generation)
+    /// Returns true if there are no pods or all pods are synced (Kubernetes 1.35+)
+    pub fn all_pods_synced(&self) -> bool {
+        self.total_pods == 0 || self.synced_pods >= self.total_pods
+    }
+
+    /// Check if resize is in progress for any pod (Kubernetes 1.35+)
+    pub fn is_resizing(&self) -> bool {
+        self.resize_in_progress
+    }
+
+    /// Check if cluster is ready for Running state
+    /// Requires all replicas ready, all pods synced, and no resize in progress
+    pub fn ready_for_running(&self) -> bool {
+        self.all_replicas_ready() && self.all_pods_synced() && !self.resize_in_progress
     }
 }
 

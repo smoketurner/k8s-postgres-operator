@@ -687,6 +687,8 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
                 }),
                 ..Default::default()
             }),
+        // Note: resizePolicy is added via JSON patching in add_resize_policy_to_statefulset()
+        // since k8s-openapi v1_34 doesn't have the field yet
         startup_probe: Some(startup_probe),
         readiness_probe: Some(readiness_probe),
         liveness_probe: Some(liveness_probe),
@@ -814,4 +816,69 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
         }),
         ..Default::default()
     }
+}
+
+/// Add Kubernetes 1.35+ resizePolicy to a StatefulSet's containers via JSON patching.
+///
+/// Since k8s-openapi v1_34 doesn't have the resizePolicy field, we add it by:
+/// 1. Serializing the StatefulSet to JSON
+/// 2. Adding resizePolicy to each container
+/// 3. Deserializing back to StatefulSet
+///
+/// This allows in-place pod resource updates without container restarts (default)
+/// or with restarts if restart_on_resize is true.
+///
+/// TODO(k8s-openapi-upgrade): Remove this function when k8s-openapi supports v1_35.
+/// Instead, add resizePolicy directly in generate_patroni_statefulset() using:
+/// ```ignore
+/// use k8s_openapi::api::core::v1::ContainerResizePolicy;
+/// resize_policy: Some(vec![
+///     ContainerResizePolicy {
+///         resource_name: "cpu".to_string(),
+///         restart_policy: if restart_on_resize { "RestartContainer" } else { "NotRequired" }.to_string(),
+///     },
+///     ContainerResizePolicy {
+///         resource_name: "memory".to_string(),
+///         restart_policy: if restart_on_resize { "RestartContainer" } else { "NotRequired" }.to_string(),
+///     },
+/// ]),
+/// ```
+pub fn add_resize_policy_to_statefulset(
+    sts: StatefulSet,
+    restart_on_resize: bool,
+) -> StatefulSet {
+    let policy = if restart_on_resize {
+        "RestartContainer"
+    } else {
+        "NotRequired"
+    };
+
+    let resize_policy = serde_json::json!([
+        {"resourceName": "cpu", "restartPolicy": policy},
+        {"resourceName": "memory", "restartPolicy": policy}
+    ]);
+
+    // Serialize to JSON Value
+    let mut sts_json = match serde_json::to_value(&sts) {
+        Ok(v) => v,
+        Err(_) => return sts, // Return original on error
+    };
+
+    // Navigate to containers and add resizePolicy
+    if let Some(spec) = sts_json.get_mut("spec") {
+        if let Some(template) = spec.get_mut("template") {
+            if let Some(pod_spec) = template.get_mut("spec") {
+                if let Some(containers) = pod_spec.get_mut("containers") {
+                    if let Some(containers_arr) = containers.as_array_mut() {
+                        for container in containers_arr {
+                            container["resizePolicy"] = resize_policy.clone();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Deserialize back to StatefulSet
+    serde_json::from_value(sts_json).unwrap_or(sts)
 }

@@ -1108,6 +1108,7 @@ mod resource_configuration_tests {
                 cpu: Some(cpu_limit.to_string()),
                 memory: Some(mem_limit.to_string()),
             }),
+            restart_on_resize: None,
         });
         cluster
     }
@@ -1270,6 +1271,7 @@ mod production_configuration_tests {
                 cpu: Some("4".to_string()),
                 memory: Some("8Gi".to_string()),
             }),
+            restart_on_resize: None,
         });
 
         // TLS
@@ -1473,6 +1475,290 @@ mod resource_panic_prevention_tests {
             assert!(
                 tls_volume.is_none(),
                 "Should not have TLS volume when TLS is disabled"
+            );
+        }
+    }
+}
+
+/// Tests for Kubernetes 1.35+ resizePolicy feature (KEP-1287)
+mod resize_policy_tests {
+    use super::*;
+    use postgres_operator::crd::{ResourceList, ResourceRequirements};
+
+    #[test]
+    fn test_add_resize_policy_to_statefulset_in_place() {
+        let cluster = create_test_cluster("my-cluster", "default", 3);
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+
+        // Apply resize policy for in-place resize (restart_on_resize = false)
+        let sts_with_policy = patroni::add_resize_policy_to_statefulset(sts, false);
+
+        // Verify the StatefulSet still has valid structure
+        assert!(sts_with_policy.spec.is_some());
+        let spec = sts_with_policy.spec.as_ref().unwrap();
+        assert!(spec.template.spec.is_some());
+
+        // Serialize to JSON and verify resizePolicy was added
+        let sts_json = serde_json::to_value(&sts_with_policy).unwrap();
+        let containers = sts_json
+            .get("spec")
+            .and_then(|s| s.get("template"))
+            .and_then(|t| t.get("spec"))
+            .and_then(|s| s.get("containers"))
+            .and_then(|c| c.as_array())
+            .expect("Should have containers");
+
+        // Check that resizePolicy was added to the first container
+        let resize_policy = containers[0].get("resizePolicy");
+        assert!(resize_policy.is_some(), "resizePolicy should be present");
+
+        let policy_array = resize_policy.unwrap().as_array().unwrap();
+        assert_eq!(policy_array.len(), 2);
+
+        // Check CPU policy
+        let cpu_policy = policy_array
+            .iter()
+            .find(|p| p.get("resourceName").and_then(|r| r.as_str()) == Some("cpu"))
+            .expect("Should have CPU policy");
+        assert_eq!(
+            cpu_policy.get("restartPolicy").and_then(|r| r.as_str()),
+            Some("NotRequired")
+        );
+
+        // Check memory policy
+        let memory_policy = policy_array
+            .iter()
+            .find(|p| p.get("resourceName").and_then(|r| r.as_str()) == Some("memory"))
+            .expect("Should have memory policy");
+        assert_eq!(
+            memory_policy.get("restartPolicy").and_then(|r| r.as_str()),
+            Some("NotRequired")
+        );
+    }
+
+    #[test]
+    fn test_add_resize_policy_to_statefulset_restart() {
+        let cluster = create_test_cluster("my-cluster", "default", 3);
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+
+        // Apply resize policy for restart on resize (restart_on_resize = true)
+        let sts_with_policy = patroni::add_resize_policy_to_statefulset(sts, true);
+
+        // Serialize to JSON and verify resizePolicy was added with RestartContainer
+        let sts_json = serde_json::to_value(&sts_with_policy).unwrap();
+        let containers = sts_json
+            .get("spec")
+            .and_then(|s| s.get("template"))
+            .and_then(|t| t.get("spec"))
+            .and_then(|s| s.get("containers"))
+            .and_then(|c| c.as_array())
+            .expect("Should have containers");
+
+        let resize_policy = containers[0]
+            .get("resizePolicy")
+            .and_then(|p| p.as_array())
+            .expect("Should have resizePolicy");
+
+        // Check CPU policy
+        let cpu_policy = resize_policy
+            .iter()
+            .find(|p| p.get("resourceName").and_then(|r| r.as_str()) == Some("cpu"))
+            .expect("Should have CPU policy");
+        assert_eq!(
+            cpu_policy.get("restartPolicy").and_then(|r| r.as_str()),
+            Some("RestartContainer")
+        );
+
+        // Check memory policy
+        let memory_policy = resize_policy
+            .iter()
+            .find(|p| p.get("resourceName").and_then(|r| r.as_str()) == Some("memory"))
+            .expect("Should have memory policy");
+        assert_eq!(
+            memory_policy.get("restartPolicy").and_then(|r| r.as_str()),
+            Some("RestartContainer")
+        );
+    }
+
+    #[test]
+    fn test_add_resize_policy_preserves_statefulset_fields() {
+        let cluster = create_test_cluster("my-cluster", "default", 3);
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+
+        // Store original values
+        let original_name = sts.metadata.name.clone();
+        let original_replicas = sts.spec.as_ref().and_then(|s| s.replicas);
+
+        // Apply resize policy
+        let sts_with_policy = patroni::add_resize_policy_to_statefulset(sts, false);
+
+        // Verify original fields are preserved
+        assert_eq!(sts_with_policy.metadata.name, original_name);
+        assert_eq!(
+            sts_with_policy.spec.as_ref().and_then(|s| s.replicas),
+            original_replicas
+        );
+    }
+
+    #[test]
+    fn test_add_resize_policy_to_deployment_always_in_place() {
+        let mut cluster = create_test_cluster("my-cluster", "default", 3);
+        cluster.spec.pgbouncer = Some(PgBouncerSpec {
+            enabled: true,
+            replicas: 2,
+            pool_mode: "transaction".to_string(),
+            max_db_connections: 60,
+            default_pool_size: 20,
+            max_client_conn: 10000,
+            image: None,
+            resources: None,
+            enable_replica_pooler: false,
+        });
+
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
+
+        // Apply resize policy - PgBouncer always uses NotRequired
+        let deployment_with_policy = pgbouncer::add_resize_policy_to_deployment(deployment);
+
+        // Serialize to JSON and verify resizePolicy was added
+        let deployment_json = serde_json::to_value(&deployment_with_policy).unwrap();
+        let containers = deployment_json
+            .get("spec")
+            .and_then(|s| s.get("template"))
+            .and_then(|t| t.get("spec"))
+            .and_then(|s| s.get("containers"))
+            .and_then(|c| c.as_array())
+            .expect("Should have containers");
+
+        let resize_policy = containers[0]
+            .get("resizePolicy")
+            .and_then(|p| p.as_array())
+            .expect("Should have resizePolicy");
+
+        // PgBouncer should always use NotRequired (in-place)
+        for policy in resize_policy {
+            assert_eq!(
+                policy.get("restartPolicy").and_then(|r| r.as_str()),
+                Some("NotRequired"),
+                "PgBouncer should always use NotRequired policy"
+            );
+        }
+    }
+
+    #[test]
+    fn test_add_resize_policy_preserves_deployment_fields() {
+        let mut cluster = create_test_cluster("my-cluster", "default", 3);
+        cluster.spec.pgbouncer = Some(PgBouncerSpec {
+            enabled: true,
+            replicas: 2,
+            pool_mode: "transaction".to_string(),
+            max_db_connections: 60,
+            default_pool_size: 20,
+            max_client_conn: 10000,
+            image: None,
+            resources: None,
+            enable_replica_pooler: false,
+        });
+
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
+
+        // Store original values
+        let original_name = deployment.metadata.name.clone();
+        let original_replicas = deployment.spec.as_ref().and_then(|s| s.replicas);
+
+        // Apply resize policy
+        let deployment_with_policy = pgbouncer::add_resize_policy_to_deployment(deployment);
+
+        // Verify original fields are preserved
+        assert_eq!(deployment_with_policy.metadata.name, original_name);
+        assert_eq!(
+            deployment_with_policy.spec.as_ref().and_then(|s| s.replicas),
+            original_replicas
+        );
+    }
+
+    #[test]
+    fn test_resize_policy_with_resources() {
+        let mut cluster = create_test_cluster("my-cluster", "default", 3);
+        cluster.spec.resources = Some(ResourceRequirements {
+            requests: Some(ResourceList {
+                cpu: Some("500m".to_string()),
+                memory: Some("1Gi".to_string()),
+            }),
+            limits: Some(ResourceList {
+                cpu: Some("2".to_string()),
+                memory: Some("4Gi".to_string()),
+            }),
+            restart_on_resize: Some(false),
+        });
+
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+        let sts_with_policy = patroni::add_resize_policy_to_statefulset(
+            sts,
+            cluster
+                .spec
+                .resources
+                .as_ref()
+                .and_then(|r| r.restart_on_resize)
+                .unwrap_or(false),
+        );
+
+        // Verify container still has resources
+        let container = &sts_with_policy
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0];
+
+        assert!(container.resources.is_some());
+        let resources = container.resources.as_ref().unwrap();
+        assert!(resources.requests.is_some());
+        assert!(resources.limits.is_some());
+    }
+
+    #[test]
+    fn test_resize_policy_restart_on_resize_from_spec() {
+        let mut cluster = create_test_cluster("my-cluster", "default", 3);
+        cluster.spec.resources = Some(ResourceRequirements {
+            requests: Some(ResourceList {
+                cpu: Some("1".to_string()),
+                memory: Some("2Gi".to_string()),
+            }),
+            limits: None,
+            restart_on_resize: Some(true), // Explicitly request restart on resize
+        });
+
+        let sts = patroni::generate_patroni_statefulset(&cluster);
+        let restart_on_resize = cluster
+            .spec
+            .resources
+            .as_ref()
+            .and_then(|r| r.restart_on_resize)
+            .unwrap_or(false);
+
+        let sts_with_policy = patroni::add_resize_policy_to_statefulset(sts, restart_on_resize);
+
+        // Verify RestartContainer policy was applied
+        let sts_json = serde_json::to_value(&sts_with_policy).unwrap();
+        let resize_policy = sts_json
+            .get("spec")
+            .and_then(|s| s.get("template"))
+            .and_then(|t| t.get("spec"))
+            .and_then(|s| s.get("containers"))
+            .and_then(|c| c.as_array())
+            .and_then(|containers| containers.first())
+            .and_then(|c| c.get("resizePolicy"))
+            .and_then(|p| p.as_array())
+            .expect("Should have resizePolicy");
+
+        for policy in resize_policy {
+            assert_eq!(
+                policy.get("restartPolicy").and_then(|r| r.as_str()),
+                Some("RestartContainer")
             );
         }
     }

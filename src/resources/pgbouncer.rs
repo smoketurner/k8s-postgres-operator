@@ -480,6 +480,9 @@ pub fn generate_pgbouncer_deployment(cluster: &PostgresCluster) -> Deployment {
                 ..Default::default()
             });
 
+    // Note: resizePolicy is added via JSON patching in add_resize_policy_to_deployment()
+    // since k8s-openapi v1_34 doesn't have the field yet
+
     let container = Container {
         name: "pgbouncer".to_string(),
         image: Some(image),
@@ -791,6 +794,9 @@ pub fn generate_pgbouncer_replica_deployment(cluster: &PostgresCluster) -> Deplo
                 ..Default::default()
             });
 
+    // Note: resizePolicy is added via JSON patching in add_resize_policy_to_deployment()
+    // since k8s-openapi v1_34 doesn't have the field yet
+
     let container = Container {
         name: "pgbouncer".to_string(),
         image: Some(image),
@@ -981,4 +987,59 @@ pub fn is_replica_pooler_enabled(cluster: &PostgresCluster) -> bool {
         .pgbouncer
         .as_ref()
         .is_some_and(|s| s.enabled && s.enable_replica_pooler)
+}
+
+/// Add Kubernetes 1.35+ resizePolicy to a Deployment's containers via JSON patching.
+///
+/// Since k8s-openapi v1_34 doesn't have the resizePolicy field, we add it by:
+/// 1. Serializing the Deployment to JSON
+/// 2. Adding resizePolicy to each container
+/// 3. Deserializing back to Deployment
+///
+/// PgBouncer is stateless so we always use NotRequired (in-place resize).
+///
+/// TODO(k8s-openapi-upgrade): Remove this function when k8s-openapi supports v1_35.
+/// Instead, add resizePolicy directly in generate_pgbouncer_deployment() using:
+/// ```ignore
+/// use k8s_openapi::api::core::v1::ContainerResizePolicy;
+/// resize_policy: Some(vec![
+///     ContainerResizePolicy {
+///         resource_name: "cpu".to_string(),
+///         restart_policy: "NotRequired".to_string(),
+///     },
+///     ContainerResizePolicy {
+///         resource_name: "memory".to_string(),
+///         restart_policy: "NotRequired".to_string(),
+///     },
+/// ]),
+/// ```
+pub fn add_resize_policy_to_deployment(deployment: Deployment) -> Deployment {
+    let resize_policy = serde_json::json!([
+        {"resourceName": "cpu", "restartPolicy": "NotRequired"},
+        {"resourceName": "memory", "restartPolicy": "NotRequired"}
+    ]);
+
+    // Serialize to JSON Value
+    let mut deployment_json = match serde_json::to_value(&deployment) {
+        Ok(v) => v,
+        Err(_) => return deployment, // Return original on error
+    };
+
+    // Navigate to containers and add resizePolicy
+    if let Some(spec) = deployment_json.get_mut("spec") {
+        if let Some(template) = spec.get_mut("template") {
+            if let Some(pod_spec) = template.get_mut("spec") {
+                if let Some(containers) = pod_spec.get_mut("containers") {
+                    if let Some(containers_arr) = containers.as_array_mut() {
+                        for container in containers_arr {
+                            container["resizePolicy"] = resize_policy.clone();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Deserialize back to Deployment
+    serde_json::from_value(deployment_json).unwrap_or(deployment)
 }

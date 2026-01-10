@@ -90,6 +90,14 @@ pub struct ResourceRequirements {
     /// CPU and memory requests
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requests: Option<ResourceList>,
+
+    /// Restart container when resources are resized (Kubernetes 1.35+)
+    /// If false (default), resources are resized in-place without container restart.
+    /// If true, container is restarted when resources change.
+    /// Note: Some PostgreSQL settings like shared_buffers require a PostgreSQL
+    /// restart to take effect even with in-place resize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_on_resize: Option<bool>,
 }
 
 /// Resource quantities for CPU and memory
@@ -403,6 +411,18 @@ pub struct PostgresClusterStatus {
     /// Number of ready PgBouncer replicas
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pgbouncer_ready_replicas: Option<i32>,
+
+    /// Detailed pod information with generation tracking (Kubernetes 1.35+)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pods: Vec<PodInfo>,
+
+    /// Resource resize status for each pod (Kubernetes 1.35+)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resize_status: Vec<PodResourceResizeStatus>,
+
+    /// Whether all pods have applied their latest spec (observedGeneration == generation)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub all_pods_synced: Option<bool>,
 }
 
 /// Cluster lifecycle phase
@@ -468,4 +488,72 @@ pub struct Condition {
     /// Generation observed when condition was set
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
+}
+
+/// Detailed pod information including generation tracking (Kubernetes 1.35+)
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PodInfo {
+    /// Pod name
+    pub name: String,
+
+    /// Pod's metadata.generation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<i64>,
+
+    /// Pod's status.observedGeneration (from kubelet)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
+
+    /// Whether kubelet has processed the latest pod spec
+    #[serde(default)]
+    pub spec_applied: bool,
+
+    /// Pod role (master/replica from spilo-role label)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+
+    /// Ready status
+    #[serde(default)]
+    pub ready: bool,
+}
+
+/// Status of a pod resize operation (Kubernetes 1.35+)
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Default)]
+pub enum PodResizeStatus {
+    /// No resize in progress
+    #[default]
+    NoResize,
+    /// Resize proposed but not yet actuated
+    Proposed,
+    /// Resize in progress
+    InProgress,
+    /// Resize deferred (waiting for resources)
+    Deferred,
+    /// Resize cannot be granted (infeasible)
+    Infeasible,
+}
+
+/// Resource resize status for a single pod (Kubernetes 1.35+)
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PodResourceResizeStatus {
+    /// Pod name
+    pub pod_name: String,
+
+    /// Current resize status
+    #[serde(default)]
+    pub status: PodResizeStatus,
+
+    /// Current allocated resources (from status.containerStatuses[].allocatedResources)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allocated_resources: Option<ResourceList>,
+
+    /// Last transition time
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_transition_time: Option<String>,
+
+    /// Message about resize status
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
