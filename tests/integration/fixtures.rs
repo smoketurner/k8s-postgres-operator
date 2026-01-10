@@ -8,9 +8,9 @@
 
 use kube::core::ObjectMeta;
 use postgres_operator::crd::{
-    ExternalTrafficPolicy, MetricsSpec, PgBouncerSpec, PostgresCluster, PostgresClusterSpec,
-    PostgresVersion, ResourceList, ResourceRequirements, ServiceSpec, ServiceType, StorageSpec,
-    TLSSpec,
+    ExternalTrafficPolicy, IssuerKind, IssuerRef, MetricsSpec, PgBouncerSpec, PostgresCluster,
+    PostgresClusterSpec, PostgresVersion, ResourceList, ResourceRequirements, ServiceSpec,
+    ServiceType, StorageSpec, TLSSpec,
 };
 use std::collections::BTreeMap;
 
@@ -24,7 +24,7 @@ pub struct PostgresClusterBuilder {
     storage_class: Option<String>,
     postgresql_params: BTreeMap<String, String>,
     resources: Option<ResourceRequirements>,
-    tls: Option<TLSSpec>,
+    tls: TLSSpec,
     pgbouncer: Option<PgBouncerSpec>,
     metrics: Option<MetricsSpec>,
     service: Option<ServiceSpec>,
@@ -32,6 +32,7 @@ pub struct PostgresClusterBuilder {
 
 impl PostgresClusterBuilder {
     /// Create a new builder with default values
+    /// Note: TLS is enabled by default but without an issuer (tests must provide one)
     pub fn new(name: &str, namespace: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -42,7 +43,14 @@ impl PostgresClusterBuilder {
             storage_class: None,
             postgresql_params: BTreeMap::new(),
             resources: None,
-            tls: None,
+            // TLS disabled by default for tests (no cert-manager in test environment)
+            tls: TLSSpec {
+                enabled: false,
+                issuer_ref: None,
+                additional_dns_names: vec![],
+                duration: None,
+                renew_before: None,
+            },
             pgbouncer: None,
             metrics: None,
             service: None,
@@ -123,42 +131,47 @@ impl PostgresClusterBuilder {
         self
     }
 
-    /// Enable TLS with a certificate secret
-    pub fn with_tls(mut self, cert_secret: &str) -> Self {
-        self.tls = Some(TLSSpec {
+    /// Enable TLS with a cert-manager ClusterIssuer
+    pub fn with_tls(mut self, issuer_name: &str) -> Self {
+        self.tls = TLSSpec {
             enabled: true,
-            cert_secret: Some(cert_secret.to_string()),
-            ca_secret: None,
-            certificate_file: None,
-            private_key_file: None,
-            ca_file: None,
-        });
+            issuer_ref: Some(IssuerRef {
+                name: issuer_name.to_string(),
+                kind: IssuerKind::ClusterIssuer,
+                group: "cert-manager.io".to_string(),
+            }),
+            additional_dns_names: vec![],
+            duration: None,
+            renew_before: None,
+        };
         self
     }
 
-    /// Enable TLS with certificate and CA secrets
-    pub fn with_tls_and_ca(mut self, cert_secret: &str, ca_secret: &str) -> Self {
-        self.tls = Some(TLSSpec {
+    /// Enable TLS with a namespace-scoped Issuer
+    pub fn with_tls_issuer(mut self, issuer_name: &str) -> Self {
+        self.tls = TLSSpec {
             enabled: true,
-            cert_secret: Some(cert_secret.to_string()),
-            ca_secret: Some(ca_secret.to_string()),
-            certificate_file: None,
-            private_key_file: None,
-            ca_file: None,
-        });
+            issuer_ref: Some(IssuerRef {
+                name: issuer_name.to_string(),
+                kind: IssuerKind::Issuer,
+                group: "cert-manager.io".to_string(),
+            }),
+            additional_dns_names: vec![],
+            duration: None,
+            renew_before: None,
+        };
         self
     }
 
-    /// Enable TLS with custom filenames
-    pub fn with_tls_custom(mut self, cert_secret: &str, cert_file: &str, key_file: &str) -> Self {
-        self.tls = Some(TLSSpec {
-            enabled: true,
-            cert_secret: Some(cert_secret.to_string()),
-            ca_secret: None,
-            certificate_file: Some(cert_file.to_string()),
-            private_key_file: Some(key_file.to_string()),
-            ca_file: None,
-        });
+    /// Disable TLS (for testing without cert-manager)
+    pub fn without_tls(mut self) -> Self {
+        self.tls = TLSSpec {
+            enabled: false,
+            issuer_ref: None,
+            additional_dns_names: vec![],
+            duration: None,
+            renew_before: None,
+        };
         self
     }
 
@@ -319,6 +332,7 @@ impl PostgresClusterBuilder {
                     storage_class: self.storage_class,
                 },
                 postgresql_params: self.postgresql_params,
+                labels: Default::default(),
                 resources: self.resources,
                 backup: None,
                 pgbouncer: self.pgbouncer,
@@ -336,10 +350,10 @@ impl PostgresClusterBuilder {
 // Additional convenience constructors
 // =============================================================================
 
-/// Create a PostgresCluster with TLS enabled
-pub fn with_tls(name: &str, namespace: &str, cert_secret: &str) -> PostgresCluster {
+/// Create a PostgresCluster with TLS enabled using a ClusterIssuer
+pub fn with_tls(name: &str, namespace: &str, issuer_name: &str) -> PostgresCluster {
     PostgresClusterBuilder::single(name, namespace)
-        .with_tls(cert_secret)
+        .with_tls(issuer_name)
         .build()
 }
 

@@ -488,11 +488,9 @@ pub fn generate_backup_env_vars(cluster: &PostgresCluster) -> Vec<EnvVar> {
     }
 
     // Encryption configuration
-    if let Some(ref encryption) = backup.encryption
-        && encryption.enabled
-    {
-        let method = encryption.method.as_ref().cloned().unwrap_or_default();
-        match method {
+    // Presence of encryption section means encryption is enabled
+    if let Some(ref encryption) = backup.encryption {
+        match encryption.method {
             EncryptionMethod::Aes256 => {
                 // libsodium key path
                 env_vars.push(EnvVar {
@@ -791,11 +789,9 @@ pub fn generate_backup_volumes(cluster: &PostgresCluster) -> Vec<Volume> {
     }
 
     // Encryption key volume
-    if let Some(ref encryption) = backup.encryption
-        && encryption.enabled
-        && let Some(ref key_secret) = encryption.key_secret
-    {
-        let key_name = match encryption.method.as_ref().cloned().unwrap_or_default() {
+    // Presence of encryption section means encryption is enabled
+    if let Some(ref encryption) = backup.encryption {
+        let key_name = match encryption.method {
             EncryptionMethod::Aes256 => "encryption-key",
             EncryptionMethod::Pgp => "pgp-key",
         };
@@ -803,7 +799,7 @@ pub fn generate_backup_volumes(cluster: &PostgresCluster) -> Vec<Volume> {
         volumes.push(Volume {
             name: "backup-encryption-key".to_string(),
             secret: Some(SecretVolumeSource {
-                secret_name: Some(key_secret.clone()),
+                secret_name: Some(encryption.key_secret.clone()),
                 items: Some(vec![KeyToPath {
                     key: key_name.to_string(),
                     path: key_name.to_string(),
@@ -838,10 +834,8 @@ pub fn generate_backup_volume_mounts(cluster: &PostgresCluster) -> Vec<VolumeMou
     }
 
     // Encryption key mount
-    if let Some(ref encryption) = backup.encryption
-        && encryption.enabled
-        && encryption.key_secret.is_some()
-    {
+    // Presence of encryption section means encryption is enabled
+    if backup.encryption.is_some() {
         mounts.push(VolumeMount {
             name: "backup-encryption-key".to_string(),
             mount_path: ENCRYPTION_KEY_PATH.to_string(),
@@ -867,15 +861,15 @@ pub fn get_backup_credentials_secret(cluster: &PostgresCluster) -> Option<String
         .map(|b| b.credentials_secret_name().to_string())
 }
 
-/// Get the encryption key secret name, if encryption is configured.
+/// Get the encryption key secret name if encryption is configured.
+/// Returns Some(secret_name) if backup has encryption configured, None otherwise.
 pub fn get_encryption_key_secret(cluster: &PostgresCluster) -> Option<String> {
     cluster
         .spec
         .backup
         .as_ref()
         .and_then(|b| b.encryption.as_ref())
-        .filter(|e| e.enabled)
-        .and_then(|e| e.key_secret.clone())
+        .map(|e| e.key_secret.clone())
 }
 
 #[cfg(test)]
@@ -884,6 +878,7 @@ mod tests {
     use crate::crd::{
         BackupDestination, BackupSpec, CompressionMethod, EncryptionMethod, EncryptionSpec,
         PostgresCluster, PostgresClusterSpec, PostgresVersion, RetentionPolicy, StorageSpec,
+        TLSSpec,
     };
     use kube::core::ObjectMeta;
 
@@ -903,9 +898,10 @@ mod tests {
                 },
                 resources: None,
                 postgresql_params: Default::default(),
+                labels: Default::default(),
                 backup,
                 pgbouncer: None,
-                tls: None,
+                tls: TLSSpec::default(),
                 metrics: None,
                 service: None,
                 restore: None,
@@ -1097,9 +1093,8 @@ mod tests {
             },
             wal_archiving: None,
             encryption: Some(EncryptionSpec {
-                enabled: true,
-                method: Some(EncryptionMethod::Aes256),
-                key_secret: Some("encryption-key-secret".to_string()),
+                method: EncryptionMethod::Aes256,
+                key_secret: "encryption-key-secret".to_string(),
             }),
             compression: None,
             backup_from_replica: false,

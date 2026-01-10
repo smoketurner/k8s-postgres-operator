@@ -35,6 +35,9 @@ pub fn owner_reference(cluster: &PostgresCluster) -> OwnerReference {
 }
 
 /// Generate standard labels for all resources belonging to a PostgresCluster
+///
+/// This includes base operator labels. For full labels including user-defined
+/// cost allocation labels, use `cluster_labels` instead.
 pub fn standard_labels(cluster_name: &str) -> BTreeMap<String, String> {
     BTreeMap::from([
         (
@@ -54,6 +57,32 @@ pub fn standard_labels(cluster_name: &str) -> BTreeMap<String, String> {
             cluster_name.to_string(),
         ),
     ])
+}
+
+/// Generate labels for a PostgresCluster including user-defined cost allocation labels.
+///
+/// This merges standard operator labels with user-defined labels from the cluster spec.
+/// User labels can override standard labels except for the cluster identifier.
+///
+/// Common user labels for cost allocation:
+/// - `team`: Team that owns this cluster
+/// - `cost-center`: Cost center for billing
+/// - `project`: Project identifier
+/// - `environment`: Environment type (production, staging, etc.)
+pub fn cluster_labels(cluster: &PostgresCluster) -> BTreeMap<String, String> {
+    let name = cluster.name_any();
+    let mut labels = standard_labels(&name);
+
+    // Merge user-defined labels from the cluster spec
+    // User labels can override standard labels (except cluster identifier)
+    for (key, value) in &cluster.spec.labels {
+        // Don't allow overriding the cluster identifier
+        if key != "postgres-operator.smoketurner.com/cluster" {
+            labels.insert(key.clone(), value.clone());
+        }
+    }
+
+    labels
 }
 
 /// Generate labels for Patroni-managed resources
@@ -111,6 +140,113 @@ mod tests {
         assert_eq!(
             labels.get("app.kubernetes.io/name"),
             Some(&"my-cluster".to_string())
+        );
+    }
+
+    #[test]
+    fn test_cluster_labels_with_user_labels() {
+        use crate::crd::{PostgresCluster, PostgresClusterSpec, PostgresVersion, StorageSpec, TLSSpec};
+        use kube::core::ObjectMeta;
+
+        let mut user_labels = BTreeMap::new();
+        user_labels.insert("team".to_string(), "platform".to_string());
+        user_labels.insert("cost-center".to_string(), "eng-001".to_string());
+        user_labels.insert("environment".to_string(), "production".to_string());
+
+        let cluster = PostgresCluster {
+            metadata: ObjectMeta {
+                name: Some("my-cluster".to_string()),
+                namespace: Some("test-ns".to_string()),
+                ..Default::default()
+            },
+            spec: PostgresClusterSpec {
+                version: PostgresVersion::V16,
+                replicas: 1,
+                storage: StorageSpec {
+                    size: "10Gi".to_string(),
+                    storage_class: None,
+                },
+                labels: user_labels,
+                resources: None,
+                postgresql_params: Default::default(),
+                backup: None,
+                pgbouncer: None,
+                tls: TLSSpec::default(),
+                metrics: None,
+                service: None,
+                restore: None,
+            },
+            status: None,
+        };
+
+        let labels = cluster_labels(&cluster);
+
+        // Should have standard labels
+        assert_eq!(
+            labels.get("app.kubernetes.io/name"),
+            Some(&"my-cluster".to_string())
+        );
+        assert_eq!(
+            labels.get("app.kubernetes.io/managed-by"),
+            Some(&"postgres-operator".to_string())
+        );
+
+        // Should have user-defined cost allocation labels
+        assert_eq!(labels.get("team"), Some(&"platform".to_string()));
+        assert_eq!(labels.get("cost-center"), Some(&"eng-001".to_string()));
+        assert_eq!(labels.get("environment"), Some(&"production".to_string()));
+
+        // Cluster identifier should not be overridable
+        assert_eq!(
+            labels.get("postgres-operator.smoketurner.com/cluster"),
+            Some(&"my-cluster".to_string())
+        );
+    }
+
+    #[test]
+    fn test_cluster_labels_cannot_override_cluster_identifier() {
+        use crate::crd::{PostgresCluster, PostgresClusterSpec, PostgresVersion, StorageSpec, TLSSpec};
+        use kube::core::ObjectMeta;
+
+        let mut user_labels = BTreeMap::new();
+        // Try to override the cluster identifier
+        user_labels.insert(
+            "postgres-operator.smoketurner.com/cluster".to_string(),
+            "hacked".to_string(),
+        );
+
+        let cluster = PostgresCluster {
+            metadata: ObjectMeta {
+                name: Some("real-cluster".to_string()),
+                namespace: Some("test-ns".to_string()),
+                ..Default::default()
+            },
+            spec: PostgresClusterSpec {
+                version: PostgresVersion::V16,
+                replicas: 1,
+                storage: StorageSpec {
+                    size: "10Gi".to_string(),
+                    storage_class: None,
+                },
+                labels: user_labels,
+                resources: None,
+                postgresql_params: Default::default(),
+                backup: None,
+                pgbouncer: None,
+                tls: TLSSpec::default(),
+                metrics: None,
+                service: None,
+                restore: None,
+            },
+            status: None,
+        };
+
+        let labels = cluster_labels(&cluster);
+
+        // Should not be able to override the cluster identifier
+        assert_eq!(
+            labels.get("postgres-operator.smoketurner.com/cluster"),
+            Some(&"real-cluster".to_string())
         );
     }
 }

@@ -6,6 +6,28 @@ A Helm chart for deploying the PostgreSQL Operator, which manages PostgreSQL clu
 
 - Kubernetes 1.35+
 - Helm 3.8+
+- [cert-manager](https://cert-manager.io/) v1.0+ (required for TLS)
+
+### Installing cert-manager
+
+TLS is enabled by default for all PostgreSQL clusters for security. This requires cert-manager to be installed:
+
+```bash
+# Add the Jetstack Helm repository
+helm repo add jetstack https://charts.jetstack.io
+helm repo update
+
+# Install cert-manager with CRDs
+helm install cert-manager jetstack/cert-manager \
+  --namespace cert-manager \
+  --create-namespace \
+  --set crds.enabled=true
+
+# Verify cert-manager is running
+kubectl get pods -n cert-manager
+```
+
+After installing cert-manager, create a ClusterIssuer or Issuer for your environment. See [TLS Configuration](#tls-configuration-spectls) below.
 
 ## Installation
 
@@ -129,8 +151,11 @@ Once the operator is installed, you can create PostgresCluster resources. Below 
 | `spec.storage.storageClass` | Storage class name | No |
 | `spec.resources` | CPU/memory requests and limits | No |
 | `spec.postgresqlParams` | Custom postgresql.conf parameters | No |
+| `spec.labels` | Custom labels for cost allocation (team, cost-center, etc.) | No |
 
 ### Backup Configuration (`spec.backup`)
+
+**Important:** Encryption is **required** for all backups to protect sensitive data at rest.
 
 | Field | Description |
 |-------|-------------|
@@ -149,9 +174,8 @@ Once the operator is installed, you can create PostgresCluster resources. Below 
 | `destination.disableSse` | Disable S3 server-side encryption |
 | `walArchiving.enabled` | Enable WAL archiving (default: true) |
 | `walArchiving.restoreTimeout` | WAL restore timeout in seconds |
-| `encryption.enabled` | Enable backup encryption |
-| `encryption.method` | Encryption method: aes256 or pgp |
-| `encryption.keySecret` | Secret containing encryption key |
+| `encryption.method` | Encryption method: aes256 or pgp (default: aes256) |
+| `encryption.keySecret` | **Required**: Secret containing encryption key |
 | `compression` | Compression: lz4, lzma, brotli, zstd, none |
 | `backupFromReplica` | Take backups from replica |
 | `uploadConcurrency` | WAL-G upload concurrency (default: 16) |
@@ -194,14 +218,67 @@ Bootstrap a new cluster from an existing backup:
 
 ### TLS Configuration (`spec.tls`)
 
-| Field | Description |
-|-------|-------------|
-| `enabled` | Enable TLS for PostgreSQL connections |
-| `certSecret` | Secret containing tls.crt and tls.key |
-| `caSecret` | Secret containing ca.crt |
-| `certificateFile` | Certificate filename (default: tls.crt) |
-| `privateKeyFile` | Key filename (default: tls.key) |
-| `caFile` | CA filename (default: ca.crt) |
+TLS is **enabled by default** for security. The operator integrates with cert-manager to automatically provision and renew certificates.
+
+| Field | Description | Default |
+|-------|-------------|---------|
+| `enabled` | Enable TLS for PostgreSQL connections | `true` |
+| `issuerRef.name` | Name of the cert-manager Issuer or ClusterIssuer | (required when TLS enabled) |
+| `issuerRef.kind` | `Issuer` or `ClusterIssuer` | `ClusterIssuer` |
+| `issuerRef.group` | Issuer API group | `cert-manager.io` |
+| `additionalDnsNames` | Additional DNS names for the certificate | `[]` |
+| `duration` | Certificate validity duration (e.g., "2160h" for 90 days) | cert-manager default |
+| `renewBefore` | Renew certificate before expiry (e.g., "360h" for 15 days) | cert-manager default |
+
+**Setting up TLS:**
+
+1. Create a ClusterIssuer (self-signed for development):
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-issuer
+spec:
+  selfSigned: {}
+```
+
+2. For production, use Let's Encrypt or your organization's PKI:
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: admin@example.com
+    privateKeySecretRef:
+      name: letsencrypt-prod-key
+    solvers:
+    - http01:
+        ingress:
+          class: nginx
+```
+
+3. Reference the issuer in your PostgresCluster:
+
+```yaml
+spec:
+  tls:
+    issuerRef:
+      name: selfsigned-issuer
+      kind: ClusterIssuer
+```
+
+**Disabling TLS (not recommended):**
+
+```yaml
+spec:
+  tls:
+    enabled: false
+```
 
 ### Service Configuration (`spec.service`)
 
@@ -303,7 +380,6 @@ spec:
       credentialsSecret: aws-backup-credentials
     compression: zstd
     encryption:
-      enabled: true
       method: aes256
       keySecret: backup-encryption-key
     backupFromReplica: true
@@ -349,9 +425,9 @@ spec:
     poolMode: transaction
     maxDbConnections: 100
   tls:
-    enabled: true
-    certSecret: postgres-tls
-    caSecret: postgres-ca
+    issuerRef:
+      name: letsencrypt-prod
+      kind: ClusterIssuer
   service:
     type: LoadBalancer
     annotations:

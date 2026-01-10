@@ -23,16 +23,17 @@ status:
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `version` | string | Yes | - | PostgreSQL major version (e.g., "15", "16") |
+| `version` | string | Yes | - | PostgreSQL major version ("15", "16", or "17") |
 | `replicas` | integer | No | 1 | Number of cluster members (1-100) |
 | `storage` | [StorageSpec](#storagespec) | Yes | - | Storage configuration |
 | `resources` | [ResourceRequirements](#resourcerequirements) | No | - | CPU/memory resources |
 | `postgresqlParams` | map[string]string | No | - | PostgreSQL configuration parameters |
+| `labels` | map[string]string | No | - | Custom labels for cost allocation (team, cost-center, etc.) |
 | `service` | [ServiceSpec](#servicespec) | No | - | Service configuration |
 | `pgbouncer` | [PgBouncerSpec](#pgbouncerspec) | No | - | Connection pooling configuration |
-| `tls` | [TLSSpec](#tlsspec) | No | - | TLS configuration |
+| `tls` | [TLSSpec](#tlsspec) | No | enabled=true | TLS configuration (enabled by default) |
 | `metrics` | [MetricsSpec](#metricsspec) | No | - | Metrics exporter configuration |
-| `backup` | [BackupSpec](#backupspec) | No | - | Backup configuration |
+| `backup` | [BackupSpec](#backupspec) | No | - | Backup configuration (encryption required) |
 
 ### StorageSpec
 
@@ -133,22 +134,63 @@ pgbouncer:
 
 ### TLSSpec
 
+TLS is **enabled by default** for security. The operator integrates with [cert-manager](https://cert-manager.io/) to automatically provision and renew certificates.
+
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `enabled` | boolean | No | false | Enable TLS encryption |
-| `certSecret` | string | No | - | Secret containing tls.crt and tls.key |
-| `caSecret` | string | No | - | Secret containing CA certificate |
-| `certificateFile` | string | No | tls.crt | Certificate filename in secret |
-| `privateKeyFile` | string | No | tls.key | Private key filename in secret |
-| `caFile` | string | No | ca.crt | CA certificate filename in secret |
+| `enabled` | boolean | No | true | Enable TLS encryption |
+| `issuerRef` | [IssuerRef](#issuerref) | When TLS enabled | - | cert-manager Issuer reference |
+| `additionalDnsNames` | []string | No | - | Additional DNS names for certificate |
+| `duration` | string | No | - | Certificate validity (e.g., "2160h" for 90 days) |
+| `renewBefore` | string | No | - | Renew before expiry (e.g., "360h" for 15 days) |
 
-**Example:**
+### IssuerRef
+
+Reference to a cert-manager Issuer or ClusterIssuer.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | Yes | - | Issuer name |
+| `kind` | string | No | ClusterIssuer | Issuer or ClusterIssuer |
+| `group` | string | No | cert-manager.io | Issuer API group |
+
+**Example (using ClusterIssuer):**
 
 ```yaml
 tls:
-  enabled: true
-  certSecret: my-cluster-tls
-  caSecret: my-cluster-ca
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+```
+
+**Example (using namespace-scoped Issuer):**
+
+```yaml
+tls:
+  issuerRef:
+    name: my-issuer
+    kind: Issuer
+```
+
+**Example (with additional DNS names and custom duration):**
+
+```yaml
+tls:
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  additionalDnsNames:
+    - postgres.example.com
+    - db.example.com
+  duration: "2160h"    # 90 days
+  renewBefore: "360h"  # 15 days
+```
+
+**Disabling TLS (not recommended):**
+
+```yaml
+tls:
+  enabled: false
 ```
 
 ### MetricsSpec
@@ -168,11 +210,51 @@ metrics:
 
 ### BackupSpec
 
+**Important:** Encryption is **required** for all backups to protect sensitive data at rest.
+
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `schedule` | string | Conditional | - | Cron schedule (required if destination set) |
 | `retention` | [RetentionSpec](#retentionspec) | No | - | Backup retention policy |
 | `destination` | [BackupDestination](#backupdestination) | No | - | Backup storage destination |
+| `encryption` | [EncryptionSpec](#encryptionspec) | Yes | - | Backup encryption (required) |
+| `compression` | string | No | - | Compression: lz4, lzma, brotli, zstd, none |
+| `walArchiving` | [WALArchivingSpec](#walarchivingspec) | No | enabled=true | WAL archiving settings |
+| `backupFromReplica` | boolean | No | false | Take backups from replica |
+| `uploadConcurrency` | integer | No | 16 | WAL-G upload concurrency |
+| `downloadConcurrency` | integer | No | 10 | WAL-G download concurrency |
+| `enableDeltaBackups` | boolean | No | false | Enable delta backups |
+| `deltaMaxSteps` | integer | No | - | Max delta steps before full backup |
+
+### EncryptionSpec
+
+Encryption configuration for backups. This is **required** when backups are configured.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `method` | string | No | aes256 | Encryption method: aes256 or pgp |
+| `keySecret` | string | Yes | - | Secret containing encryption key |
+
+**Secret format for AES-256:**
+
+```bash
+kubectl create secret generic backup-encryption-key \
+  --from-literal=WALG_LIBSODIUM_KEY=$(openssl rand -hex 32)
+```
+
+**Secret format for PGP:**
+
+```bash
+kubectl create secret generic backup-encryption-key \
+  --from-file=WALG_PGP_KEY=/path/to/private.key
+```
+
+### WALArchivingSpec
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean | No | true | Enable WAL archiving |
+| `restoreTimeout` | integer | No | - | WAL restore timeout in seconds |
 
 ### RetentionSpec
 
@@ -205,6 +287,9 @@ backup:
     bucket: my-postgres-backups
     region: us-east-1
     credentialsSecret: aws-backup-credentials
+  encryption:
+    method: aes256
+    keySecret: backup-encryption-key
 ```
 
 **Example (GCS):**
@@ -218,6 +303,9 @@ backup:
     type: GCS
     bucket: my-postgres-backups
     credentialsSecret: gcs-backup-credentials
+  encryption:
+    method: aes256
+    keySecret: backup-encryption-key
 ```
 
 **Example (Azure):**
@@ -232,6 +320,9 @@ backup:
     container: postgres-backups
     storageAccount: mystorageaccount
     credentialsSecret: azure-backup-credentials
+  encryption:
+    method: aes256
+    keySecret: backup-encryption-key
 ```
 
 ## Status
@@ -352,6 +443,12 @@ spec:
       cpu: "8"
       memory: 32Gi
 
+  labels:
+    team: platform
+    cost-center: eng-001
+    environment: production
+    project: core-database
+
   postgresqlParams:
     max_connections: "1000"
     shared_buffers: "8GB"
@@ -390,8 +487,11 @@ spec:
         memory: 1Gi
 
   tls:
-    enabled: true
-    certSecret: production-db-tls
+    issuerRef:
+      name: letsencrypt-prod
+      kind: ClusterIssuer
+    duration: "2160h"    # 90 days
+    renewBefore: "360h"  # 15 days
 
   metrics:
     enabled: true
@@ -406,21 +506,28 @@ spec:
       bucket: prod-postgres-backups
       region: us-east-1
       credentialsSecret: aws-backup-credentials
+    encryption:
+      method: aes256
+      keySecret: backup-encryption-key
+    compression: zstd
+    backupFromReplica: true
 ```
 
 ## Validation Rules
 
 The CRD includes CEL validation rules:
 
-1. **Version format**: Must match `^[0-9]{1,2}(\.[0-9]+)?$`
+1. **Version**: Must be one of "15", "16", or "17"
 2. **Storage size**: Must be valid Kubernetes quantity
 3. **Replicas**: Must be between 1 and 100
 4. **Backup schedule**: Required if destination is configured
-5. **S3 destination**: Requires bucket, region, credentialsSecret
-6. **GCS destination**: Requires bucket, credentialsSecret
-7. **Azure destination**: Requires container, storageAccount, credentialsSecret
-8. **NodePort**: Only valid when service type is NodePort
-9. **LoadBalancer ranges**: Only valid when service type is LoadBalancer
+5. **Backup encryption**: Required if backup is configured
+6. **TLS issuerRef**: Required if TLS is enabled (default)
+7. **S3 destination**: Requires bucket, region, credentialsSecret
+8. **GCS destination**: Requires bucket, credentialsSecret
+9. **Azure destination**: Requires container, storageAccount, credentialsSecret
+10. **NodePort**: Only valid when service type is NodePort
+11. **LoadBalancer ranges**: Only valid when service type is LoadBalancer
 
 ## Labels and Annotations
 
@@ -430,11 +537,25 @@ The operator applies these labels to all managed resources:
 
 | Label | Description |
 |-------|-------------|
-| `app.kubernetes.io/name` | Always "postgresql" |
-| `app.kubernetes.io/instance` | Cluster name |
+| `app.kubernetes.io/name` | Cluster name |
 | `app.kubernetes.io/component` | Component name (postgresql, pgbouncer) |
 | `app.kubernetes.io/managed-by` | "postgres-operator" |
-| `postgres-operator.smoketurner.com/cluster` | Cluster name |
+| `postgres-operator.smoketurner.com/cluster` | Cluster name (protected, cannot be overridden) |
+
+### User-Defined Labels
+
+Use `spec.labels` to add custom labels for cost allocation and organization:
+
+```yaml
+spec:
+  labels:
+    team: platform
+    cost-center: eng-001
+    project: core-database
+    environment: production
+```
+
+User-defined labels are merged with standard labels on all managed resources. The `postgres-operator.smoketurner.com/cluster` label cannot be overridden.
 
 ### Patroni Labels
 

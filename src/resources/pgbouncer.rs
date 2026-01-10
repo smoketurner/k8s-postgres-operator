@@ -296,15 +296,16 @@ pub fn generate_pgbouncer_deployment(cluster: &PostgresCluster) -> Deployment {
         },
     ];
 
-    // Add TLS volumes if TLS is enabled
-    if let Some(ref tls) = cluster.spec.tls
-        && tls.enabled
-        && let Some(ref cert_secret) = tls.cert_secret
-    {
+    // Add TLS volumes if TLS is enabled (cert-manager integration)
+    let tls = &cluster.spec.tls;
+    if tls.enabled && tls.issuer_ref.is_some() {
+        // cert-manager creates a secret with tls.crt, tls.key, and ca.crt
+        let tls_secret_name = format!("{}-tls", name);
+
         volumes.push(Volume {
             name: "tls-certs".to_string(),
             secret: Some(SecretVolumeSource {
-                secret_name: Some(cert_secret.clone()),
+                secret_name: Some(tls_secret_name),
                 default_mode: Some(0o640),
                 ..Default::default()
             }),
@@ -392,22 +393,9 @@ pub fn generate_pgbouncer_deployment(cluster: &PostgresCluster) -> Deployment {
         },
     ];
 
-    // Add client TLS env vars if TLS is enabled
-    if let Some(ref tls) = cluster.spec.tls
-        && tls.enabled
-        && tls.cert_secret.is_some()
-    {
-        let cert_file = tls
-            .certificate_file
-            .as_deref()
-            .unwrap_or("tls.crt")
-            .to_string();
-        let key_file = tls
-            .private_key_file
-            .as_deref()
-            .unwrap_or("tls.key")
-            .to_string();
-
+    // Add client TLS env vars if TLS is enabled (cert-manager integration)
+    if tls.enabled && tls.issuer_ref.is_some() {
+        // cert-manager always uses tls.crt, tls.key, and ca.crt
         env_vars.push(EnvVar {
             name: "PGBOUNCER_CLIENT_TLS_SSLMODE".to_string(),
             value: Some("require".to_string()),
@@ -415,12 +403,12 @@ pub fn generate_pgbouncer_deployment(cluster: &PostgresCluster) -> Deployment {
         });
         env_vars.push(EnvVar {
             name: "PGBOUNCER_CLIENT_TLS_CERT_FILE".to_string(),
-            value: Some(format!("/tls/{}", cert_file)),
+            value: Some("/tls/tls.crt".to_string()),
             ..Default::default()
         });
         env_vars.push(EnvVar {
             name: "PGBOUNCER_CLIENT_TLS_KEY_FILE".to_string(),
-            value: Some(format!("/tls/{}", key_file)),
+            value: Some("/tls/tls.key".to_string()),
             ..Default::default()
         });
     }
@@ -610,15 +598,16 @@ pub fn generate_pgbouncer_replica_deployment(cluster: &PostgresCluster) -> Deplo
         },
     ];
 
-    // Add TLS volumes if TLS is enabled
-    if let Some(ref tls) = cluster.spec.tls
-        && tls.enabled
-        && let Some(ref cert_secret) = tls.cert_secret
-    {
+    // Add TLS volumes if TLS is enabled (cert-manager integration)
+    let tls = &cluster.spec.tls;
+    if tls.enabled && tls.issuer_ref.is_some() {
+        // cert-manager creates a secret with tls.crt, tls.key, and ca.crt
+        let tls_secret_name = format!("{}-tls", name);
+
         volumes.push(Volume {
             name: "tls-certs".to_string(),
             secret: Some(SecretVolumeSource {
-                secret_name: Some(cert_secret.clone()),
+                secret_name: Some(tls_secret_name),
                 default_mode: Some(0o640),
                 ..Default::default()
             }),
@@ -706,22 +695,9 @@ pub fn generate_pgbouncer_replica_deployment(cluster: &PostgresCluster) -> Deplo
         },
     ];
 
-    // Add client TLS env vars if TLS is enabled
-    if let Some(ref tls) = cluster.spec.tls
-        && tls.enabled
-        && tls.cert_secret.is_some()
-    {
-        let cert_file = tls
-            .certificate_file
-            .as_deref()
-            .unwrap_or("tls.crt")
-            .to_string();
-        let key_file = tls
-            .private_key_file
-            .as_deref()
-            .unwrap_or("tls.key")
-            .to_string();
-
+    // Add client TLS env vars if TLS is enabled (cert-manager integration)
+    if tls.enabled && tls.issuer_ref.is_some() {
+        // cert-manager always uses tls.crt, tls.key, and ca.crt
         env_vars.push(EnvVar {
             name: "PGBOUNCER_CLIENT_TLS_SSLMODE".to_string(),
             value: Some("require".to_string()),
@@ -729,12 +705,12 @@ pub fn generate_pgbouncer_replica_deployment(cluster: &PostgresCluster) -> Deplo
         });
         env_vars.push(EnvVar {
             name: "PGBOUNCER_CLIENT_TLS_CERT_FILE".to_string(),
-            value: Some(format!("/tls/{}", cert_file)),
+            value: Some("/tls/tls.crt".to_string()),
             ..Default::default()
         });
         env_vars.push(EnvVar {
             name: "PGBOUNCER_CLIENT_TLS_KEY_FILE".to_string(),
-            value: Some(format!("/tls/{}", key_file)),
+            value: Some("/tls/tls.key".to_string()),
             ..Default::default()
         });
     }

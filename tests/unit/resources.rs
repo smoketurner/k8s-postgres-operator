@@ -4,7 +4,8 @@
 //! All PostgreSQL clusters use Patroni for consistent management.
 
 use postgres_operator::crd::{
-    PgBouncerSpec, PostgresCluster, PostgresClusterSpec, PostgresVersion, StorageSpec, TLSSpec,
+    IssuerKind, IssuerRef, PgBouncerSpec, PostgresCluster, PostgresClusterSpec, PostgresVersion,
+    StorageSpec, TLSSpec,
 };
 use postgres_operator::resources::{patroni, pdb, pgbouncer, secret, service};
 
@@ -27,9 +28,17 @@ fn create_test_cluster(name: &str, namespace: &str, replicas: i32) -> PostgresCl
             },
             resources: None,
             postgresql_params: Default::default(),
+            labels: Default::default(),
             backup: None,
             pgbouncer: None,
-            tls: None,
+            // TLS disabled by default for tests (no cert-manager in test environment)
+            tls: TLSSpec {
+                enabled: false,
+                issuer_ref: None,
+                additional_dns_names: vec![],
+                duration: None,
+                renew_before: None,
+            },
             metrics: None,
             service: None,
             restore: None,
@@ -38,35 +47,20 @@ fn create_test_cluster(name: &str, namespace: &str, replicas: i32) -> PostgresCl
     }
 }
 
-/// Helper to create a test cluster with TLS enabled
+/// Helper to create a test cluster with TLS enabled (cert-manager)
 fn create_test_cluster_with_tls(name: &str, namespace: &str, replicas: i32) -> PostgresCluster {
     let mut cluster = create_test_cluster(name, namespace, replicas);
-    cluster.spec.tls = Some(TLSSpec {
+    cluster.spec.tls = TLSSpec {
         enabled: true,
-        cert_secret: Some("my-tls-secret".to_string()),
-        ca_secret: None,
-        certificate_file: None,
-        private_key_file: None,
-        ca_file: None,
-    });
-    cluster
-}
-
-/// Helper to create a test cluster with TLS and custom filenames
-fn create_test_cluster_with_tls_custom_files(
-    name: &str,
-    namespace: &str,
-    replicas: i32,
-) -> PostgresCluster {
-    let mut cluster = create_test_cluster(name, namespace, replicas);
-    cluster.spec.tls = Some(TLSSpec {
-        enabled: true,
-        cert_secret: Some("my-tls-secret".to_string()),
-        ca_secret: Some("my-ca-secret".to_string()),
-        certificate_file: Some("server.crt".to_string()),
-        private_key_file: Some("server.key".to_string()),
-        ca_file: Some("root.crt".to_string()),
-    });
+        issuer_ref: Some(IssuerRef {
+            name: "letsencrypt-prod".to_string(),
+            kind: IssuerKind::ClusterIssuer,
+            group: "cert-manager.io".to_string(),
+        }),
+        additional_dns_names: vec![],
+        duration: None,
+        renew_before: None,
+    };
     cluster
 }
 
@@ -517,8 +511,9 @@ mod tls_statefulset_tests {
         let tls_volume = volumes.iter().find(|v| v.name == "tls-certs");
         assert!(tls_volume.is_some(), "TLS volume should exist");
 
+        // cert-manager creates a secret named {cluster-name}-tls
         let secret_source = tls_volume.unwrap().secret.as_ref().unwrap();
-        assert_eq!(secret_source.secret_name, Some("my-tls-secret".to_string()));
+        assert_eq!(secret_source.secret_name, Some("my-cluster-tls".to_string()));
     }
 
     #[test]
@@ -572,8 +567,9 @@ mod tls_statefulset_tests {
     }
 
     #[test]
-    fn test_tls_custom_filenames() {
-        let cluster = create_test_cluster_with_tls_custom_files("my-cluster", "default", 1);
+    fn test_tls_includes_ca_file() {
+        // With cert-manager, the CA is included in the same secret as tls.crt and tls.key
+        let cluster = create_test_cluster_with_tls("my-cluster", "default", 1);
         let sts = patroni::generate_patroni_statefulset(&cluster);
 
         let containers = &sts
@@ -587,35 +583,10 @@ mod tls_statefulset_tests {
             .containers;
         let env_vars = containers[0].env.as_ref().unwrap();
 
-        // Should use custom filenames
-        let cert_env = env_vars.iter().find(|e| e.name == "SSL_CERTIFICATE_FILE");
-        let key_env = env_vars.iter().find(|e| e.name == "SSL_PRIVATE_KEY_FILE");
+        // cert-manager always provides ca.crt in the same secret
         let ca_env = env_vars.iter().find(|e| e.name == "SSL_CA_FILE");
-
-        assert_eq!(cert_env.unwrap().value, Some("/tls/server.crt".to_string()));
-        assert_eq!(key_env.unwrap().value, Some("/tls/server.key".to_string()));
         assert!(ca_env.is_some(), "SSL_CA_FILE should be set");
-        // CA is in separate secret, so mounted at /tlsca
-        assert_eq!(ca_env.unwrap().value, Some("/tlsca/root.crt".to_string()));
-    }
-
-    #[test]
-    fn test_tls_separate_ca_secret_adds_second_volume() {
-        let cluster = create_test_cluster_with_tls_custom_files("my-cluster", "default", 1);
-        let sts = patroni::generate_patroni_statefulset(&cluster);
-
-        let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
-        let volumes = pod_spec.volumes.as_ref().unwrap();
-
-        // Should have both tls-certs and tls-ca volumes
-        let tls_volume = volumes.iter().find(|v| v.name == "tls-certs");
-        let ca_volume = volumes.iter().find(|v| v.name == "tls-ca");
-
-        assert!(tls_volume.is_some(), "TLS certs volume should exist");
-        assert!(ca_volume.is_some(), "TLS CA volume should exist");
-
-        let ca_secret = ca_volume.unwrap().secret.as_ref().unwrap();
-        assert_eq!(ca_secret.secret_name, Some("my-ca-secret".to_string()));
+        assert_eq!(ca_env.unwrap().value, Some("/tls/ca.crt".to_string()));
     }
 }
 
@@ -905,14 +876,17 @@ mod tls_pgbouncer_integration_tests {
         replicas: i32,
     ) -> PostgresCluster {
         let mut cluster = create_test_cluster_with_pgbouncer(name, namespace, replicas);
-        cluster.spec.tls = Some(TLSSpec {
+        cluster.spec.tls = TLSSpec {
             enabled: true,
-            cert_secret: Some("my-tls-secret".to_string()),
-            ca_secret: None,
-            certificate_file: None,
-            private_key_file: None,
-            ca_file: None,
-        });
+            issuer_ref: Some(IssuerRef {
+                name: "letsencrypt-prod".to_string(),
+                kind: IssuerKind::ClusterIssuer,
+                group: "cert-manager.io".to_string(),
+            }),
+            additional_dns_names: vec![],
+            duration: None,
+            renew_before: None,
+        };
         cluster
     }
 
@@ -1275,15 +1249,18 @@ mod production_configuration_tests {
             restart_on_resize: None,
         });
 
-        // TLS
-        cluster.spec.tls = Some(TLSSpec {
+        // TLS (cert-manager integration)
+        cluster.spec.tls = TLSSpec {
             enabled: true,
-            cert_secret: Some("production-db-tls".to_string()),
-            ca_secret: Some("production-db-ca".to_string()),
-            certificate_file: None,
-            private_key_file: None,
-            ca_file: None,
-        });
+            issuer_ref: Some(IssuerRef {
+                name: "production-issuer".to_string(),
+                kind: IssuerKind::ClusterIssuer,
+                group: "cert-manager.io".to_string(),
+            }),
+            additional_dns_names: vec!["db.example.com".to_string()],
+            duration: Some("2160h".to_string()),
+            renew_before: Some("360h".to_string()),
+        };
 
         // PgBouncer
         cluster.spec.pgbouncer = Some(PgBouncerSpec {
@@ -1331,16 +1308,19 @@ mod production_configuration_tests {
         let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
         let volumes = pod_spec.volumes.as_ref().unwrap();
 
+        // With cert-manager, there's a single TLS secret containing cert, key, and CA
         let tls_volume = volumes.iter().find(|v| v.name == "tls-certs");
-        let ca_volume = volumes.iter().find(|v| v.name == "tls-ca");
 
         assert!(
             tls_volume.is_some(),
             "Production cluster should have TLS cert volume"
         );
-        assert!(
-            ca_volume.is_some(),
-            "Production cluster should have CA volume"
+
+        // Verify the secret name follows cert-manager naming convention
+        let secret_source = tls_volume.unwrap().secret.as_ref().unwrap();
+        assert_eq!(
+            secret_source.secret_name,
+            Some("production-db-tls".to_string())
         );
     }
 
@@ -1397,7 +1377,7 @@ mod resource_panic_prevention_tests {
         let mut cluster = create_test_cluster("my-cluster", "default", 1);
         cluster.spec.resources = None;
         cluster.spec.postgresql_params = Default::default();
-        cluster.spec.tls = None;
+        cluster.spec.tls = TLSSpec::default(); // TLS with default values (enabled=true, no issuer)
         cluster.spec.pgbouncer = None;
         cluster.spec.metrics = None;
         cluster.spec.service = None;

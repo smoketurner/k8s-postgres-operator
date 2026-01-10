@@ -5,7 +5,7 @@ use postgres_operator::controller::status::{
 };
 use postgres_operator::crd::{
     ClusterPhase, Condition, PostgresCluster, PostgresClusterSpec, PostgresClusterStatus,
-    PostgresVersion, StorageSpec,
+    PostgresVersion, StorageSpec, TLSSpec,
 };
 
 /// Helper to create a test cluster with optional status
@@ -31,9 +31,10 @@ fn create_test_cluster_with_status(
             },
             resources: None,
             postgresql_params: Default::default(),
+            labels: Default::default(),
             backup: None,
             pgbouncer: None,
-            tls: None,
+            tls: TLSSpec::default(),
             metrics: None,
             service: None,
             restore: None,

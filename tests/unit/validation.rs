@@ -4,7 +4,7 @@ use postgres_operator::controller::validation::{
     MAX_REPLICAS, MIN_REPLICAS, validate_spec, validate_spec_change, validate_version_upgrade,
 };
 use postgres_operator::crd::{
-    PostgresCluster, PostgresClusterSpec, PostgresVersion, StorageSpec,
+    PostgresCluster, PostgresClusterSpec, PostgresVersion, StorageSpec, TLSSpec,
 };
 
 /// Helper to create a test cluster
@@ -31,9 +31,10 @@ fn create_test_cluster(
             },
             resources: None,
             postgresql_params: Default::default(),
+            labels: Default::default(),
             backup: None,
             pgbouncer: None,
-            tls: None,
+            tls: TLSSpec::default(),
             metrics: None,
             service: None,
             restore: None,
@@ -389,9 +390,12 @@ mod panic_prevention_tests {
     }
 
     #[test]
-    fn test_nil_tls_accepted() {
+    fn test_default_tls_accepted() {
+        // TLS with default values (enabled=true, no issuer) should be accepted
+        // The reconciler will validate issuer configuration separately
         let cluster = create_test_cluster("test", "default", 1, PostgresVersion::V16);
-        assert!(cluster.spec.tls.is_none());
+        assert!(cluster.spec.tls.enabled);
+        assert!(cluster.spec.tls.issuer_ref.is_none());
         assert!(validate_spec(&cluster).is_ok());
     }
 

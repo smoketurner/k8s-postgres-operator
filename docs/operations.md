@@ -6,6 +6,20 @@ This guide covers day-2 operations for managing PostgreSQL clusters with the ope
 
 ### Creating a Cluster
 
+TLS is enabled by default. First, ensure you have a cert-manager issuer:
+
+```yaml
+# Create a self-signed ClusterIssuer (for development)
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-issuer
+spec:
+  selfSigned: {}
+```
+
+Then create your cluster:
+
 ```yaml
 apiVersion: postgres-operator.smoketurner.com/v1alpha1
 kind: PostgresCluster
@@ -18,6 +32,10 @@ spec:
   storage:
     size: 100Gi
     storageClass: fast-ssd
+  tls:
+    issuerRef:
+      name: selfsigned-issuer
+      kind: ClusterIssuer
 ```
 
 ```bash
@@ -179,7 +197,7 @@ spec:
 
 ### Manual Backup
 
-If backup is configured with a destination:
+If backup is configured with a destination (encryption is required):
 
 ```yaml
 spec:
@@ -192,6 +210,16 @@ spec:
       bucket: my-backups
       region: us-east-1
       credentialsSecret: aws-creds
+    encryption:
+      method: aes256
+      keySecret: backup-encryption-key
+```
+
+Create the encryption key secret:
+
+```bash
+kubectl create secret generic backup-encryption-key \
+  --from-literal=WALG_LIBSODIUM_KEY=$(openssl rand -hex 32)
 ```
 
 ### Point-in-Time Recovery
@@ -482,22 +510,53 @@ kubectl create secret generic my-cluster-credentials \
 
 **Note**: Rotating credentials requires application reconnection.
 
-### Enable TLS
+### TLS Configuration
+
+TLS is **enabled by default**. The operator integrates with cert-manager for automatic certificate provisioning and renewal.
+
+**Using a ClusterIssuer:**
 
 ```yaml
 spec:
   tls:
-    enabled: true
-    certSecret: my-cluster-tls  # Pre-created TLS secret
+    issuerRef:
+      name: letsencrypt-prod
+      kind: ClusterIssuer
 ```
 
-Create the TLS secret:
+**Using a namespace-scoped Issuer:**
 
-```bash
-kubectl create secret tls my-cluster-tls \
-  --cert=server.crt \
-  --key=server.key
+```yaml
+spec:
+  tls:
+    issuerRef:
+      name: my-issuer
+      kind: Issuer
 ```
+
+**With custom certificate settings:**
+
+```yaml
+spec:
+  tls:
+    issuerRef:
+      name: letsencrypt-prod
+      kind: ClusterIssuer
+    additionalDnsNames:
+      - postgres.example.com
+    duration: "2160h"    # 90 days
+    renewBefore: "360h"  # 15 days before expiry
+```
+
+**Disabling TLS (not recommended for production):**
+
+```yaml
+spec:
+  tls:
+    enabled: false
+```
+
+The operator creates a Certificate resource that cert-manager uses to provision a TLS secret. The certificate includes DNS names for all services (primary, replicas, headless).
 
 ### Network Policies
 

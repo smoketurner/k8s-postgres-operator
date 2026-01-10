@@ -13,8 +13,9 @@ A Kubernetes operator written in Rust that manages PostgreSQL clusters using Pat
 | Rust | 1.92+ | Edition 2024, MSRV enforced in `Cargo.toml` |
 | Kubernetes | 1.35+ | Required for in-place resize, pod generation tracking |
 | kube-rs | 2.x | With k8s-openapi (currently v1_34, upgrade to v1_35 when available) |
+| cert-manager | 1.0+ | Required for TLS certificate management |
 | Patroni | 3.0+ | Used via Spilo image |
-| PostgreSQL | 14, 15, 16, 17 | Supported versions in Spilo |
+| PostgreSQL | 15, 16, 17 | Supported versions in Spilo |
 
 ## Coding Standards
 
@@ -85,10 +86,15 @@ Initializes logging, creates Kubernetes client, builds shared Context, and runs 
 
 ### CRD (`src/crd/postgres_cluster.rs`)
 `PostgresCluster` custom resource with:
-- **Spec**: `version`, `replicas`, `storage`, `resources`, `postgresql_params`, `backup`, `pgbouncer`, `tls`, `metrics`
+- **Spec**: `version`, `replicas`, `storage`, `resources`, `postgresql_params`, `labels`, `backup`, `pgbouncer`, `tls`, `metrics`, `service`, `restore`
 - **Status**: `phase`, `readyReplicas`, `primaryPod`, `replicaPods`, `conditions`, retry tracking, `observed_generation`
 
 API version: `postgres-operator.smoketurner.com/v1alpha1`
+
+Key design decisions:
+- **TLS enabled by default**: Requires cert-manager issuer reference
+- **Backup encryption required**: When backups are configured, encryption must be specified
+- **User labels support**: `spec.labels` allows cost allocation labels that are merged with standard labels
 
 ### Controller (`src/controller/`)
 - `reconciler.rs`: Main reconciliation loop - handles finalizers, spec change detection, resource application, state transitions
@@ -104,8 +110,9 @@ Each module generates Kubernetes resources:
 - `secret.rs`: Credentials with generated passwords
 - `pdb.rs`: PodDisruptionBudget
 - `pgbouncer.rs`: PgBouncer Deployment for connection pooling
-- `backup.rs`: WAL-G backup configuration
-- `common.rs`: Standard labels, owner references
+- `backup.rs`: WAL-G backup configuration (encryption required)
+- `certificate.rs`: cert-manager Certificate CR for TLS
+- `common.rs`: Standard labels, owner references, user label merging
 
 ### Key Patterns
 - **Finalizer pattern** for graceful deletion
@@ -168,8 +175,9 @@ The operator leverages Kubernetes 1.35+ features for enhanced functionality:
 ### WAL-G Backup Integration
 - Configured via `spec.backup` in PostgresCluster CRD
 - Supports S3, GCS, Azure Blob storage backends
+- **Encryption required**: Must specify `encryption.keySecret` when backups are configured
 - Environment variables injected into Spilo container for WAL-G configuration
-- See `docs/BACKUP_AND_RESTORE.md` for detailed configuration
+- See `docs/backup-restore.md` for detailed configuration
 
 ## Operator Design Principles
 
@@ -198,9 +206,11 @@ The operator leverages Kubernetes 1.35+ features for enhanced functionality:
 - Only transition to Failed state when manual intervention is required
 
 ### Safe Defaults
-- Secure by default (TLS, RBAC, network policies in samples)
-- Require explicit opt-in for less secure options
-- Validate configurations before applying
+- **TLS enabled by default**: Requires cert-manager issuer reference for certificate management
+- **Backup encryption required**: When backups are configured, an encryption key secret must be specified
+- RBAC and network policies provided in samples
+- Require explicit opt-out for less secure options (`tls.enabled: false`)
+- Validate configurations before applying (e.g., encryption key secret exists)
 
 ## Documentation
 
@@ -209,4 +219,4 @@ For detailed documentation, see:
 - `docs/development.md` - Build, test, debug instructions
 - `docs/operations.md` - Day-2 operations, monitoring, troubleshooting
 - `docs/api-reference.md` - CRD field reference
-- `docs/BACKUP_AND_RESTORE.md` - WAL-G backup configuration
+- `docs/backup-restore.md` - WAL-G backup configuration (encryption required)

@@ -111,6 +111,14 @@ spec:
                   additionalProperties:
                     type: string
                   description: Custom PostgreSQL configuration parameters
+                labels:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: |
+                    Custom labels to apply to all resources created for this cluster.
+                    Use for cost allocation, team ownership, and organizational tracking.
+                    Common labels: team, cost-center, project, environment
                 backup:
                   type: object
                   description: |
@@ -214,11 +222,13 @@ spec:
                           minimum: 0
                     encryption:
                       type: object
-                      description: Backup encryption configuration
+                      description: |
+                        Backup encryption configuration (REQUIRED for security).
+                        All backups must be encrypted at rest to protect sensitive data.
+                        The presence of this section enables encryption.
+                      required:
+                        - keySecret
                       properties:
-                        enabled:
-                          type: boolean
-                          description: Enable backup encryption
                         method:
                           type: string
                           description: Encryption method
@@ -340,26 +350,45 @@ spec:
                       default: false
                 tls:
                   type: object
-                  description: TLS configuration for encrypted connections
+                  description: |
+                    TLS configuration for encrypted connections.
+                    TLS is enabled by default for security. Requires cert-manager to be installed.
                   properties:
                     enabled:
                       type: boolean
-                      description: Enable TLS for PostgreSQL connections (uses self-signed certs if certSecret not specified)
-                    certSecret:
+                      description: Enable TLS for PostgreSQL connections (default true)
+                      default: true
+                    issuerRef:
+                      type: object
+                      description: Reference to a cert-manager Issuer or ClusterIssuer for certificate provisioning
+                      properties:
+                        name:
+                          type: string
+                          description: Name of the Issuer or ClusterIssuer
+                        kind:
+                          type: string
+                          description: Kind of issuer (Issuer or ClusterIssuer)
+                          enum:
+                            - Issuer
+                            - ClusterIssuer
+                          default: ClusterIssuer
+                        group:
+                          type: string
+                          description: API group of the issuer (default cert-manager.io)
+                          default: cert-manager.io
+                      required:
+                        - name
+                    additionalDnsNames:
+                      type: array
+                      description: Additional DNS names to include in the certificate
+                      items:
+                        type: string
+                    duration:
                       type: string
-                      description: Name of secret containing TLS certificate and key (keys tls.crt, tls.key)
-                    caSecret:
+                      description: Certificate validity duration (e.g., "2160h" for 90 days)
+                    renewBefore:
                       type: string
-                      description: Name of secret containing CA certificate for client verification
-                    certificateFile:
-                      type: string
-                      description: Certificate filename in the secret (default tls.crt)
-                    privateKeyFile:
-                      type: string
-                      description: Private key filename in the secret (default tls.key)
-                    caFile:
-                      type: string
-                      description: CA certificate filename in the secret (default ca.crt)
+                      description: Time before expiry to renew certificate (e.g., "360h" for 15 days)
                 metrics:
                   type: object
                   properties:

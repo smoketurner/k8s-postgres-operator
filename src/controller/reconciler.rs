@@ -31,7 +31,7 @@ use crate::controller::state_machine::{
 };
 use crate::controller::status::{StatusManager, spec_changed};
 use crate::crd::{ClusterPhase, PostgresCluster};
-use crate::resources::{backup, patroni, pdb, pgbouncer, secret, service};
+use crate::resources::{backup, certificate, patroni, pdb, pgbouncer, secret, service};
 
 /// Finalizer name for cleanup
 pub const FINALIZER: &str = "postgres-operator.smoketurner.com/finalizer";
@@ -468,72 +468,62 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
         return Ok(Action::await_change());
     }
 
-    // Validate TLS configuration if enabled
-    if let Some(ref tls) = cluster.spec.tls
-        && tls.enabled
-    {
-        // If TLS is enabled but no cert_secret is specified, that's a warning
-        // (Spilo will generate self-signed certs)
-        if tls.cert_secret.is_none() {
-            info!(
-                "TLS enabled for {} but no cert_secret specified - Spilo will use self-signed certificates",
+    // Validate TLS configuration
+    // TLS is enabled by default for security
+    let tls = &cluster.spec.tls;
+    if tls.enabled {
+        // TLS enabled requires a cert-manager issuer reference
+        if tls.issuer_ref.is_none() {
+            warn!(
+                "TLS enabled for {} but no issuerRef specified - cert-manager issuer is required",
                 name
             );
-        } else if let Some(ref cert_secret_name) = tls.cert_secret {
-            // Validate that the cert secret exists
-            let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
-            if secrets_api.get_opt(cert_secret_name).await?.is_none() {
-                warn!(
-                    "TLS cert_secret '{}' not found for cluster {}",
-                    cert_secret_name, name
-                );
-                status_manager
-                    .set_failed(
-                        "TLSSecretNotFound",
-                        &format!("TLS certificate secret '{}' not found", cert_secret_name),
-                    )
-                    .await?;
-                ctx.publish_warning_event(
-                    cluster,
-                    "TLSSecretNotFound",
-                    "Validation",
-                    Some(format!(
-                        "TLS certificate secret '{}' not found",
-                        cert_secret_name
-                    )),
+            status_manager
+                .set_failed(
+                    "TLSIssuerNotConfigured",
+                    "TLS is enabled but no cert-manager issuerRef is configured. \
+                     Specify spec.tls.issuerRef with a valid Issuer or ClusterIssuer, \
+                     or set spec.tls.enabled: false to disable TLS.",
                 )
-                .await;
-                return Ok(Action::requeue(Duration::from_secs(30)));
-            }
+                .await?;
+            ctx.publish_warning_event(
+                cluster,
+                "TLSIssuerNotConfigured",
+                "Validation",
+                Some(
+                    "TLS is enabled but no cert-manager issuerRef is configured. \
+                     Specify spec.tls.issuerRef or disable TLS."
+                        .to_string(),
+                ),
+            )
+            .await;
+            // Don't requeue - requires user intervention to configure issuer
+            return Ok(Action::await_change());
+        } else {
+            let issuer = tls.issuer_ref.as_ref().unwrap();
+            info!(
+                "TLS enabled for {} using cert-manager {} '{}'",
+                name, issuer.kind, issuer.name
+            );
         }
-
-        // Validate CA secret if specified
-        if let Some(ref ca_secret_name) = tls.ca_secret {
-            let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
-            if secrets_api.get_opt(ca_secret_name).await?.is_none() {
-                warn!(
-                    "TLS ca_secret '{}' not found for cluster {}",
-                    ca_secret_name, name
-                );
-                status_manager
-                    .set_failed(
-                        "TLSCASecretNotFound",
-                        &format!("TLS CA certificate secret '{}' not found", ca_secret_name),
-                    )
-                    .await?;
-                ctx.publish_warning_event(
-                    cluster,
-                    "TLSCASecretNotFound",
-                    "Validation",
-                    Some(format!(
-                        "TLS CA certificate secret '{}' not found",
-                        ca_secret_name
-                    )),
-                )
-                .await;
-                return Ok(Action::requeue(Duration::from_secs(30)));
-            }
+        // Apply cert-manager Certificate resource
+        if let Some(cert) = certificate::generate_certificate(cluster) {
+            apply_certificate(ctx, ns, &cert).await?;
+            debug!("Applied cert-manager Certificate for cluster {}", name);
         }
+    } else {
+        // TLS explicitly disabled - warn about security implications
+        warn!(
+            "TLS is disabled for cluster {} - connections will be unencrypted",
+            name
+        );
+        ctx.publish_warning_event(
+            cluster,
+            "TLSDisabled",
+            "Security",
+            Some("TLS is disabled - PostgreSQL connections will be unencrypted".to_string()),
+        )
+        .await;
     }
 
     // Validate backup configuration if enabled
@@ -573,54 +563,61 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
             return Ok(Action::requeue(Duration::from_secs(30)));
         }
 
-        // Validate encryption key secret if encryption is enabled
-        if let Some(ref encryption) = backup_spec.encryption
-            && encryption.enabled
-        {
-            if let Some(ref key_secret_name) = encryption.key_secret {
-                if secrets_api.get_opt(key_secret_name).await?.is_none() {
-                    warn!(
-                        "Backup encryption key secret '{}' not found for cluster {}",
-                        key_secret_name, name
-                    );
-                    status_manager
-                        .set_failed(
-                            "EncryptionKeyNotFound",
-                            &format!(
-                                "Backup encryption key secret '{}' not found",
-                                key_secret_name
-                            ),
-                        )
-                        .await?;
-                    ctx.publish_warning_event(
-                        cluster,
-                        "EncryptionKeyNotFound",
-                        "Validation",
-                        Some(format!(
-                            "Backup encryption key secret '{}' not found",
-                            key_secret_name
-                        )),
-                    )
-                    .await;
-                    return Ok(Action::requeue(Duration::from_secs(30)));
-                }
-            } else {
-                // Encryption enabled but no key secret specified
+        // Require encryption for backups (security by design)
+        // Backups contain sensitive data and must be encrypted at rest
+        // The encryption section must be present - its presence enables encryption
+        if backup_spec.encryption.is_none() {
+            warn!(
+                "Backup configured for cluster {} but encryption is not configured - backups must be encrypted",
+                name
+            );
+            status_manager
+                .set_failed(
+                    "BackupEncryptionRequired",
+                    "Backup encryption is required. Configure spec.backup.encryption with \
+                     a keySecret to protect backup data at rest.",
+                )
+                .await?;
+            ctx.publish_warning_event(
+                cluster,
+                "BackupEncryptionRequired",
+                "Validation",
+                Some(
+                    "Backup encryption is required for security. \
+                     Add spec.backup.encryption.keySecret with your encryption key secret name."
+                        .to_string(),
+                ),
+            )
+            .await;
+            // Don't requeue - requires user intervention to configure encryption
+            return Ok(Action::await_change());
+        }
+
+        // Validate encryption key secret exists
+        if let Some(ref encryption) = backup_spec.encryption {
+            let key_secret_name = &encryption.key_secret;
+            if secrets_api.get_opt(key_secret_name).await?.is_none() {
                 warn!(
-                    "Backup encryption enabled but no key secret specified for cluster {}",
-                    name
+                    "Backup encryption key secret '{}' not found for cluster {}",
+                    key_secret_name, name
                 );
                 status_manager
                     .set_failed(
-                        "EncryptionKeyNotSpecified",
-                        "Backup encryption is enabled but no key secret is specified",
+                        "EncryptionKeyNotFound",
+                        &format!(
+                            "Backup encryption key secret '{}' not found",
+                            key_secret_name
+                        ),
                     )
                     .await?;
                 ctx.publish_warning_event(
                     cluster,
-                    "EncryptionKeyNotSpecified",
+                    "EncryptionKeyNotFound",
                     "Validation",
-                    Some("Backup encryption is enabled but no key secret is specified".to_string()),
+                    Some(format!(
+                        "Backup encryption key secret '{}' not found",
+                        key_secret_name
+                    )),
                 )
                 .await;
                 return Ok(Action::requeue(Duration::from_secs(30)));
@@ -1045,6 +1042,42 @@ where
 
     api.patch(&name, &params, &patch).await?;
     debug!("Applied resource: {}", name);
+
+    Ok(())
+}
+
+/// Apply a cert-manager Certificate resource using server-side apply
+///
+/// This uses the dynamic API since cert-manager Certificate is a CRD,
+/// not a built-in Kubernetes resource.
+async fn apply_certificate(
+    ctx: &Context,
+    ns: &str,
+    cert: &certificate::Certificate,
+) -> Result<()> {
+    use kube::api::{ApiResource, DynamicObject, GroupVersionKind};
+
+    let name = cert
+        .metadata
+        .name
+        .as_ref()
+        .ok_or(Error::MissingObjectKey("Certificate.metadata.name"))?;
+
+    // Define the cert-manager Certificate resource type
+    let gvk = GroupVersionKind::gvk("cert-manager.io", "v1", "Certificate");
+    let ar = ApiResource::from_gvk(&gvk);
+
+    // Convert our Certificate struct to a DynamicObject
+    let cert_json = serde_json::to_value(cert)?;
+    let mut dynamic_obj = DynamicObject::new(name, &ar);
+    dynamic_obj.metadata = cert.metadata.clone();
+    dynamic_obj.data = cert_json;
+
+    let api: Api<DynamicObject> = Api::namespaced_with(ctx.client.clone(), ns, &ar);
+    let params = PatchParams::apply("postgres-operator").force();
+
+    api.patch(name, &params, &Patch::Apply(&dynamic_obj)).await?;
+    debug!("Applied cert-manager Certificate: {}", name);
 
     Ok(())
 }

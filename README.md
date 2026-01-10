@@ -9,7 +9,7 @@ A Kubernetes operator for managing PostgreSQL clusters with high availability us
 - **Automatic Scaling**: Scale replicas up or down with automatic replication setup
 - **In-Place Resource Resizing**: CPU/memory changes without pod restarts (Kubernetes 1.35+)
 - **Connection Pooling**: Optional PgBouncer sidecar for connection pooling
-- **TLS Support**: Encrypted connections with certificate management
+- **TLS by Default**: Encrypted connections with automatic cert-manager integration
 - **Cloud Backups**: Continuous WAL archiving and scheduled base backups to S3, GCS, or Azure with point-in-time recovery (PITR)
 - **Metrics**: Prometheus-compatible metrics endpoint
 - **Zero-Downtime Updates**: Rolling updates with PodDisruptionBudgets
@@ -18,6 +18,7 @@ A Kubernetes operator for managing PostgreSQL clusters with high availability us
 
 - Kubernetes 1.35+ (required for in-place resource resizing, pod generation tracking)
 - kubectl configured to access your cluster
+- [cert-manager](https://cert-manager.io/) v1.0+ (required for TLS certificate management)
 - Rust 1.92+ (for building from source)
 
 ## Quick Start
@@ -30,6 +31,20 @@ make install
 
 # Deploy the operator
 make deploy
+```
+
+### Set Up cert-manager
+
+TLS is enabled by default. First, ensure you have a ClusterIssuer:
+
+```yaml
+# Create a self-signed issuer for development
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-issuer
+spec:
+  selfSigned: {}
 ```
 
 ### Create a PostgreSQL Cluster
@@ -45,6 +60,10 @@ spec:
   storage:
     size: 10Gi
     storageClass: standard
+  tls:
+    issuerRef:
+      name: selfsigned-issuer
+      kind: ClusterIssuer
 ```
 
 ```bash
@@ -70,17 +89,19 @@ kubectl describe pgc my-postgres
 
 | Field | Type | Description | Default |
 |-------|------|-------------|---------|
-| `version` | string | PostgreSQL version (e.g., "15", "16") | Required |
+| `version` | string | PostgreSQL version (e.g., "15", "16", "17") | Required |
 | `replicas` | integer | Number of cluster members (1-100) | 1 |
 | `storage.size` | string | PVC size (e.g., "10Gi") | Required |
 | `storage.storageClass` | string | Kubernetes StorageClass | cluster default |
 | `resources` | object | CPU/memory requests and limits | none |
 | `postgresqlParams` | map | Custom PostgreSQL parameters | none |
+| `labels` | map | Custom labels for cost allocation (team, cost-center, etc.) | none |
 | `service.type` | string | Service type (ClusterIP, NodePort, LoadBalancer) | ClusterIP |
-| `tls.enabled` | boolean | Enable TLS connections | false |
+| `tls.enabled` | boolean | Enable TLS connections | true |
+| `tls.issuerRef` | object | cert-manager Issuer/ClusterIssuer reference | Required when TLS enabled |
 | `pgbouncer.enabled` | boolean | Enable PgBouncer sidecar | false |
 | `metrics.enabled` | boolean | Enable metrics exporter | false |
-| `backup` | object | Backup configuration | none |
+| `backup` | object | Backup configuration (encryption required) | none |
 
 ### Kubernetes 1.35+ Features
 
@@ -122,6 +143,10 @@ spec:
     limits:
       cpu: "4"
       memory: 8Gi
+  labels:
+    team: platform
+    cost-center: eng-001
+    environment: production
   postgresqlParams:
     max_connections: "200"
     shared_buffers: "1GB"
@@ -131,8 +156,9 @@ spec:
     loadBalancerSourceRanges:
       - 10.0.0.0/8
   tls:
-    enabled: true
-    certSecret: postgres-tls
+    issuerRef:
+      name: letsencrypt-prod
+      kind: ClusterIssuer
   pgbouncer:
     enabled: true
     poolMode: transaction
@@ -146,6 +172,9 @@ spec:
       bucket: my-backups
       region: us-east-1
       credentialsSecret: aws-credentials
+    encryption:
+      method: aes256
+      keySecret: backup-encryption-key
 ```
 
 ## Backup and Recovery
@@ -169,6 +198,10 @@ The operator integrates with WAL-G for continuous backups with point-in-time rec
 kubectl create secret generic aws-backup-credentials \
   --from-literal=AWS_ACCESS_KEY_ID=<your-key> \
   --from-literal=AWS_SECRET_ACCESS_KEY=<your-secret>
+
+# Create encryption key secret (32-byte key for AES-256)
+kubectl create secret generic backup-encryption-key \
+  --from-literal=WALG_LIBSODIUM_KEY=$(openssl rand -hex 32)
 ```
 
 ```yaml
@@ -181,7 +214,10 @@ spec:
   replicas: 3
   storage:
     size: 100Gi
-
+  tls:
+    issuerRef:
+      name: selfsigned-issuer
+      kind: ClusterIssuer
   backup:
     schedule: "0 2 * * *"  # Daily at 2 AM
     retention:
@@ -192,6 +228,9 @@ spec:
       region: us-east-1
       credentialsSecret: aws-backup-credentials
     compression: zstd
+    encryption:
+      method: aes256
+      keySecret: backup-encryption-key
     backupFromReplica: true
 ```
 

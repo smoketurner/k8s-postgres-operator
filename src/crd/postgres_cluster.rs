@@ -96,6 +96,20 @@ pub struct PostgresClusterSpec {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub postgresql_params: BTreeMap<String, String>,
 
+    /// Custom labels to apply to all resources created for this cluster.
+    ///
+    /// Use for cost allocation, team ownership, and organizational tracking.
+    /// Common labels include:
+    /// - `team`: Team that owns this cluster (e.g., "platform", "payments")
+    /// - `cost-center`: Cost center for billing (e.g., "eng-001")
+    /// - `project`: Project identifier (e.g., "checkout-service")
+    /// - `environment`: Environment type (e.g., "production", "staging")
+    ///
+    /// These labels are propagated to StatefulSets, Services, ConfigMaps,
+    /// Secrets, and other managed resources.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+
     /// Backup configuration (Phase 0.2)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<BackupSpec>,
@@ -104,9 +118,10 @@ pub struct PostgresClusterSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pgbouncer: Option<PgBouncerSpec>,
 
-    /// TLS configuration (Phase 0.3)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tls: Option<TLSSpec>,
+    /// TLS configuration for PostgreSQL connections.
+    /// TLS is enabled by default for security. Set `enabled: false` to disable.
+    #[serde(default = "default_tls")]
+    pub tls: TLSSpec,
 
     /// Metrics configuration (Phase 0.3)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -126,6 +141,16 @@ pub struct PostgresClusterSpec {
 
 fn default_replicas() -> i32 {
     1
+}
+
+fn default_tls() -> TLSSpec {
+    TLSSpec {
+        enabled: true,
+        issuer_ref: None,
+        additional_dns_names: vec![],
+        duration: None,
+        renew_before: None,
+    }
 }
 
 /// Restore configuration for bootstrapping a cluster from an existing backup.
@@ -398,22 +423,24 @@ fn default_wal_archiving_enabled() -> bool {
     true
 }
 
-/// Encryption configuration for backups
+/// Encryption configuration for backups.
+///
+/// Encryption is REQUIRED when backups are configured. The presence of this
+/// section enables encryption - there is no separate "enabled" flag.
+///
+/// All backups must be encrypted at rest to protect sensitive data.
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EncryptionSpec {
-    /// Enable backup encryption
-    pub enabled: bool,
+    /// Encryption method to use.
+    /// Default: aes256 (AES-256-CTR using libsodium)
+    #[serde(default)]
+    pub method: EncryptionMethod,
 
-    /// Encryption method to use
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub method: Option<EncryptionMethod>,
-
-    /// Secret containing encryption key.
+    /// Secret containing encryption key (REQUIRED).
     /// For AES: expects a key named 'encryption-key' with the raw key bytes.
     /// For PGP: expects a key named 'pgp-key' with the PGP public key.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub key_secret: Option<String>,
+    pub key_secret: String,
 }
 
 /// Encryption method for backups
@@ -708,32 +735,114 @@ fn default_pool_size() -> i32 {
     20
 }
 
-/// TLS configuration for PostgreSQL connections
+/// TLS configuration for PostgreSQL connections.
+/// TLS is enabled by default for security-by-design.
+/// Requires cert-manager to be installed in the cluster.
+///
+/// The operator creates a Certificate resource which cert-manager uses to
+/// generate and automatically rotate TLS certificates.
+///
+/// # Example
+/// ```yaml
+/// tls:
+///   enabled: true  # default
+///   issuerRef:
+///     name: letsencrypt-prod
+///     kind: ClusterIssuer
+/// ```
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TLSSpec {
-    /// Enable TLS for PostgreSQL connections
+    /// Enable TLS for PostgreSQL connections.
+    /// Default: true (secure by default)
+    #[serde(default = "default_tls_enabled")]
     pub enabled: bool,
 
-    /// Secret containing TLS certificate and key (keys: tls.crt, tls.key)
+    /// Reference to a cert-manager Issuer or ClusterIssuer.
+    /// Required when TLS is enabled.
+    /// The operator creates a Certificate resource referencing this issuer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cert_secret: Option<String>,
+    pub issuer_ref: Option<IssuerRef>,
 
-    /// Secret containing CA certificate for client verification (key: ca.crt)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ca_secret: Option<String>,
+    /// Additional DNS names to include in the certificate.
+    /// The operator automatically includes:
+    /// - {cluster-name}-primary.{namespace}.svc
+    /// - {cluster-name}-repl.{namespace}.svc
+    /// - {cluster-name}.{namespace}.svc
+    /// - *.{cluster-name}.{namespace}.svc.cluster.local
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_dns_names: Vec<String>,
 
-    /// Certificate filename in the secret (default: tls.crt)
+    /// Certificate duration (e.g., "2160h" for 90 days).
+    /// Default: 2160h (90 days)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub certificate_file: Option<String>,
+    pub duration: Option<String>,
 
-    /// Private key filename in the secret (default: tls.key)
+    /// Certificate renewal time before expiry (e.g., "360h" for 15 days).
+    /// Default: 360h (15 days before expiry)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub private_key_file: Option<String>,
+    pub renew_before: Option<String>,
+}
 
-    /// CA certificate filename in the secret (default: ca.crt)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ca_file: Option<String>,
+/// Reference to a cert-manager Issuer or ClusterIssuer
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct IssuerRef {
+    /// Name of the Issuer or ClusterIssuer
+    pub name: String,
+
+    /// Kind of the issuer: Issuer or ClusterIssuer
+    /// Default: ClusterIssuer
+    #[serde(default = "default_issuer_kind")]
+    pub kind: IssuerKind,
+
+    /// Group of the issuer resource.
+    /// Default: cert-manager.io
+    #[serde(default = "default_issuer_group")]
+    pub group: String,
+}
+
+/// Kind of cert-manager issuer
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+pub enum IssuerKind {
+    /// Namespace-scoped Issuer
+    Issuer,
+    /// Cluster-scoped ClusterIssuer
+    #[default]
+    ClusterIssuer,
+}
+
+impl std::fmt::Display for IssuerKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IssuerKind::Issuer => write!(f, "Issuer"),
+            IssuerKind::ClusterIssuer => write!(f, "ClusterIssuer"),
+        }
+    }
+}
+
+fn default_tls_enabled() -> bool {
+    true
+}
+
+fn default_issuer_kind() -> IssuerKind {
+    IssuerKind::ClusterIssuer
+}
+
+fn default_issuer_group() -> String {
+    "cert-manager.io".to_string()
+}
+
+impl Default for TLSSpec {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            issuer_ref: None,
+            additional_dns_names: vec![],
+            duration: None,
+            renew_before: None,
+        }
+    }
 }
 
 /// Metrics configuration (Phase 0.3)

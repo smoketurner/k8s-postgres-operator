@@ -903,9 +903,11 @@ async fn test_enable_tls_on_running_cluster() {
 
     // Verify TLS is now in spec
     let cluster = api.get("test-tls-en").await.expect("get");
-    let tls = cluster.spec.tls.as_ref();
-    assert!(tls.is_some(), "TLS spec should exist");
-    assert!(tls.unwrap().enabled, "TLS should be enabled");
+    assert!(cluster.spec.tls.enabled, "TLS should be enabled");
+    assert!(
+        cluster.spec.tls.issuer_ref.is_some(),
+        "TLS issuer_ref should be set"
+    );
 
     api.delete("test-tls-en", &DeleteParams::default())
         .await
@@ -998,10 +1000,7 @@ async fn test_disable_tls_on_running_cluster() {
 
     // Verify TLS is now disabled
     let cluster = api.get("test-tls-dis").await.expect("get");
-    let tls = cluster.spec.tls.as_ref();
-    if let Some(tls_spec) = tls {
-        assert!(!tls_spec.enabled, "TLS should be disabled");
-    }
+    assert!(!cluster.spec.tls.enabled, "TLS should be disabled");
 
     api.delete("test-tls-dis", &DeleteParams::default())
         .await
@@ -1543,9 +1542,11 @@ async fn test_enable_tls_and_pgbouncer_together() {
     // Verify both are now enabled
     let cluster = api.get("test-combo").await.expect("get");
 
-    let tls = cluster.spec.tls.as_ref();
-    assert!(tls.is_some(), "TLS spec should exist");
-    assert!(tls.unwrap().enabled, "TLS should be enabled");
+    assert!(cluster.spec.tls.enabled, "TLS should be enabled");
+    assert!(
+        cluster.spec.tls.issuer_ref.is_some(),
+        "TLS issuer_ref should be set"
+    );
 
     let pgbouncer = cluster.spec.pgbouncer.as_ref();
     assert!(pgbouncer.is_some(), "PgBouncer spec should exist");

@@ -13,8 +13,9 @@ use postgres_operator::controller::state_machine::{
 };
 use postgres_operator::controller::validation::{validate_spec, validate_version_upgrade};
 use postgres_operator::crd::{
-    ClusterPhase, PgBouncerSpec, PostgresCluster, PostgresClusterSpec, PostgresClusterStatus,
-    PostgresVersion, ResourceList, ResourceRequirements, StorageSpec, TLSSpec,
+    ClusterPhase, IssuerKind, IssuerRef, PgBouncerSpec, PostgresCluster, PostgresClusterSpec,
+    PostgresClusterStatus, PostgresVersion, ResourceList, ResourceRequirements, StorageSpec,
+    TLSSpec,
 };
 use postgres_operator::resources::{patroni, pdb, secret, service};
 
@@ -87,34 +88,41 @@ fn optional_storage_class() -> impl Strategy<Value = Option<String>> {
     ]
 }
 
-/// Generate optional TLS spec
-fn optional_tls() -> impl Strategy<Value = Option<TLSSpec>> {
+/// Generate TLS spec (cert-manager integration)
+fn tls_spec() -> impl Strategy<Value = TLSSpec> {
     prop_oneof![
-        Just(None),
-        Just(Some(TLSSpec {
+        // TLS disabled
+        Just(TLSSpec {
             enabled: false,
-            cert_secret: None,
-            ca_secret: None,
-            certificate_file: None,
-            private_key_file: None,
-            ca_file: None,
-        })),
-        Just(Some(TLSSpec {
+            issuer_ref: None,
+            additional_dns_names: vec![],
+            duration: None,
+            renew_before: None,
+        }),
+        // TLS enabled with ClusterIssuer
+        Just(TLSSpec {
             enabled: true,
-            cert_secret: Some("my-tls-secret".to_string()),
-            ca_secret: None,
-            certificate_file: None,
-            private_key_file: None,
-            ca_file: None,
-        })),
-        Just(Some(TLSSpec {
+            issuer_ref: Some(IssuerRef {
+                name: "letsencrypt-prod".to_string(),
+                kind: IssuerKind::ClusterIssuer,
+                group: "cert-manager.io".to_string(),
+            }),
+            additional_dns_names: vec![],
+            duration: None,
+            renew_before: None,
+        }),
+        // TLS enabled with namespace Issuer
+        Just(TLSSpec {
             enabled: true,
-            cert_secret: Some("my-tls-secret".to_string()),
-            ca_secret: Some("my-ca-secret".to_string()),
-            certificate_file: None,
-            private_key_file: None,
-            ca_file: None,
-        })),
+            issuer_ref: Some(IssuerRef {
+                name: "my-issuer".to_string(),
+                kind: IssuerKind::Issuer,
+                group: "cert-manager.io".to_string(),
+            }),
+            additional_dns_names: vec!["extra.example.com".to_string()],
+            duration: Some("2160h".to_string()),
+            renew_before: Some("360h".to_string()),
+        }),
     ]
 }
 
@@ -194,7 +202,7 @@ fn valid_spec() -> impl Strategy<Value = PostgresClusterSpec> {
         valid_replicas(),
         valid_storage_size(),
         optional_storage_class(),
-        optional_tls(),
+        tls_spec(),
         optional_pgbouncer(),
         optional_resources(),
     )
@@ -209,6 +217,7 @@ fn valid_spec() -> impl Strategy<Value = PostgresClusterSpec> {
                     },
                     resources,
                     postgresql_params: Default::default(),
+                    labels: Default::default(),
                     backup: None,
                     pgbouncer,
                     tls,
@@ -346,9 +355,10 @@ proptest! {
             },
             resources: None,
             postgresql_params: Default::default(),
+            labels: Default::default(),
             backup: None,
             pgbouncer: None,
-            tls: None,
+            tls: TLSSpec::default(),
             metrics: None,
             service: None,
             restore: None,
@@ -370,9 +380,10 @@ proptest! {
             },
             resources: None,
             postgresql_params: Default::default(),
+            labels: Default::default(),
             backup: None,
             pgbouncer: None,
-            tls: None,
+            tls: TLSSpec::default(),
             metrics: None,
             service: None,
             restore: None,
@@ -445,9 +456,10 @@ proptest! {
             },
             resources: None,
             postgresql_params: Default::default(),
+            labels: Default::default(),
             backup: None,
             pgbouncer: None,
-            tls: None,
+            tls: TLSSpec::default(),
             metrics: None,
             service: None,
             restore: None,
@@ -481,9 +493,10 @@ proptest! {
             },
             resources: None,
             postgresql_params: Default::default(),
+            labels: Default::default(),
             backup: None,
             pgbouncer: None,
-            tls: None,
+            tls: TLSSpec::default(),
             metrics: None,
             service: None,
             restore: None,
@@ -518,9 +531,10 @@ mod edge_case_tests {
             },
             resources: None,
             postgresql_params: Default::default(),
+            labels: Default::default(),
             backup: None,
             pgbouncer: None,
-            tls: None,
+            tls: TLSSpec::default(),
             metrics: None,
             service: None,
             restore: None,
@@ -550,9 +564,10 @@ mod edge_case_tests {
             },
             resources: None,
             postgresql_params: Default::default(),
+            labels: Default::default(),
             backup: None,
             pgbouncer: None,
-            tls: None,
+            tls: TLSSpec::default(),
             metrics: None,
             service: None,
             restore: None,

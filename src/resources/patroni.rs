@@ -488,90 +488,48 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
     // Volumes
     let mut volumes: Vec<Volume> = vec![];
 
-    // TLS configuration
-    if let Some(ref tls) = cluster.spec.tls
-        && tls.enabled
-    {
-        // Get filenames with defaults
-        let cert_file = tls
-            .certificate_file
-            .as_deref()
-            .unwrap_or("tls.crt")
-            .to_string();
-        let key_file = tls
-            .private_key_file
-            .as_deref()
-            .unwrap_or("tls.key")
-            .to_string();
+    // TLS configuration (cert-manager integration)
+    // When TLS is enabled, mount the cert-manager generated secret
+    let tls = &cluster.spec.tls;
+    if tls.enabled && tls.issuer_ref.is_some() {
+        // cert-manager creates a secret with tls.crt, tls.key, and ca.crt
+        // Secret name is deterministic: {cluster-name}-tls
+        let tls_secret_name = format!("{}-tls", name);
 
-        // Add TLS certificate volume if cert_secret is specified
-        if let Some(ref cert_secret) = tls.cert_secret {
-            volumes.push(Volume {
-                name: "tls-certs".to_string(),
-                secret: Some(SecretVolumeSource {
-                    secret_name: Some(cert_secret.clone()),
-                    default_mode: Some(0o640),
-                    ..Default::default()
-                }),
+        volumes.push(Volume {
+            name: "tls-certs".to_string(),
+            secret: Some(SecretVolumeSource {
+                secret_name: Some(tls_secret_name),
+                default_mode: Some(0o640),
                 ..Default::default()
-            });
+            }),
+            ..Default::default()
+        });
 
-            volume_mounts.push(VolumeMount {
-                name: "tls-certs".to_string(),
-                mount_path: "/tls".to_string(),
-                read_only: Some(true),
-                ..Default::default()
-            });
+        volume_mounts.push(VolumeMount {
+            name: "tls-certs".to_string(),
+            mount_path: "/tls".to_string(),
+            read_only: Some(true),
+            ..Default::default()
+        });
 
-            // Spilo TLS environment variables
-            env_vars.push(EnvVar {
-                name: "SSL_CERTIFICATE_FILE".to_string(),
-                value: Some(format!("/tls/{}", cert_file)),
-                ..Default::default()
-            });
-            env_vars.push(EnvVar {
-                name: "SSL_PRIVATE_KEY_FILE".to_string(),
-                value: Some(format!("/tls/{}", key_file)),
-                ..Default::default()
-            });
-        }
-
-        // Add separate CA secret volume if specified
-        if let Some(ref ca_secret) = tls.ca_secret {
-            let ca_file = tls.ca_file.as_deref().unwrap_or("ca.crt").to_string();
-
-            volumes.push(Volume {
-                name: "tls-ca".to_string(),
-                secret: Some(SecretVolumeSource {
-                    secret_name: Some(ca_secret.clone()),
-                    default_mode: Some(0o640),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            });
-
-            volume_mounts.push(VolumeMount {
-                name: "tls-ca".to_string(),
-                mount_path: "/tlsca".to_string(),
-                read_only: Some(true),
-                ..Default::default()
-            });
-
-            env_vars.push(EnvVar {
-                name: "SSL_CA_FILE".to_string(),
-                value: Some(format!("/tlsca/{}", ca_file)),
-                ..Default::default()
-            });
-        } else if tls.cert_secret.is_some() {
-            // CA file in the same secret as cert/key
-            if let Some(ref ca_file) = tls.ca_file {
-                env_vars.push(EnvVar {
-                    name: "SSL_CA_FILE".to_string(),
-                    value: Some(format!("/tls/{}", ca_file)),
-                    ..Default::default()
-                });
-            }
-        }
+        // Spilo TLS environment variables
+        // cert-manager always uses tls.crt, tls.key, and ca.crt
+        env_vars.push(EnvVar {
+            name: "SSL_CERTIFICATE_FILE".to_string(),
+            value: Some("/tls/tls.crt".to_string()),
+            ..Default::default()
+        });
+        env_vars.push(EnvVar {
+            name: "SSL_PRIVATE_KEY_FILE".to_string(),
+            value: Some("/tls/tls.key".to_string()),
+            ..Default::default()
+        });
+        env_vars.push(EnvVar {
+            name: "SSL_CA_FILE".to_string(),
+            value: Some("/tls/ca.crt".to_string()),
+            ..Default::default()
+        });
     }
 
     // Backup configuration (WAL-G)

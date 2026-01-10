@@ -57,6 +57,8 @@ The operator integrates with [WAL-G](https://github.com/wal-g/wal-g) through the
 
 Add a `backup` section to your PostgresCluster spec:
 
+> **Important**: Encryption is **required** for all backups to protect sensitive data at rest.
+
 ```yaml
 apiVersion: postgres-operator.smoketurner.com/v1alpha1
 kind: PostgresCluster
@@ -67,6 +69,10 @@ spec:
   replicas: 3
   storage:
     size: 100Gi
+  tls:
+    issuerRef:
+      name: selfsigned-issuer
+      kind: ClusterIssuer
 
   backup:
     # Required: Cron schedule for base backups
@@ -83,6 +89,11 @@ spec:
       bucket: my-backups
       region: us-east-1
       credentialsSecret: aws-credentials
+
+    # Required: Encryption for backups at rest
+    encryption:
+      method: aes256           # aes256 or pgp
+      keySecret: backup-encryption-key
 
     # Optional settings
     compression: zstd              # lz4 (fast), zstd (balanced), lzma (small)
@@ -158,14 +169,26 @@ retention:
      --from-literal=AWS_SECRET_ACCESS_KEY=<secret-key>
    ```
 
-4. **Configure backup:**
+4. **Create encryption key secret:**
+   ```bash
+   kubectl create secret generic backup-encryption-key \
+     --from-literal=WALG_LIBSODIUM_KEY=$(openssl rand -hex 32)
+   ```
+
+5. **Configure backup:**
    ```yaml
    backup:
+     schedule: "0 2 * * *"
+     retention:
+       count: 7
      destination:
        type: S3
        bucket: my-postgres-backups
        region: us-east-1
        credentialsSecret: aws-backup-credentials
+     encryption:
+       method: aes256
+       keySecret: backup-encryption-key
    ```
 
 ### Google Cloud Storage
@@ -193,13 +216,25 @@ retention:
      --from-file=GOOGLE_APPLICATION_CREDENTIALS=./key.json
    ```
 
-4. **Configure backup:**
+4. **Create encryption key secret:**
+   ```bash
+   kubectl create secret generic backup-encryption-key \
+     --from-literal=WALG_LIBSODIUM_KEY=$(openssl rand -hex 32)
+   ```
+
+5. **Configure backup:**
    ```yaml
    backup:
+     schedule: "0 2 * * *"
+     retention:
+       count: 7
      destination:
        type: GCS
        bucket: my-postgres-backups
        credentialsSecret: gcs-backup-credentials
+     encryption:
+       method: aes256
+       keySecret: backup-encryption-key
    ```
 
 ### Azure Blob Storage
@@ -221,20 +256,35 @@ retention:
      --from-literal=AZURE_STORAGE_ACCESS_KEY=<storage-key>
    ```
 
-4. **Configure backup:**
+4. **Create encryption key secret:**
+   ```bash
+   kubectl create secret generic backup-encryption-key \
+     --from-literal=WALG_LIBSODIUM_KEY=$(openssl rand -hex 32)
+   ```
+
+5. **Configure backup:**
    ```yaml
    backup:
+     schedule: "0 2 * * *"
+     retention:
+       count: 7
      destination:
        type: Azure
        container: backups
        storageAccount: mypostgresbackups
        credentialsSecret: azure-backup-credentials
+     encryption:
+       method: aes256
+       keySecret: backup-encryption-key
    ```
 
 ### S3-Compatible Storage (MinIO, Ceph, etc.)
 
 ```yaml
 backup:
+  schedule: "0 2 * * *"
+  retention:
+    count: 7
   destination:
     type: S3
     bucket: postgres-backups
@@ -243,6 +293,9 @@ backup:
     credentialsSecret: minio-credentials
     forcePathStyle: true   # Required for most S3-compatible storage
     disableSse: true       # Disable AWS SSE
+  encryption:
+    method: aes256
+    keySecret: backup-encryption-key
 ```
 
 ## Monitoring Backups
@@ -320,6 +373,10 @@ spec:
   replicas: 1  # Start with 1, scale up after restore
   storage:
     size: 100Gi
+  tls:
+    issuerRef:
+      name: selfsigned-issuer
+      kind: ClusterIssuer
 
   # Same backup configuration as source cluster
   backup:
@@ -332,6 +389,9 @@ spec:
       region: us-east-1
       credentialsSecret: aws-backup-credentials
       path: original-namespace/my-cluster  # Point to source cluster's backups
+    encryption:
+      method: aes256
+      keySecret: backup-encryption-key  # Must be same key as source cluster
 ```
 
 2. **Create the cluster (it will start empty):**
@@ -453,24 +513,30 @@ kubectl exec -it my-cluster-restored-0 -- bash -c \
 
 ## Encryption
 
-### Enable Encryption
+Encryption is **required** for all backups. The operator validates that encryption is configured when backups are enabled.
 
-1. **Generate encryption key:**
+### Create Encryption Key Secret
+
+**For AES-256 (recommended):**
 ```bash
-# For AES-256 (recommended)
-openssl rand 32 > encryption.key
-
-# Create secret
+# Generate a 32-byte hex key for libsodium
 kubectl create secret generic backup-encryption-key \
-  --from-file=encryption-key=./encryption.key
+  --from-literal=WALG_LIBSODIUM_KEY=$(openssl rand -hex 32)
 ```
 
-2. **Configure encrypted backups:**
+**For PGP:**
+```bash
+# Use an existing PGP private key
+kubectl create secret generic backup-encryption-key \
+  --from-file=WALG_PGP_KEY=/path/to/private.key
+```
+
+### Configure Encryption
+
 ```yaml
 backup:
   encryption:
-    enabled: true
-    method: aes256
+    method: aes256           # aes256 (default) or pgp
     keySecret: backup-encryption-key
   destination:
     # ... your cloud storage config
@@ -481,6 +547,7 @@ backup:
 - **Store keys securely**: Use a secrets manager (Vault, AWS Secrets Manager, etc.)
 - **Backup your keys**: Without the key, backups cannot be restored
 - **Key rotation**: Not supported for existing backups; create new cluster with new key
+- **Key validation**: The operator validates the secret exists before deploying the cluster
 
 ## Troubleshooting
 

@@ -263,7 +263,7 @@ impl<'a> StatusManager<'a> {
             // Set current version when cluster becomes running
             current_version: Some(version.to_string()),
             // TLS and PgBouncer status
-            tls_enabled: self.cluster.spec.tls.as_ref().map(|t| t.enabled),
+            tls_enabled: Some(self.cluster.spec.tls.enabled),
             pgbouncer_enabled: self.cluster.spec.pgbouncer.as_ref().map(|p| p.enabled),
             pgbouncer_ready_replicas: None, // Updated by reconciler when checking deployment
             // Kubernetes 1.35+ pod tracking and resize status
@@ -337,7 +337,7 @@ impl<'a> StatusManager<'a> {
                 .as_ref()
                 .and_then(|s| s.current_version.clone()),
             // TLS and PgBouncer status
-            tls_enabled: self.cluster.spec.tls.as_ref().map(|t| t.enabled),
+            tls_enabled: Some(self.cluster.spec.tls.enabled),
             pgbouncer_enabled: self.cluster.spec.pgbouncer.as_ref().map(|p| p.enabled),
             pgbouncer_ready_replicas: None,
             // Kubernetes 1.35+ pod tracking and resize status
@@ -401,7 +401,7 @@ impl<'a> StatusManager<'a> {
                 .as_ref()
                 .and_then(|s| s.current_version.clone()),
             // TLS and PgBouncer status
-            tls_enabled: self.cluster.spec.tls.as_ref().map(|t| t.enabled),
+            tls_enabled: Some(self.cluster.spec.tls.enabled),
             pgbouncer_enabled: self.cluster.spec.pgbouncer.as_ref().map(|p| p.enabled),
             pgbouncer_ready_replicas: None,
             // Kubernetes 1.35+ pod tracking and resize status
@@ -468,7 +468,7 @@ impl<'a> StatusManager<'a> {
             // Preserve existing version when failed
             current_version: existing_status.and_then(|s| s.current_version.clone()),
             // TLS and PgBouncer status
-            tls_enabled: self.cluster.spec.tls.as_ref().map(|t| t.enabled),
+            tls_enabled: Some(self.cluster.spec.tls.enabled),
             pgbouncer_enabled: self.cluster.spec.pgbouncer.as_ref().map(|p| p.enabled),
             pgbouncer_ready_replicas: existing_status.and_then(|s| s.pgbouncer_ready_replicas),
             // Kubernetes 1.35+ pod tracking and resize status

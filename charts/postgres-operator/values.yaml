@@ -137,3 +137,21 @@ extraVolumeMounts: []
 
 # Extra volumes
 extraVolumes: []
+
+# =============================================================================
+# TLS Configuration (requires cert-manager)
+# =============================================================================
+# PREREQUISITE: cert-manager must be installed before deploying this operator.
+# TLS is enabled by default on all PostgresCluster resources for security.
+#
+# Install cert-manager:
+#   helm repo add jetstack https://charts.jetstack.io
+#   helm install cert-manager jetstack/cert-manager \
+#     --namespace cert-manager --create-namespace \
+#     --set crds.enabled=true
+#
+# Create an Issuer/ClusterIssuer for your environment:
+#   - Development: self-signed issuer
+#   - Production: Let's Encrypt, HashiCorp Vault, or internal PKI
+#
+# See: https://cert-manager.io/docs/configuration/
