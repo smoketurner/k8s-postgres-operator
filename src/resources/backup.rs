@@ -192,15 +192,14 @@ pub fn generate_backup_env_vars(cluster: &PostgresCluster) -> Vec<EnvVar> {
     // Note: Spilo's backup script uses BACKUP_NUM_TO_RETAIN primarily.
     // For time-based cleanup, users can run `wal-g delete retain FULL <count> --confirm`
     // or use WALG_BACKUP_RETENTION_DAYS with custom scripts
-    if let Some(ref max_age) = backup.retention.max_age {
-        if let Some(days) = parse_duration_to_days(max_age) {
+    if let Some(ref max_age) = backup.retention.max_age
+        && let Some(days) = parse_duration_to_days(max_age) {
             env_vars.push(EnvVar {
                 name: "WALG_BACKUP_RETENTION_DAYS".to_string(),
                 value: Some(days.to_string()),
                 ..Default::default()
             });
         }
-    }
 
     // Destination-specific configuration
     match &backup.destination {
@@ -674,7 +673,6 @@ mod tests {
             retention: RetentionPolicy {
                 count: Some(7),
                 max_age: None,
-                retain_timestamps: vec![],
             },
             destination: BackupDestination::S3 {
                 bucket: "my-bucket".to_string(),
@@ -723,7 +721,6 @@ mod tests {
             retention: RetentionPolicy {
                 count: Some(5),
                 max_age: None,
-                retain_timestamps: vec![],
             },
             destination: BackupDestination::GCS {
                 bucket: "gcs-bucket".to_string(),
@@ -780,7 +777,6 @@ mod tests {
             retention: RetentionPolicy {
                 count: Some(10),
                 max_age: None,
-                retain_timestamps: vec![],
             },
             destination: BackupDestination::Azure {
                 container: "backups".to_string(),
@@ -828,7 +824,6 @@ mod tests {
             retention: RetentionPolicy {
                 count: Some(7),
                 max_age: None,
-                retain_timestamps: vec![],
             },
             destination: BackupDestination::S3 {
                 bucket: "my-bucket".to_string(),
@@ -868,7 +863,6 @@ mod tests {
             retention: RetentionPolicy {
                 count: Some(7),
                 max_age: None,
-                retain_timestamps: vec![],
             },
             destination: BackupDestination::GCS {
                 bucket: "gcs-bucket".to_string(),
@@ -938,7 +932,6 @@ mod tests {
             retention: RetentionPolicy {
                 count: Some(7),
                 max_age: None,
-                retain_timestamps: vec![],
             },
             destination: BackupDestination::S3 {
                 bucket: "bucket".to_string(),
@@ -992,7 +985,6 @@ mod tests {
             retention: RetentionPolicy {
                 count: Some(7),
                 max_age: Some("30d".to_string()),
-                retain_timestamps: vec![],
             },
             destination: BackupDestination::S3 {
                 bucket: "bucket".to_string(),

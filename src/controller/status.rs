@@ -200,6 +200,27 @@ impl<'a> StatusManager<'a> {
         replica_pods: Vec<String>,
         version: &str,
     ) -> Result<()> {
+        self.set_running_with_backup(
+            ready_replicas,
+            total_replicas,
+            primary_pod,
+            replica_pods,
+            version,
+            None,
+        )
+        .await
+    }
+
+    /// Update status for a running cluster with optional backup status
+    pub async fn set_running_with_backup(
+        &self,
+        ready_replicas: i32,
+        total_replicas: i32,
+        primary_pod: Option<String>,
+        replica_pods: Vec<String>,
+        version: &str,
+        backup_status: Option<BackupStatus>,
+    ) -> Result<()> {
         let generation = self.cluster.metadata.generation;
         let existing_conditions = self
             .cluster
@@ -221,13 +242,16 @@ impl<'a> StatusManager<'a> {
         // Track when we entered this phase
         let phase_started_at = self.get_phase_started_at(ClusterPhase::Running);
 
+        // Use provided backup status or fall back to existing/default
+        let final_backup_status = backup_status.or_else(|| self.get_backup_status());
+
         let status = PostgresClusterStatus {
             phase: ClusterPhase::Running,
             ready_replicas,
             replicas: total_replicas,
             primary_pod,
             replica_pods,
-            backup: self.get_backup_status(),
+            backup: final_backup_status,
             observed_generation: generation,
             conditions,
             // Clear error state on successful running

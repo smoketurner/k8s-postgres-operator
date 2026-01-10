@@ -318,6 +318,7 @@ impl CompressionMethod {
 pub struct RetentionPolicy {
     /// Number of base backups to retain.
     /// Older backups and their associated WAL files are automatically deleted.
+    /// Uses Spilo's BACKUP_NUM_TO_RETAIN environment variable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count: Option<i32>,
 
@@ -325,11 +326,6 @@ pub struct RetentionPolicy {
     /// Backups older than this are automatically deleted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_age: Option<String>,
-
-    /// Retain backups for specific points in time (RFC3339 format).
-    /// Useful for compliance or milestone snapshots.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub retain_timestamps: Vec<String>,
 }
 
 /// Backup destination configuration

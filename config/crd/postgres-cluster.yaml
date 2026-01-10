@@ -132,20 +132,15 @@ spec:
                         WAL archiving happens continuously regardless of this schedule.
                     retention:
                       type: object
-                      description: Retention policy for backups
+                      description: Retention policy for backups (uses Spilo's backup retention)
                       properties:
                         count:
                           type: integer
-                          description: Number of base backups to retain
+                          description: Number of base backups to retain (uses BACKUP_NUM_TO_RETAIN)
                           minimum: 1
                         maxAge:
                           type: string
                           description: Maximum age of backups (e.g., "7d", "30d", "1w")
-                        retainTimestamps:
-                          type: array
-                          description: Specific timestamps to retain (RFC3339 format)
-                          items:
-                            type: string
                     destination:
                       type: object
                       description: Cloud storage destination for backups

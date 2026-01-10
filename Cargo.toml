@@ -21,7 +21,7 @@ license = "MIT"
 #    - Use native ContainerResizePolicy type directly in generate_pgbouncer_deployment()
 # 4. Run `cargo check` to verify everything compiles
 # 5. Track progress at: https://github.com/Arnavion/k8s-openapi/issues
-kube = { version = "2", default-features = false, features = ["runtime", "derive", "client", "rustls-tls"] }
+kube = { version = "2", default-features = false, features = ["runtime", "derive", "client", "rustls-tls", "ws"] }
 k8s-openapi = { version = "0.26", features = ["v1_34"] }
 
 # Async runtime

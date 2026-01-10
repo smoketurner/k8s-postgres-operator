@@ -22,6 +22,7 @@ use kube::{Api, ResourceExt};
 use serde::de::DeserializeOwned;
 use tracing::{debug, error, info, instrument, warn};
 
+use crate::controller::backup_status::BackupStatusCollector;
 use crate::controller::context::Context;
 use crate::controller::error::{BackoffConfig, Error, Result};
 use crate::controller::state_machine::{
@@ -29,7 +30,7 @@ use crate::controller::state_machine::{
 };
 use crate::controller::status::{StatusManager, spec_changed};
 use crate::crd::{ClusterPhase, PostgresCluster};
-use crate::resources::{patroni, pdb, pgbouncer, secret, service};
+use crate::resources::{backup, patroni, pdb, pgbouncer, secret, service};
 
 /// Finalizer name for cleanup
 pub const FINALIZER: &str = "postgres.example.com/finalizer";
@@ -318,6 +319,34 @@ async fn check_and_update_status(
     // Build transition context for potential state changes
     let transition_ctx = TransitionContext::new(ready_replicas, cluster.spec.replicas);
 
+    // Collect backup status if backups are enabled and cluster is running
+    let collected_backup_status = if current_phase == ClusterPhase::Running
+        && backup::is_backup_enabled(cluster)
+    {
+        let collector = BackupStatusCollector::new(ctx.client.clone(), ns, &name);
+        match collector.collect(cluster).await {
+            Ok(backup_status) => {
+                debug!(
+                    cluster = %name,
+                    backup_count = ?backup_status.backup_count,
+                    wal_healthy = ?backup_status.wal_archiving_healthy,
+                    "Collected backup status"
+                );
+                Some(backup_status)
+            }
+            Err(e) => {
+                debug!(
+                    cluster = %name,
+                    error = %e,
+                    "Failed to collect backup status (non-fatal)"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Check if cluster has become degraded while running
     if current_phase == ClusterPhase::Running && transition_ctx.is_degraded() {
         let event = ClusterEvent::ReplicasDegraded;
@@ -338,12 +367,13 @@ async fn check_and_update_status(
         }
     } else if ready_replicas >= cluster.spec.replicas {
         status_manager
-            .set_running(
+            .set_running_with_backup(
                 ready_replicas,
                 cluster.spec.replicas,
                 primary_pod,
                 replica_pods,
                 &cluster.spec.version,
+                collected_backup_status,
             )
             .await?;
     }
