@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -8,7 +9,8 @@ use tokio::signal;
 use tracing::{error, info, warn};
 
 use postgres_operator::health::{HealthState, run_health_server};
-use postgres_operator::run_controller;
+use postgres_operator::{run_controller, run_database_controller};
+use postgres_operator::{run_webhook_server, WEBHOOK_CERT_PATH, WEBHOOK_KEY_PATH};
 
 /// Lease configuration
 const LEASE_NAME: &str = "postgres-operator-leader";
@@ -85,6 +87,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 error!("Health server error: {}", e);
             }
         })
+    };
+
+    // Start webhook server if TLS certificates are available
+    // The webhook server runs regardless of leadership to ensure admission requests are handled
+    let webhook_handle = if Path::new(WEBHOOK_CERT_PATH).exists()
+        && Path::new(WEBHOOK_KEY_PATH).exists()
+    {
+        info!("TLS certificates found, starting webhook server");
+        let webhook_client = client.clone();
+        Some(tokio::spawn(async move {
+            if let Err(e) =
+                run_webhook_server(webhook_client, WEBHOOK_CERT_PATH, WEBHOOK_KEY_PATH).await
+            {
+                error!("Webhook server error: {}", e);
+            }
+        }))
+    } else {
+        info!(
+            "TLS certificates not found at {} and {}, webhook server disabled",
+            WEBHOOK_CERT_PATH, WEBHOOK_KEY_PATH
+        );
+        None
     };
 
     // Create leader election lease lock
@@ -166,6 +190,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     };
 
+    // Create a future that monitors the webhook handle (if it exists)
+    let webhook_future = async {
+        if let Some(handle) = webhook_handle {
+            if let Err(e) = handle.await {
+                error!("Webhook server task panicked: {}", e);
+            }
+        } else {
+            // No webhook server, wait forever
+            std::future::pending::<()>().await;
+        }
+    };
+
     // Wait for any task to complete (or fail), or shutdown signal
     tokio::select! {
         result = controller_handle => {
@@ -177,6 +213,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Err(e) = result {
                 error!("Health server task panicked: {}", e);
             }
+        }
+        _ = webhook_future => {
+            // Webhook server exited (either panic or normal exit)
         }
         // Lease renewal task only exits via process::exit() or panic
         // so this branch is only reached on panic

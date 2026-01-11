@@ -35,6 +35,15 @@ impl PostgresVersion {
         }
     }
 
+    /// Returns the major version number as an integer for comparison
+    pub fn as_major_version(&self) -> i32 {
+        match self {
+            PostgresVersion::V15 => 15,
+            PostgresVersion::V16 => 16,
+            PostgresVersion::V17 => 17,
+        }
+    }
+
     /// Returns the Spilo image tag for this PostgreSQL version
     /// Updated tags available at: https://github.com/zalando/spilo/pkgs/container/
     pub fn spilo_tag(&self) -> &'static str {

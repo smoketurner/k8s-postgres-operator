@@ -1,0 +1,58 @@
+# ValidatingWebhookConfiguration for PostgresCluster
+#
+# Policies enforced:
+# - Tier 1 (Always):
+#   - BackupEncryptionRequired: Backups must have encryption configured
+#   - TLSIssuerRequired: TLS enabled requires an issuer reference
+#   - StorageClassImmutable: Cannot change storage class after creation
+#   - VersionDowngradeNotAllowed: PostgreSQL version can only increase
+#
+# - Tier 2 (Production namespaces with env=production label):
+#   - ProductionHARequired: Minimum 3 replicas
+#   - ProductionBackupRequired: Backup must be configured
+#   - ProductionResourceLimitsRequired: CPU and memory limits required
+#   - ProductionExternalAccessNotAllowed: External network access prohibited
+#
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: postgres-operator-validating-webhook
+  annotations:
+    # cert-manager will inject the CA bundle automatically
+    cert-manager.io/inject-ca-from: postgres-operator-system/postgres-operator-webhook-cert
+webhooks:
+  - name: validate.postgrescluster.postgres-operator.smoketurner.com
+    clientConfig:
+      service:
+        name: postgres-operator-webhook
+        namespace: postgres-operator-system
+        path: /validate
+        port: 443
+      # CA bundle will be injected by cert-manager
+      caBundle: ""
+    rules:
+      - apiGroups:
+          - postgres-operator.smoketurner.com
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - postgresclusters
+        scope: Namespaced
+    # Fail closed - reject requests if webhook is unavailable
+    # Change to Ignore for development/testing environments
+    failurePolicy: Fail
+    # Only validate requests from namespaces with this label
+    # To require webhook validation for all namespaces, remove this section
+    # namespaceSelector:
+    #   matchLabels:
+    #     postgres-operator.smoketurner.com/validate: "true"
+    sideEffects: None
+    admissionReviewVersions:
+      - v1
+    # Timeout for webhook calls (default: 10s)
+    timeoutSeconds: 10
+    # Only validate when object actually changes
+    matchPolicy: Equivalent

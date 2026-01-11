@@ -437,9 +437,7 @@ async fn check_and_update_status(
                     cluster,
                     "ScaleOutResumed",
                     "UpdateScaling",
-                    Some(
-                        "Resumed KEDA scale-out, replication lag within threshold".to_string(),
-                    ),
+                    Some("Resumed KEDA scale-out, replication lag within threshold".to_string()),
                 )
                 .await;
             }

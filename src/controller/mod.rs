@@ -1,5 +1,6 @@
 pub mod backup_status;
 pub mod context;
+pub mod database_reconciler;
 pub mod error;
 pub mod reconciler;
 pub mod replication_lag;
@@ -9,6 +10,9 @@ pub mod validation;
 
 pub use backup_status::BackupStatusCollector;
 pub use context::Context;
+pub use database_reconciler::{
+    DatabaseContext, DatabaseError, DATABASE_FINALIZER, database_error_policy, reconcile_database,
+};
 pub use error::{BackoffConfig, Error, ErrorContext, Result};
 pub use reconciler::{FINALIZER, error_policy, reconcile};
 pub use replication_lag::{ReplicationLagCollector, ReplicationLagStatus, collect_replication_lag};

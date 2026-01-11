@@ -1,0 +1,39 @@
+# Certificate for webhook TLS
+# Requires cert-manager to be installed in the cluster
+#
+# Common practices for webhook certificates:
+# - ClusterIssuer (recommended): Most operators use a ClusterIssuer because webhooks
+#   are cluster-wide resources. This is the pattern used by cert-manager, Istio,
+#   Prometheus Operator, and CloudNativePG.
+# - Namespace-scoped Issuer: Use when you need strict isolation between teams
+#   or in multi-tenant environments with separate CAs.
+#
+# Before deploying, ensure you have a ClusterIssuer configured. Example:
+#
+# apiVersion: cert-manager.io/v1
+# kind: ClusterIssuer
+# metadata:
+#   name: selfsigned-cluster-issuer
+# spec:
+#   selfSigned: {}
+#
+# For production, consider using a proper CA or ACME issuer.
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: postgres-operator-webhook-cert
+  namespace: postgres-operator-system
+spec:
+  secretName: postgres-operator-webhook-tls
+  dnsNames:
+    - postgres-operator-webhook.postgres-operator-system.svc
+    - postgres-operator-webhook.postgres-operator-system.svc.cluster.local
+  issuerRef:
+    kind: ClusterIssuer
+    name: selfsigned-cluster-issuer
+  duration: 8760h # 1 year
+  renewBefore: 720h # 30 days
+  privateKey:
+    algorithm: ECDSA
+    size: 256

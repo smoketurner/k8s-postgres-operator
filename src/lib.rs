@@ -2,10 +2,18 @@ pub mod controller;
 pub mod crd;
 pub mod health;
 pub mod resources;
+pub mod webhooks;
 
-pub use controller::{BackoffConfig, Context, Error, FINALIZER, Result, error_policy, reconcile};
-pub use crd::PostgresCluster;
+pub use controller::{
+    BackoffConfig, Context, DatabaseContext, DatabaseError, Error, FINALIZER, Result,
+    database_error_policy, error_policy, reconcile, reconcile_database,
+};
+pub use crd::{PostgresCluster, PostgresDatabase};
 pub use health::{HealthState, Metrics};
+pub use webhooks::{
+    create_webhook_router, run_webhook_server, validate_postgres_cluster, WebhookError,
+    WEBHOOK_CERT_PATH, WEBHOOK_KEY_PATH, WEBHOOK_PORT,
+};
 
 use std::sync::Arc;
 
@@ -80,4 +88,49 @@ pub async fn run_controller(client: Client, health_state: Option<Arc<HealthState
 
     // This should never complete in normal operation
     tracing::error!("Controller stream ended unexpectedly");
+}
+
+/// Run the database controller
+///
+/// This controller watches PostgresDatabase resources and provisions databases,
+/// roles, and credentials within PostgresCluster instances.
+pub async fn run_database_controller(client: Client) {
+    tracing::info!("Starting controller for PostgresDatabase resources");
+
+    let ctx = Arc::new(DatabaseContext::new(client.clone()));
+
+    // Set up APIs for the controller
+    let databases: Api<PostgresDatabase> = Api::all(client.clone());
+    let secrets: Api<Secret> = Api::all(client.clone());
+
+    // Configure watcher
+    let watcher_config = WatcherConfig::default().any_semantic();
+
+    // Create and run the controller
+    // Watch PostgresDatabase and owned secrets
+    Controller::new(databases, watcher_config.clone())
+        .owns(secrets, watcher_config)
+        .run(reconcile_database, database_error_policy, ctx)
+        .for_each(|result| async move {
+            match result {
+                Ok((obj, _action)) => {
+                    tracing::debug!("Reconciled database: {}", obj.name);
+                }
+                Err(e) => {
+                    let is_not_found = matches!(
+                        &e,
+                        kube::runtime::controller::Error::ReconcilerFailed(err, _)
+                            if format!("{:?}", err).contains("NotFound")
+                    );
+                    if is_not_found {
+                        tracing::debug!("Database object no longer exists: {:?}", e);
+                    } else {
+                        tracing::error!("Database reconciliation error: {:?}", e);
+                    }
+                }
+            }
+        })
+        .await;
+
+    tracing::error!("Database controller stream ended unexpectedly");
 }

@@ -1,0 +1,17 @@
+# Service for the admission webhook
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-operator-webhook
+  namespace: postgres-operator-system
+  labels:
+    app.kubernetes.io/name: postgres-operator
+    app.kubernetes.io/component: webhook
+spec:
+  selector:
+    app.kubernetes.io/name: postgres-operator
+  ports:
+    - name: https
+      port: 443
+      targetPort: 8443
+      protocol: TCP

@@ -41,8 +41,10 @@ tracing = { version = "=0.1.44", default-features = false }
 tracing-subscriber = { version = "=0.3.22", default-features = false, features = ["std", "fmt", "env-filter", "json"] }
 
 # HTTP server for health endpoints and metrics
-axum = { version = "=0.8.8", default-features = false, features = ["http1", "tokio"] }
+axum = { version = "=0.8.8", default-features = false, features = ["http1", "tokio", "json"] }
+axum-server = { version = "=0.7.3", default-features = false, features = ["tls-rustls-no-provider"] }
 prometheus-client = { version = "=0.24.0", default-features = false }
+rustls-pemfile = { version = "=2.2.0", default-features = false, features = ["std"] }
 
 # HTTP client for Patroni API queries
 hyper = { version = "=1.8.1", default-features = false, features = ["client", "http1"] }

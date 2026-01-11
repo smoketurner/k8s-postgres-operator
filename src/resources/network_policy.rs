@@ -268,7 +268,10 @@ pub fn generate_network_policy(cluster: &PostgresCluster) -> NetworkPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{NetworkPolicySpec as CrdNetworkPolicySpec, PostgresClusterSpec, PostgresVersion, StorageSpec, TLSSpec};
+    use crate::crd::{
+        NetworkPolicySpec as CrdNetworkPolicySpec, PostgresClusterSpec, PostgresVersion,
+        StorageSpec, TLSSpec,
+    };
 
     fn create_test_cluster(network_policy: Option<CrdNetworkPolicySpec>) -> PostgresCluster {
         PostgresCluster {
@@ -306,13 +309,19 @@ mod tests {
         let cluster = create_test_cluster(None);
         let np = generate_network_policy(&cluster);
 
-        assert_eq!(np.metadata.name, Some("test-cluster-network-policy".to_string()));
+        assert_eq!(
+            np.metadata.name,
+            Some("test-cluster-network-policy".to_string())
+        );
         assert_eq!(np.metadata.namespace, Some("test-ns".to_string()));
 
         let spec = np.spec.unwrap();
 
         // Should have both ingress and egress policies
-        assert_eq!(spec.policy_types, Some(vec!["Ingress".to_string(), "Egress".to_string()]));
+        assert_eq!(
+            spec.policy_types,
+            Some(vec!["Ingress".to_string(), "Egress".to_string()])
+        );
 
         // Should have ingress rules for: namespace, patroni, operator
         let ingress = spec.ingress.unwrap();
@@ -353,13 +362,17 @@ mod tests {
                 peers.iter().any(|peer| {
                     peer.namespace_selector.as_ref().is_some_and(|sel| {
                         sel.match_labels.as_ref().is_some_and(|labels| {
-                            labels.get("kubernetes.io/metadata.name") == Some(&OPERATOR_NAMESPACE.to_string())
+                            labels.get("kubernetes.io/metadata.name")
+                                == Some(&OPERATOR_NAMESPACE.to_string())
                         })
                     })
                 })
             })
         });
 
-        assert!(operator_rule.is_some(), "Operator namespace must always be allowed");
+        assert!(
+            operator_rule.is_some(),
+            "Operator namespace must always be allowed"
+        );
     }
 }

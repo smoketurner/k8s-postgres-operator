@@ -418,9 +418,7 @@ pub async fn update_scaling_pause_state(
     }
 
     let name = format!("{}-readers", cluster.name_any());
-    let ns = cluster
-        .namespace()
-        .unwrap_or_else(|| "default".to_string());
+    let ns = cluster.namespace().unwrap_or_else(|| "default".to_string());
 
     let ar = ApiResource {
         group: KEDA_API_GROUP.to_string(),

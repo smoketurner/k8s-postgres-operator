@@ -32,6 +32,13 @@ spec:
         - name: operator
           image: localhost:32000/postgres-operator:latest
           imagePullPolicy: Always
+          ports:
+            - name: health
+              containerPort: 8080
+              protocol: TCP
+            - name: webhook
+              containerPort: 8443
+              protocol: TCP
           env:
             - name: RUST_LOG
               value: info
@@ -68,4 +75,15 @@ spec:
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
+          volumeMounts:
+            # Webhook TLS certificates (mounted from cert-manager secret)
+            - name: webhook-certs
+              mountPath: /etc/webhook/certs
+              readOnly: true
+      volumes:
+        # Webhook TLS certificates from cert-manager
+        - name: webhook-certs
+          secret:
+            secretName: postgres-operator-webhook-tls
+            optional: true # Allow deployment to start without webhook
       terminationGracePeriodSeconds: 10
