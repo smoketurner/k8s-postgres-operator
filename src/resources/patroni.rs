@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 
 use crate::crd::PostgresCluster;
 use crate::resources::backup;
-use crate::resources::common::{owner_reference, patroni_labels};
+use crate::resources::common::{owner_reference, patroni_cluster_labels, patroni_labels};
 
 /// Default PostgreSQL parameters for HA operation
 const DEFAULT_POSTGRESQL_PARAMS: &[(&str, &str)] = &[
@@ -365,7 +365,8 @@ fn generate_anti_affinity(cluster_name: &str) -> Affinity {
 pub fn generate_patroni_statefulset(cluster: &PostgresCluster, keda_managed: bool) -> StatefulSet {
     let name = cluster.name_any();
     let ns = cluster.namespace();
-    let labels = patroni_labels(&name);
+    // Use patroni_cluster_labels to include user-defined labels (e.g., cost allocation)
+    let labels = patroni_cluster_labels(cluster);
     // When KEDA manages replicas, don't set the field to avoid conflicts
     let replicas = if keda_managed {
         None

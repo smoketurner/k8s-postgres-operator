@@ -187,3 +187,57 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Short timeout for quick checks
 pub const SHORT_TIMEOUT: Duration = Duration::from_secs(30);
+
+// =============================================================================
+// Generic Resource Watchers
+// =============================================================================
+
+/// Condition that checks if a resource exists (is not None)
+pub fn exists<T>() -> impl Condition<T>
+where
+    T: kube::Resource,
+{
+    |obj: Option<&T>| obj.is_some()
+}
+
+/// Wait for any resource to exist using watches
+pub async fn wait_for_resource<T>(
+    api: &Api<T>,
+    name: &str,
+    timeout: Duration,
+) -> Result<T, WaitError>
+where
+    T: kube::Resource + Clone + std::fmt::Debug + Send + Sync + 'static,
+    T: serde::de::DeserializeOwned,
+{
+    let cond = await_condition(api.clone(), name, exists::<T>());
+
+    let result = tokio::time::timeout(timeout, cond)
+        .await
+        .map_err(|_| WaitError::Timeout)?
+        .map_err(WaitError::Watch)?;
+
+    result.ok_or(WaitError::ResourceNotFound)
+}
+
+/// Wait for any resource to be deleted using watches
+pub async fn wait_for_resource_deletion<T>(
+    api: &Api<T>,
+    name: &str,
+    timeout: Duration,
+) -> Result<(), WaitError>
+where
+    T: kube::Resource + Clone + std::fmt::Debug + Send + Sync + 'static,
+    T: serde::de::DeserializeOwned,
+{
+    use kube::runtime::wait::conditions;
+
+    let cond = await_condition(api.clone(), name, conditions::is_deleted(""));
+
+    tokio::time::timeout(timeout, cond)
+        .await
+        .map_err(|_| WaitError::Timeout)?
+        .map_err(WaitError::Watch)?;
+
+    Ok(())
+}

@@ -401,6 +401,36 @@ impl PostgresClusterBuilder {
         self
     }
 
+    /// Enable network policy with default settings (secure by default)
+    pub fn with_network_policy(mut self) -> Self {
+        self.network_policy = Some(postgres_operator::crd::NetworkPolicySpec {
+            allow_external_access: false,
+            allow_from: vec![],
+        });
+        self
+    }
+
+    /// Enable network policy with external access (for testing)
+    pub fn with_network_policy_external_access(mut self) -> Self {
+        self.network_policy = Some(postgres_operator::crd::NetworkPolicySpec {
+            allow_external_access: true,
+            allow_from: vec![],
+        });
+        self
+    }
+
+    /// Enable network policy with cross-namespace access
+    pub fn with_network_policy_allow_from(
+        mut self,
+        peers: Vec<postgres_operator::crd::NetworkPolicyPeer>,
+    ) -> Self {
+        self.network_policy = Some(postgres_operator::crd::NetworkPolicySpec {
+            allow_external_access: false,
+            allow_from: peers,
+        });
+        self
+    }
+
     /// Build the PostgresCluster resource
     pub fn build(self) -> PostgresCluster {
         PostgresCluster {

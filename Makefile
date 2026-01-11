@@ -45,13 +45,7 @@ test: ## Run unit tests
 audit: ## Run security audit on dependencies
 	$(CARGO) audit
 
-test-integration: install ## Run fast integration tests (requires running cluster)
-	$(CARGO) test --test integration tests:: -- --ignored --test-threads=1
-
-test-integration-slow: install ## Run slow integration tests - waits for pods (~5min)
-	$(CARGO) test --test integration slow_tests:: -- --ignored --test-threads=1
-
-test-integration-all: install ## Run all integration tests (fast + slow)
+test-integration: install ## Run integration tests (requires running cluster)
 	$(CARGO) test --test integration -- --ignored --test-threads=1
 
 ##@ Installation

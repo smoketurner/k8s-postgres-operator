@@ -989,3 +989,766 @@ mod edge_case_tests {
         assert!(sts.metadata.name.is_some());
     }
 }
+
+// =============================================================================
+// NetworkPolicy Property Tests
+// =============================================================================
+
+mod network_policy_tests {
+    use super::*;
+    use postgres_operator::crd::{
+        LabelSelectorConfig, LabelSelectorRequirement, NetworkPolicyPeer as CrdNetworkPolicyPeer,
+        NetworkPolicySpec as CrdNetworkPolicySpec,
+    };
+    use postgres_operator::resources::network_policy;
+
+    /// Generate an optional NetworkPolicySpec
+    fn optional_network_policy() -> impl Strategy<Value = Option<CrdNetworkPolicySpec>> {
+        prop_oneof![
+            Just(None),
+            // No external access, no allowFrom
+            Just(Some(CrdNetworkPolicySpec {
+                allow_external_access: false,
+                allow_from: vec![],
+            })),
+            // External access enabled
+            Just(Some(CrdNetworkPolicySpec {
+                allow_external_access: true,
+                allow_from: vec![],
+            })),
+            // With allowFrom peer (namespace selector)
+            Just(Some(CrdNetworkPolicySpec {
+                allow_external_access: false,
+                allow_from: vec![CrdNetworkPolicyPeer {
+                    namespace_selector: Some(LabelSelectorConfig {
+                        match_labels: Some(
+                            [("team".to_string(), "backend".to_string())]
+                                .into_iter()
+                                .collect(),
+                        ),
+                        match_expressions: vec![],
+                    }),
+                    pod_selector: None,
+                }],
+            })),
+            // With allowFrom peer (pod selector)
+            Just(Some(CrdNetworkPolicySpec {
+                allow_external_access: false,
+                allow_from: vec![CrdNetworkPolicyPeer {
+                    namespace_selector: None,
+                    pod_selector: Some(LabelSelectorConfig {
+                        match_labels: Some(
+                            [("app".to_string(), "api".to_string())]
+                                .into_iter()
+                                .collect(),
+                        ),
+                        match_expressions: vec![],
+                    }),
+                }],
+            })),
+            // With match expressions
+            Just(Some(CrdNetworkPolicySpec {
+                allow_external_access: false,
+                allow_from: vec![CrdNetworkPolicyPeer {
+                    namespace_selector: Some(LabelSelectorConfig {
+                        match_labels: None,
+                        match_expressions: vec![LabelSelectorRequirement {
+                            key: "env".to_string(),
+                            operator: "In".to_string(),
+                            values: vec!["staging".to_string(), "production".to_string()],
+                        }],
+                    }),
+                    pod_selector: None,
+                }],
+            })),
+            // Multiple peers
+            Just(Some(CrdNetworkPolicySpec {
+                allow_external_access: true,
+                allow_from: vec![
+                    CrdNetworkPolicyPeer {
+                        namespace_selector: Some(LabelSelectorConfig {
+                            match_labels: Some(
+                                [("team".to_string(), "frontend".to_string())]
+                                    .into_iter()
+                                    .collect(),
+                            ),
+                            match_expressions: vec![],
+                        }),
+                        pod_selector: None,
+                    },
+                    CrdNetworkPolicyPeer {
+                        namespace_selector: Some(LabelSelectorConfig {
+                            match_labels: Some(
+                                [("team".to_string(), "backend".to_string())]
+                                    .into_iter()
+                                    .collect(),
+                            ),
+                            match_expressions: vec![],
+                        }),
+                        pod_selector: None,
+                    },
+                ],
+            })),
+        ]
+    }
+
+    fn cluster_with_network_policy(
+        network_policy: Option<CrdNetworkPolicySpec>,
+    ) -> PostgresCluster {
+        let spec = PostgresClusterSpec {
+            version: PostgresVersion::V16,
+            replicas: 3,
+            storage: StorageSpec {
+                size: "10Gi".to_string(),
+                storage_class: None,
+            },
+            resources: None,
+            postgresql_params: Default::default(),
+            labels: Default::default(),
+            backup: None,
+            pgbouncer: None,
+            tls: TLSSpec::default(),
+            metrics: None,
+            service: None,
+            restore: None,
+            scaling: None,
+            network_policy,
+        };
+        cluster_from_spec(spec)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        /// Property: NetworkPolicy generation never panics for any configuration
+        #[test]
+        fn prop_network_policy_no_panic(np_spec in optional_network_policy()) {
+            let cluster = cluster_with_network_policy(np_spec);
+            let np = network_policy::generate_network_policy(&cluster);
+
+            // Should always generate valid NetworkPolicy
+            prop_assert!(np.metadata.name.is_some());
+            prop_assert!(np.spec.is_some());
+        }
+
+        /// Property: NetworkPolicy always has operator namespace access
+        #[test]
+        fn prop_network_policy_operator_access(np_spec in optional_network_policy()) {
+            let cluster = cluster_with_network_policy(np_spec);
+            let np = network_policy::generate_network_policy(&cluster);
+
+            let spec = np.spec.unwrap();
+            let ingress = spec.ingress.unwrap();
+
+            // Find operator namespace rule
+            let has_operator_rule = ingress.iter().any(|rule| {
+                rule.from.as_ref().is_some_and(|peers| {
+                    peers.iter().any(|peer| {
+                        peer.namespace_selector.as_ref().is_some_and(|sel| {
+                            sel.match_labels.as_ref().is_some_and(|labels| {
+                                labels.get("kubernetes.io/metadata.name")
+                                    == Some(&"postgres-operator-system".to_string())
+                            })
+                        })
+                    })
+                })
+            });
+
+            prop_assert!(has_operator_rule, "Operator namespace must always be allowed");
+        }
+
+        /// Property: NetworkPolicy always has egress rules for DNS and K8s API
+        #[test]
+        fn prop_network_policy_required_egress(np_spec in optional_network_policy()) {
+            let cluster = cluster_with_network_policy(np_spec);
+            let np = network_policy::generate_network_policy(&cluster);
+
+            let spec = np.spec.unwrap();
+            let egress = spec.egress.unwrap();
+
+            // Should have at least 3 egress rules
+            prop_assert!(egress.len() >= 3, "Should have egress rules for DNS, K8s API, and replication");
+        }
+
+        /// Property: External access adds RFC1918 CIDRs when enabled
+        #[test]
+        fn prop_external_access_adds_cidrs(allow_external in proptest::bool::ANY) {
+            let np_spec = Some(CrdNetworkPolicySpec {
+                allow_external_access: allow_external,
+                allow_from: vec![],
+            });
+            let cluster = cluster_with_network_policy(np_spec);
+            let np = network_policy::generate_network_policy(&cluster);
+
+            let spec = np.spec.unwrap();
+            let ingress = spec.ingress.unwrap();
+
+            let has_ip_blocks = ingress.iter().any(|rule| {
+                rule.from.as_ref().is_some_and(|peers| {
+                    peers.iter().any(|peer| peer.ip_block.is_some())
+                })
+            });
+
+            if allow_external {
+                prop_assert!(has_ip_blocks, "External access should add IP blocks");
+            } else {
+                prop_assert!(!has_ip_blocks, "No external access should not add IP blocks");
+            }
+        }
+    }
+}
+
+// =============================================================================
+// SQL Security Property Tests
+// =============================================================================
+
+mod sql_security_tests {
+    use super::*;
+    use postgres_operator::resources::sql::{
+        escape_sql_string_pub, is_valid_identifier, quote_identifier_pub,
+    };
+
+    /// Generate strings that might attempt SQL injection
+    fn sql_injection_attempts() -> impl Strategy<Value = String> {
+        prop_oneof![
+            // Classic injection attempts
+            Just("'; DROP TABLE users;--".to_string()),
+            Just("' OR '1'='1".to_string()),
+            Just("\"; DROP TABLE users;--".to_string()),
+            Just("' UNION SELECT * FROM passwords --".to_string()),
+            // Quote escaping attempts
+            Just("it's".to_string()),
+            Just("user\"name".to_string()),
+            Just("test''injection".to_string()),
+            Just("a'b'c".to_string()),
+            // Unicode attempts
+            Just("café".to_string()),
+            Just("日本語".to_string()),
+            Just("🐘postgres".to_string()),
+            // Whitespace manipulation
+            Just("  spaces  ".to_string()),
+            Just("tab\there".to_string()),
+            Just("new\nline".to_string()),
+            // Empty and special
+            Just("".to_string()),
+            Just("a".to_string()),
+            Just("_underscore".to_string()),
+            // Long strings
+            Just("a".repeat(100)),
+            Just("'".repeat(50)),
+        ]
+    }
+
+    /// Generate valid PostgreSQL identifier names
+    fn valid_identifier_names() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("users".to_string()),
+            Just("my_table".to_string()),
+            Just("table123".to_string()),
+            Just("_private".to_string()),
+            Just("a".to_string()),
+            Just("abcdefghij".to_string()),
+            // Maximum length identifier
+            Just("a".repeat(63)),
+        ]
+    }
+
+    /// Generate invalid PostgreSQL identifier names
+    fn invalid_identifier_names() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("".to_string()),           // Empty
+            Just("123abc".to_string()),     // Starts with number
+            Just("User".to_string()),       // Uppercase
+            Just("user-table".to_string()), // Hyphen
+            Just("user table".to_string()), // Space
+            Just("a".repeat(64)),           // Too long
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        /// Property: Quote identifier never panics and always produces quoted output
+        #[test]
+        fn prop_quote_identifier_never_panics(input in sql_injection_attempts()) {
+            let result = quote_identifier_pub(&input);
+
+            // Should always produce a string starting and ending with double quotes
+            prop_assert!(result.starts_with('"'));
+            prop_assert!(result.ends_with('"'));
+        }
+
+        /// Property: Escape SQL string never panics
+        #[test]
+        fn prop_escape_sql_string_never_panics(input in sql_injection_attempts()) {
+            let result = escape_sql_string_pub(&input);
+
+            // Should not contain unescaped single quotes (each ' becomes '')
+            // Count single quotes in output vs input
+            let input_quotes = input.matches('\'').count();
+            let output_quotes = result.matches('\'').count();
+
+            // Each single quote in input becomes two in output
+            prop_assert_eq!(output_quotes, input_quotes * 2);
+        }
+
+        /// Property: Valid identifiers pass validation
+        #[test]
+        fn prop_valid_identifiers_pass(name in valid_identifier_names()) {
+            prop_assert!(is_valid_identifier(&name), "Valid identifier should pass: {}", name);
+        }
+
+        /// Property: Invalid identifiers fail validation
+        #[test]
+        fn prop_invalid_identifiers_fail(name in invalid_identifier_names()) {
+            prop_assert!(!is_valid_identifier(&name), "Invalid identifier should fail: {}", name);
+        }
+
+        /// Property: Quoted identifiers cannot break out of quotes
+        #[test]
+        fn prop_quoted_identifier_safe(input in sql_injection_attempts()) {
+            let quoted = quote_identifier_pub(&input);
+
+            // The result should be properly quoted - no unescaped double quotes inside
+            let inner = &quoted[1..quoted.len()-1]; // Remove outer quotes
+
+            // Count consecutive double quotes - they should all be pairs (escaped)
+            let mut i = 0;
+            let chars: Vec<char> = inner.chars().collect();
+            while i < chars.len() {
+                if chars[i] == '"' {
+                    // Must be followed by another quote (escaped)
+                    prop_assert!(i + 1 < chars.len() && chars[i + 1] == '"',
+                        "Found unescaped double quote in: {}", quoted);
+                    i += 2; // Skip the pair
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
+// PostgresDatabase Property Tests
+// =============================================================================
+
+mod database_crd_tests {
+    use super::*;
+    use postgres_operator::crd::{
+        ClusterRef, DatabasePhase, DatabaseSpec, GrantSpec, PostgresDatabase, PostgresDatabaseSpec,
+        RolePrivilege, RoleSpec, TablePrivilege,
+    };
+
+    /// Generate valid database names
+    fn valid_database_name() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("mydb".to_string()),
+            Just("orders".to_string()),
+            Just("user_data".to_string()),
+            Just("app123".to_string()),
+            Just("_internal".to_string()),
+        ]
+    }
+
+    /// Generate role specs
+    fn role_spec() -> impl Strategy<Value = RoleSpec> {
+        (
+            valid_database_name(),
+            prop::collection::vec(
+                prop_oneof![
+                    Just(RolePrivilege::Login),
+                    Just(RolePrivilege::Createdb),
+                    Just(RolePrivilege::Createrole),
+                ],
+                0..3,
+            ),
+        )
+            .prop_map(|(name, privileges)| RoleSpec {
+                name: name.clone(),
+                privileges,
+                secret_name: format!("{}-creds", name),
+                connection_limit: None,
+                login: true,
+            })
+    }
+
+    /// Generate grant specs
+    fn grant_spec() -> impl Strategy<Value = GrantSpec> {
+        (
+            valid_database_name(),
+            prop::collection::vec(
+                prop_oneof![
+                    Just(TablePrivilege::Select),
+                    Just(TablePrivilege::Insert),
+                    Just(TablePrivilege::Update),
+                    Just(TablePrivilege::Delete),
+                ],
+                1..4,
+            ),
+        )
+            .prop_map(|(role, privileges)| GrantSpec {
+                role,
+                schema: "public".to_string(),
+                privileges,
+                all_tables: true,
+                all_sequences: false,
+                all_functions: false,
+            })
+    }
+
+    /// Generate a PostgresDatabase spec
+    fn postgres_database_spec() -> impl Strategy<Value = PostgresDatabaseSpec> {
+        (
+            valid_database_name(),
+            valid_database_name(),
+            prop::collection::vec(role_spec(), 0..3),
+            prop::collection::vec(grant_spec(), 0..2),
+            prop::collection::vec(
+                prop_oneof![
+                    Just("uuid-ossp".to_string()),
+                    Just("pg_trgm".to_string()),
+                    Just("hstore".to_string()),
+                ],
+                0..3,
+            ),
+        )
+            .prop_map(
+                |(db_name, owner, roles, grants, extensions)| PostgresDatabaseSpec {
+                    cluster_ref: ClusterRef {
+                        name: "test-cluster".to_string(),
+                        namespace: Some("default".to_string()),
+                    },
+                    database: DatabaseSpec {
+                        name: db_name,
+                        owner,
+                        encoding: None,
+                        locale: None,
+                        connection_limit: None,
+                    },
+                    roles,
+                    grants,
+                    extensions,
+                },
+            )
+    }
+
+    fn create_postgres_database(spec: PostgresDatabaseSpec) -> PostgresDatabase {
+        PostgresDatabase {
+            metadata: kube::core::ObjectMeta {
+                name: Some("test-db".to_string()),
+                namespace: Some("test-ns".to_string()),
+                uid: Some("test-uid".to_string()),
+                ..Default::default()
+            },
+            spec,
+            status: None,
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        /// Property: PostgresDatabase spec structure is always valid
+        #[test]
+        fn prop_database_spec_valid_structure(spec in postgres_database_spec()) {
+            let db = create_postgres_database(spec);
+
+            // Basic structure should be valid
+            prop_assert!(db.metadata.name.is_some());
+            prop_assert!(!db.spec.database.name.is_empty());
+            prop_assert!(!db.spec.database.owner.is_empty());
+        }
+
+        /// Property: All roles have valid secret names
+        #[test]
+        fn prop_roles_have_secret_names(spec in postgres_database_spec()) {
+            for role in &spec.roles {
+                prop_assert!(!role.secret_name.is_empty(), "Role secret name should not be empty");
+            }
+        }
+
+        /// Property: Default phase is Pending
+        #[test]
+        fn prop_default_phase_is_pending(_spec in postgres_database_spec()) {
+            let phase = DatabasePhase::default();
+            prop_assert_eq!(phase, DatabasePhase::Pending);
+        }
+    }
+}
+
+// =============================================================================
+// Webhook Policy Property Tests
+// =============================================================================
+
+mod webhook_policy_tests {
+    use super::*;
+    use postgres_operator::crd::{
+        BackupDestination, BackupSpec, EncryptionSpec, IssuerKind, IssuerRef, NetworkPolicySpec,
+        ResourceList, ResourceRequirements, RetentionPolicy,
+    };
+    use postgres_operator::webhooks::policies::{
+        ValidationContext, validate_all, validate_backup, validate_immutability, validate_tls,
+    };
+    use std::collections::BTreeMap;
+
+    /// Generate backup specs with varying encryption
+    fn backup_spec_with_encryption(has_encryption: bool) -> BackupSpec {
+        BackupSpec {
+            schedule: "0 2 * * *".to_string(),
+            retention: RetentionPolicy {
+                count: Some(7),
+                max_age: None,
+            },
+            destination: BackupDestination::S3 {
+                bucket: "test-bucket".to_string(),
+                region: "us-east-1".to_string(),
+                endpoint: None,
+                credentials_secret: "aws-creds".to_string(),
+                path: None,
+                disable_sse: false,
+                force_path_style: false,
+            },
+            encryption: if has_encryption {
+                Some(EncryptionSpec {
+                    method: Default::default(),
+                    key_secret: "encryption-key".to_string(),
+                })
+            } else {
+                None
+            },
+            wal_archiving: None,
+            compression: None,
+            backup_from_replica: false,
+            upload_concurrency: None,
+            download_concurrency: None,
+            enable_delta_backups: false,
+            delta_max_steps: None,
+        }
+    }
+
+    /// Create a test cluster from a spec
+    fn test_cluster_from_spec(spec: PostgresClusterSpec) -> PostgresCluster {
+        PostgresCluster {
+            metadata: kube::core::ObjectMeta {
+                name: Some("test-cluster".to_string()),
+                namespace: Some("default".to_string()),
+                uid: Some("test-uid".to_string()),
+                ..Default::default()
+            },
+            spec,
+            status: None,
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(50))]
+
+        /// Property: Backup policy is deterministic
+        #[test]
+        fn prop_backup_policy_deterministic(has_encryption in proptest::bool::ANY) {
+            let spec = PostgresClusterSpec {
+                version: PostgresVersion::V16,
+                replicas: 3,
+                storage: StorageSpec {
+                    size: "10Gi".to_string(),
+                    storage_class: None,
+                },
+                resources: None,
+                postgresql_params: Default::default(),
+                labels: Default::default(),
+                backup: Some(backup_spec_with_encryption(has_encryption)),
+                pgbouncer: None,
+                tls: TLSSpec::default(),
+                metrics: None,
+                service: None,
+                restore: None,
+                scaling: None,
+                network_policy: None,
+            };
+
+            let cluster = test_cluster_from_spec(spec);
+            let ctx = ValidationContext::new(&cluster, None, BTreeMap::new());
+
+            let result1 = validate_backup(&ctx);
+            let result2 = validate_backup(&ctx);
+
+            prop_assert_eq!(result1.allowed, result2.allowed, "Backup policy should be deterministic");
+        }
+
+        /// Property: TLS policy requires issuer when enabled
+        #[test]
+        fn prop_tls_policy_requires_issuer(tls_enabled in proptest::bool::ANY, has_issuer in proptest::bool::ANY) {
+            let spec = PostgresClusterSpec {
+                version: PostgresVersion::V16,
+                replicas: 3,
+                storage: StorageSpec {
+                    size: "10Gi".to_string(),
+                    storage_class: None,
+                },
+                resources: None,
+                postgresql_params: Default::default(),
+                labels: Default::default(),
+                backup: None,
+                pgbouncer: None,
+                tls: TLSSpec {
+                    enabled: tls_enabled,
+                    issuer_ref: if has_issuer {
+                        Some(IssuerRef {
+                            name: "test-issuer".to_string(),
+                            kind: IssuerKind::ClusterIssuer,
+                            group: "cert-manager.io".to_string(),
+                        })
+                    } else {
+                        None
+                    },
+                    additional_dns_names: vec![],
+                    duration: None,
+                    renew_before: None,
+                },
+                metrics: None,
+                service: None,
+                restore: None,
+                scaling: None,
+                network_policy: None,
+            };
+
+            let cluster = test_cluster_from_spec(spec);
+            let ctx = ValidationContext::new(&cluster, None, BTreeMap::new());
+            let result = validate_tls(&ctx);
+
+            if !tls_enabled {
+                prop_assert!(result.allowed, "TLS disabled should always pass");
+            } else if has_issuer {
+                prop_assert!(result.allowed, "TLS enabled with issuer should pass");
+            } else {
+                prop_assert!(!result.allowed, "TLS enabled without issuer should fail");
+            }
+        }
+
+        /// Property: Version downgrades are always rejected
+        #[test]
+        fn prop_version_downgrade_rejected(
+            old_ver in prop_oneof![Just(PostgresVersion::V16), Just(PostgresVersion::V17)],
+            new_ver in prop_oneof![Just(PostgresVersion::V15), Just(PostgresVersion::V16)]
+        ) {
+            let old_major = old_ver.as_major_version();
+            let new_major = new_ver.as_major_version();
+
+            let old_spec = PostgresClusterSpec {
+                version: old_ver,
+                replicas: 3,
+                storage: StorageSpec {
+                    size: "10Gi".to_string(),
+                    storage_class: Some("standard".to_string()),
+                },
+                resources: None,
+                postgresql_params: Default::default(),
+                labels: Default::default(),
+                backup: None,
+                pgbouncer: None,
+                tls: TLSSpec::default(),
+                metrics: None,
+                service: None,
+                restore: None,
+                scaling: None,
+                network_policy: None,
+            };
+
+            let new_spec = PostgresClusterSpec {
+                version: new_ver,
+                ..old_spec.clone()
+            };
+
+            let old_cluster = test_cluster_from_spec(old_spec);
+            let new_cluster = test_cluster_from_spec(new_spec);
+            let ctx = ValidationContext::new(&new_cluster, Some(&old_cluster), BTreeMap::new());
+            let result = validate_immutability(&ctx);
+
+            let is_downgrade = old_major > new_major;
+            if is_downgrade {
+                prop_assert!(!result.allowed, "Version downgrade should be rejected");
+            }
+        }
+
+        /// Property: Production policy enforces replica requirements in production namespaces
+        #[test]
+        fn prop_production_requires_replicas(replicas in 1..=5i32, is_production in proptest::bool::ANY) {
+            let spec = PostgresClusterSpec {
+                version: PostgresVersion::V16,
+                replicas,
+                storage: StorageSpec {
+                    size: "10Gi".to_string(),
+                    storage_class: None,
+                },
+                resources: Some(ResourceRequirements {
+                    requests: Some(ResourceList {
+                        cpu: Some("1".to_string()),
+                        memory: Some("2Gi".to_string()),
+                    }),
+                    limits: Some(ResourceList {
+                        cpu: Some("2".to_string()),
+                        memory: Some("4Gi".to_string()),
+                    }),
+                    restart_on_resize: None,
+                }),
+                postgresql_params: Default::default(),
+                labels: Default::default(),
+                backup: Some(backup_spec_with_encryption(true)),
+                pgbouncer: None,
+                // TLS disabled to avoid needing an issuer ref
+                tls: TLSSpec {
+                    enabled: false,
+                    issuer_ref: None,
+                    additional_dns_names: vec![],
+                    duration: None,
+                    renew_before: None,
+                },
+                metrics: None,
+                service: None,
+                restore: None,
+                scaling: None,
+                network_policy: Some(NetworkPolicySpec {
+                    allow_external_access: false,
+                    allow_from: vec![],
+                }),
+            };
+
+            let cluster = test_cluster_from_spec(spec);
+            let namespace_labels = if is_production {
+                BTreeMap::from([("env".to_string(), "production".to_string())])
+            } else {
+                BTreeMap::new()
+            };
+            let ctx = ValidationContext::new(&cluster, None, namespace_labels);
+
+            // Use validate_all which checks is_production_namespace() before applying production rules
+            let result = validate_all(&ctx);
+
+            if !is_production {
+                // Non-production clusters should pass (no production rules applied)
+                // This assumes the cluster spec is otherwise valid
+                prop_assert!(result.allowed, "Non-production should pass all validation");
+            } else if replicas < 3 {
+                // Production with less than 3 replicas should fail
+                prop_assert!(!result.allowed, "Production with {} replicas should fail", replicas);
+            } else {
+                // Production with 3+ replicas and all other requirements met should pass
+                prop_assert!(result.allowed, "Valid production cluster should pass");
+            }
+        }
+
+        /// Property: validate_all is deterministic
+        #[test]
+        fn prop_validate_all_deterministic(spec in valid_spec()) {
+            let cluster = cluster_from_spec(spec);
+            let ctx = ValidationContext::new(&cluster, None, BTreeMap::new());
+
+            let result1 = validate_all(&ctx);
+            let result2 = validate_all(&ctx);
+
+            prop_assert_eq!(result1.allowed, result2.allowed, "validate_all should be deterministic");
+            prop_assert_eq!(result1.reason, result2.reason, "validate_all reason should be deterministic");
+        }
+    }
+}

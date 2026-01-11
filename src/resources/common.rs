@@ -102,6 +102,22 @@ pub fn patroni_labels(cluster_name: &str) -> BTreeMap<String, String> {
     labels
 }
 
+/// Generate labels for Patroni-managed resources including user-defined labels.
+///
+/// This combines cluster_labels (which includes user-defined cost allocation labels)
+/// with Patroni-specific labels required for DCS discovery.
+pub fn patroni_cluster_labels(cluster: &PostgresCluster) -> BTreeMap<String, String> {
+    let mut labels = cluster_labels(cluster);
+    labels.insert(
+        "postgres-operator.smoketurner.com/ha-mode".to_string(),
+        "patroni".to_string(),
+    );
+    // Required for Patroni's Kubernetes DCS pod discovery
+    // Must match the KUBERNETES_LABELS env var
+    labels.insert("application".to_string(), "spilo".to_string());
+    labels
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,5 +272,64 @@ mod tests {
             labels.get("postgres-operator.smoketurner.com/cluster"),
             Some(&"real-cluster".to_string())
         );
+    }
+
+    #[test]
+    fn test_patroni_cluster_labels_includes_user_labels() {
+        use crate::crd::{
+            PostgresCluster, PostgresClusterSpec, PostgresVersion, StorageSpec, TLSSpec,
+        };
+        use kube::core::ObjectMeta;
+
+        let mut user_labels = BTreeMap::new();
+        user_labels.insert("team".to_string(), "platform".to_string());
+        user_labels.insert("cost-center".to_string(), "eng-001".to_string());
+
+        let cluster = PostgresCluster {
+            metadata: ObjectMeta {
+                name: Some("my-cluster".to_string()),
+                namespace: Some("test-ns".to_string()),
+                ..Default::default()
+            },
+            spec: PostgresClusterSpec {
+                version: PostgresVersion::V16,
+                replicas: 1,
+                storage: StorageSpec {
+                    size: "10Gi".to_string(),
+                    storage_class: None,
+                },
+                labels: user_labels,
+                resources: None,
+                postgresql_params: Default::default(),
+                backup: None,
+                pgbouncer: None,
+                tls: TLSSpec::default(),
+                metrics: None,
+                service: None,
+                restore: None,
+                scaling: None,
+                network_policy: None,
+            },
+            status: None,
+        };
+
+        let labels = patroni_cluster_labels(&cluster);
+
+        // Should have standard labels
+        assert_eq!(
+            labels.get("app.kubernetes.io/name"),
+            Some(&"my-cluster".to_string())
+        );
+
+        // Should have patroni-specific labels
+        assert_eq!(
+            labels.get("postgres-operator.smoketurner.com/ha-mode"),
+            Some(&"patroni".to_string())
+        );
+        assert_eq!(labels.get("application"), Some(&"spilo".to_string()));
+
+        // Should have user-defined labels
+        assert_eq!(labels.get("team"), Some(&"platform".to_string()));
+        assert_eq!(labels.get("cost-center"), Some(&"eng-001".to_string()));
     }
 }

@@ -5,9 +5,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use k8s_openapi::ByteString;
 use k8s_openapi::api::core::v1::Secret;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
-use k8s_openapi::ByteString;
 use kube::api::{Api, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::{Client, Resource, ResourceExt};
@@ -113,7 +113,10 @@ pub async fn reconcile_database(
                 status: "False".to_string(),
                 last_transition_time: Some(chrono::Utc::now().to_rfc3339()),
                 reason: Some("ClusterNotReady".to_string()),
-                message: Some(format!("Cluster {} is in phase {}", db.spec.cluster_ref.name, cluster_phase)),
+                message: Some(format!(
+                    "Cluster {} is in phase {}",
+                    db.spec.cluster_ref.name, cluster_phase
+                )),
             }],
             None,
             vec![],
@@ -314,7 +317,11 @@ async fn create_role_with_secret(
     let password = existing_password.unwrap_or_else(generate_password);
 
     // Build privileges list
-    let privileges: Vec<String> = role_spec.privileges.iter().map(|p| p.as_sql().to_string()).collect();
+    let privileges: Vec<String> = role_spec
+        .privileges
+        .iter()
+        .map(|p| p.as_sql().to_string())
+        .collect();
 
     // Create or update the role
     ensure_role(
@@ -367,16 +374,31 @@ async fn create_role_with_secret(
         type_: Some("Opaque".to_string()),
         data: Some(
             [
-                ("username".to_string(), ByteString(role_name.as_bytes().to_vec())),
-                ("password".to_string(), ByteString(password.as_bytes().to_vec())),
+                (
+                    "username".to_string(),
+                    ByteString(role_name.as_bytes().to_vec()),
+                ),
+                (
+                    "password".to_string(),
+                    ByteString(password.as_bytes().to_vec()),
+                ),
                 ("host".to_string(), ByteString(host.as_bytes().to_vec())),
-                ("port".to_string(), ByteString(port.to_string().as_bytes().to_vec())),
-                ("database".to_string(), ByteString(db_name.as_bytes().to_vec())),
+                (
+                    "port".to_string(),
+                    ByteString(port.to_string().as_bytes().to_vec()),
+                ),
+                (
+                    "database".to_string(),
+                    ByteString(db_name.as_bytes().to_vec()),
+                ),
                 (
                     "connection-string".to_string(),
                     ByteString(connection_string.as_bytes().to_vec()),
                 ),
-                ("jdbc-url".to_string(), ByteString(jdbc_url.as_bytes().to_vec())),
+                (
+                    "jdbc-url".to_string(),
+                    ByteString(jdbc_url.as_bytes().to_vec()),
+                ),
             ]
             .into_iter()
             .collect(),
@@ -404,7 +426,11 @@ async fn apply_grant(
     db_name: &str,
     grant: &GrantSpec,
 ) -> Result<()> {
-    let privileges: Vec<String> = grant.privileges.iter().map(|p| p.as_sql().to_string()).collect();
+    let privileges: Vec<String> = grant
+        .privileges
+        .iter()
+        .map(|p| p.as_sql().to_string())
+        .collect();
 
     if !privileges.is_empty() && grant.all_tables {
         grant_privileges(
@@ -456,22 +482,33 @@ async fn handle_deletion(
         if *cluster_phase == ClusterPhase::Running {
             // Drop roles first (they depend on the database)
             for role_spec in &db.spec.roles {
-                if let Err(e) = drop_role(&ctx.client, namespace, &cluster_name, &role_spec.name).await
+                if let Err(e) =
+                    drop_role(&ctx.client, namespace, &cluster_name, &role_spec.name).await
                 {
                     warn!(role = %role_spec.name, error = %e, "Failed to drop role during cleanup");
                 }
             }
 
             // Drop the owner role if it was created by us
-            if let Err(e) =
-                drop_role(&ctx.client, namespace, &cluster_name, &db.spec.database.owner).await
+            if let Err(e) = drop_role(
+                &ctx.client,
+                namespace,
+                &cluster_name,
+                &db.spec.database.owner,
+            )
+            .await
             {
                 warn!(role = %db.spec.database.owner, error = %e, "Failed to drop owner role during cleanup");
             }
 
             // Drop the database
-            if let Err(e) =
-                drop_database(&ctx.client, namespace, &cluster_name, &db.spec.database.name).await
+            if let Err(e) = drop_database(
+                &ctx.client,
+                namespace,
+                &cluster_name,
+                &db.spec.database.name,
+            )
+            .await
             {
                 warn!(database = %db.spec.database.name, error = %e, "Failed to drop database during cleanup");
             }
@@ -542,7 +579,11 @@ async fn add_finalizer(
     });
 
     databases
-        .patch(&name, &PatchParams::apply("postgres-operator"), &Patch::Merge(&patch))
+        .patch(
+            &name,
+            &PatchParams::apply("postgres-operator"),
+            &Patch::Merge(&patch),
+        )
         .await?;
 
     Ok(Action::requeue(Duration::from_secs(1)))
@@ -564,7 +605,11 @@ async fn remove_finalizer(
     });
 
     databases
-        .patch(&name, &PatchParams::apply("postgres-operator"), &Patch::Merge(&patch))
+        .patch(
+            &name,
+            &PatchParams::apply("postgres-operator"),
+            &Patch::Merge(&patch),
+        )
         .await?;
 
     Ok(())
@@ -596,7 +641,11 @@ async fn update_status(
     });
 
     databases
-        .patch_status(&name, &PatchParams::apply("postgres-operator"), &Patch::Merge(&patch))
+        .patch_status(
+            &name,
+            &PatchParams::apply("postgres-operator"),
+            &Patch::Merge(&patch),
+        )
         .await?;
 
     Ok(())

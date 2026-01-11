@@ -9,8 +9,8 @@ use tokio::signal;
 use tracing::{error, info, warn};
 
 use postgres_operator::health::{HealthState, run_health_server};
+use postgres_operator::{WEBHOOK_CERT_PATH, WEBHOOK_KEY_PATH, run_webhook_server};
 use postgres_operator::{run_controller, run_database_controller};
-use postgres_operator::{run_webhook_server, WEBHOOK_CERT_PATH, WEBHOOK_KEY_PATH};
 
 /// Lease configuration
 const LEASE_NAME: &str = "postgres-operator-leader";
@@ -91,25 +91,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Start webhook server if TLS certificates are available
     // The webhook server runs regardless of leadership to ensure admission requests are handled
-    let webhook_handle = if Path::new(WEBHOOK_CERT_PATH).exists()
-        && Path::new(WEBHOOK_KEY_PATH).exists()
-    {
-        info!("TLS certificates found, starting webhook server");
-        let webhook_client = client.clone();
-        Some(tokio::spawn(async move {
-            if let Err(e) =
-                run_webhook_server(webhook_client, WEBHOOK_CERT_PATH, WEBHOOK_KEY_PATH).await
-            {
-                error!("Webhook server error: {}", e);
-            }
-        }))
-    } else {
-        info!(
-            "TLS certificates not found at {} and {}, webhook server disabled",
-            WEBHOOK_CERT_PATH, WEBHOOK_KEY_PATH
-        );
-        None
-    };
+    let webhook_handle =
+        if Path::new(WEBHOOK_CERT_PATH).exists() && Path::new(WEBHOOK_KEY_PATH).exists() {
+            info!("TLS certificates found, starting webhook server");
+            let webhook_client = client.clone();
+            Some(tokio::spawn(async move {
+                if let Err(e) =
+                    run_webhook_server(webhook_client, WEBHOOK_CERT_PATH, WEBHOOK_KEY_PATH).await
+                {
+                    error!("Webhook server error: {}", e);
+                }
+            }))
+        } else {
+            info!(
+                "TLS certificates not found at {} and {}, webhook server disabled",
+                WEBHOOK_CERT_PATH, WEBHOOK_KEY_PATH
+            );
+            None
+        };
 
     // Create leader election lease lock
     let lease_lock = LeaseLock::new(
@@ -181,12 +180,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(
         "Watching PostgresCluster resources (apiVersion: postgres-operator.smoketurner.com/v1alpha1)"
     );
+    info!(
+        "Watching PostgresDatabase resources (apiVersion: postgres-operator.smoketurner.com/v1alpha1)"
+    );
 
-    // Start controller (only runs as leader)
+    // Start cluster controller (only runs as leader)
     let controller_handle = {
         let health_state = health_state.clone();
+        let controller_client = client.clone();
         tokio::spawn(async move {
-            run_controller(client, Some(health_state)).await;
+            run_controller(controller_client, Some(health_state)).await;
+        })
+    };
+
+    // Start database controller (only runs as leader)
+    let database_controller_handle = {
+        let db_client = client.clone();
+        tokio::spawn(async move {
+            run_database_controller(db_client).await;
         })
     };
 
@@ -206,7 +217,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::select! {
         result = controller_handle => {
             if let Err(e) = result {
-                error!("Controller task panicked: {}", e);
+                error!("Cluster controller task panicked: {}", e);
+            }
+        }
+        result = database_controller_handle => {
+            if let Err(e) = result {
+                error!("Database controller task panicked: {}", e);
             }
         }
         result = health_handle => {

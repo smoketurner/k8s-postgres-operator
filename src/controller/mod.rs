@@ -11,7 +11,7 @@ pub mod validation;
 pub use backup_status::BackupStatusCollector;
 pub use context::Context;
 pub use database_reconciler::{
-    DatabaseContext, DatabaseError, DATABASE_FINALIZER, database_error_policy, reconcile_database,
+    DATABASE_FINALIZER, DatabaseContext, DatabaseError, database_error_policy, reconcile_database,
 };
 pub use error::{BackoffConfig, Error, ErrorContext, Result};
 pub use reconciler::{FINALIZER, error_policy, reconcile};

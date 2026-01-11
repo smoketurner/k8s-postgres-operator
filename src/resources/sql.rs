@@ -3,9 +3,12 @@
 //! This module provides functionality to execute SQL commands in PostgreSQL pods
 //! via the Kubernetes exec API. Used for database and role provisioning.
 
+// SQL provisioning functions naturally have many parameters (connection info + DDL options)
+#![allow(clippy::too_many_arguments)]
+
 use k8s_openapi::api::core::v1::Pod;
-use kube::api::{Api, AttachParams};
 use kube::Client;
+use kube::api::{Api, AttachParams};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tracing::debug;
@@ -68,12 +71,14 @@ pub async fn exec_sql(
         .list(&kube::api::ListParams::default().labels(&primary_selector))
         .await?;
 
-    let primary_pod = pod_list.items.into_iter().next().ok_or_else(|| {
-        SqlError::NoPrimaryPod {
+    let primary_pod = pod_list
+        .items
+        .into_iter()
+        .next()
+        .ok_or_else(|| SqlError::NoPrimaryPod {
             cluster: cluster_name.to_string(),
             namespace: namespace.to_string(),
-        }
-    })?;
+        })?;
 
     let pod_name = primary_pod
         .metadata
@@ -93,7 +98,12 @@ pub async fn exec_sql(
 }
 
 /// Execute psql command in a pod
-async fn exec_psql(pods: &Api<Pod>, pod_name: &str, database: &str, sql: &str) -> SqlResult<String> {
+async fn exec_psql(
+    pods: &Api<Pod>,
+    pod_name: &str,
+    database: &str,
+    sql: &str,
+) -> SqlResult<String> {
     // Build the psql command
     // Use -A for unaligned output, -t for tuples only (no headers/footers)
     // -c executes the command
@@ -126,32 +136,32 @@ async fn exec_psql(pods: &Api<Pod>, pod_name: &str, database: &str, sql: &str) -
     }
 
     // Read stdout and stderr
-    let stdout = attached.stdout().ok_or_else(|| {
-        SqlError::ExecFailed("Failed to get stdout from exec".to_string())
-    })?;
+    let stdout = attached
+        .stdout()
+        .ok_or_else(|| SqlError::ExecFailed("Failed to get stdout from exec".to_string()))?;
 
-    let stderr = attached.stderr().ok_or_else(|| {
-        SqlError::ExecFailed("Failed to get stderr from exec".to_string())
-    })?;
+    let stderr = attached
+        .stderr()
+        .ok_or_else(|| SqlError::ExecFailed("Failed to get stderr from exec".to_string()))?;
 
     // Read output using tokio
     let stdout_output = read_stream(stdout).await?;
     let stderr_output = read_stream(stderr).await?;
 
     // Wait for the process to complete
-    let status = attached.take_status().ok_or_else(|| {
-        SqlError::ExecFailed("Failed to get status from exec".to_string())
-    })?;
+    let status = attached
+        .take_status()
+        .ok_or_else(|| SqlError::ExecFailed("Failed to get status from exec".to_string()))?;
 
-    if let Some(status) = status.await {
-        if status.status != Some("Success".to_string()) {
-            let error_msg = if stderr_output.is_empty() {
-                format!("Command failed with status: {:?}", status)
-            } else {
-                stderr_output.clone()
-            };
-            return Err(SqlError::SqlExecutionError(error_msg));
-        }
+    if let Some(status) = status.await
+        && status.status != Some("Success".to_string())
+    {
+        let error_msg = if stderr_output.is_empty() {
+            format!("Command failed with status: {:?}", status)
+        } else {
+            stderr_output.clone()
+        };
+        return Err(SqlError::SqlExecutionError(error_msg));
     }
 
     // Check for SQL errors in stderr
@@ -490,7 +500,8 @@ pub fn is_valid_identifier(name: &str) -> bool {
 /// Generate a secure random password
 pub fn generate_password() -> String {
     use rand::Rng;
-    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
+    const CHARSET: &[u8] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
     const PASSWORD_LEN: usize = 24;
 
     let mut rng = rand::rng();
@@ -517,7 +528,10 @@ mod tests {
     fn test_escape_sql_string() {
         assert_eq!(escape_sql_string("simple"), "simple");
         assert_eq!(escape_sql_string("with'quote"), "with''quote");
-        assert_eq!(escape_sql_string("multiple'single'quotes"), "multiple''single''quotes");
+        assert_eq!(
+            escape_sql_string("multiple'single'quotes"),
+            "multiple''single''quotes"
+        );
     }
 
     #[test]
@@ -560,11 +574,8 @@ mod tests {
         );
         assert_eq!(
             escape_sql_string("'; DROP TABLE users;--"),
-            "'''; DROP TABLE users;--"
+            "''; DROP TABLE users;--"
         );
-        assert_eq!(
-            quote_identifier("test\"injection"),
-            "\"test\"\"injection\""
-        );
+        assert_eq!(quote_identifier("test\"injection"), "\"test\"\"injection\"");
     }
 }

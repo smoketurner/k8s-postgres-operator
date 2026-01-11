@@ -496,6 +496,73 @@ spec:
                               description: Target active connections per replica
                               minimum: 1
                               default: 100
+                networkPolicy:
+                  type: object
+                  description: |
+                    Network policy configuration for the cluster.
+                    Controls which pods and namespaces can connect to the PostgreSQL cluster.
+                  properties:
+                    allowExternalAccess:
+                      type: boolean
+                      description: |
+                        Allow connections from RFC1918 private IP ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16).
+                        Use for development/testing environments.
+                        Default: false (secure by default)
+                      default: false
+                    allowFrom:
+                      type: array
+                      description: |
+                        List of additional sources allowed to connect to the cluster.
+                        Useful for cross-namespace access.
+                      items:
+                        type: object
+                        properties:
+                          namespaceSelector:
+                            type: object
+                            description: Selects namespaces using labels
+                            properties:
+                              matchLabels:
+                                type: object
+                                additionalProperties:
+                                  type: string
+                                description: Labels that namespaces must have to be allowed
+                              matchExpressions:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    key:
+                                      type: string
+                                    operator:
+                                      type: string
+                                      enum: [In, NotIn, Exists, DoesNotExist]
+                                    values:
+                                      type: array
+                                      items:
+                                        type: string
+                          podSelector:
+                            type: object
+                            description: Selects pods within selected namespaces
+                            properties:
+                              matchLabels:
+                                type: object
+                                additionalProperties:
+                                  type: string
+                                description: Labels that pods must have to be allowed
+                              matchExpressions:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    key:
+                                      type: string
+                                    operator:
+                                      type: string
+                                      enum: [In, NotIn, Exists, DoesNotExist]
+                                    values:
+                                      type: array
+                                      items:
+                                        type: string
             status:
               type: object
               properties:

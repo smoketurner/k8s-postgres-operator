@@ -2,10 +2,10 @@
 //!
 //! Each policy module exports a `validate` function that checks specific rules.
 
-mod backup;
-mod immutability;
-mod production;
-mod tls;
+pub mod backup;
+pub mod immutability;
+pub mod production;
+pub mod tls;
 
 pub use backup::validate_backup;
 pub use immutability::validate_immutability;

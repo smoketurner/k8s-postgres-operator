@@ -11,8 +11,8 @@ pub use controller::{
 pub use crd::{PostgresCluster, PostgresDatabase};
 pub use health::{HealthState, Metrics};
 pub use webhooks::{
-    create_webhook_router, run_webhook_server, validate_postgres_cluster, WebhookError,
-    WEBHOOK_CERT_PATH, WEBHOOK_KEY_PATH, WEBHOOK_PORT,
+    WEBHOOK_CERT_PATH, WEBHOOK_KEY_PATH, WEBHOOK_PORT, WebhookError, create_webhook_router,
+    run_webhook_server, validate_postgres_cluster,
 };
 
 use std::sync::Arc;
