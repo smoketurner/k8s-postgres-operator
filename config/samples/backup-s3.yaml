@@ -26,6 +26,10 @@ spec:
     size: 100Gi
     storageClass: fast-ssd
 
+  # TLS disabled for simplicity; enable for production
+  tls:
+    enabled: false
+
   resources:
     requests:
       cpu: "1"

@@ -1196,6 +1196,46 @@ pub struct PostgresClusterStatus {
     /// When true, those replicas are excluded from reader service routing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicas_lagging: Option<bool>,
+
+    /// Connection information for applications to connect to this cluster.
+    /// Includes service endpoints for primary, replicas, and pooler (if enabled).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_info: Option<ConnectionInfo>,
+}
+
+/// Connection information for connecting to the PostgreSQL cluster
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionInfo {
+    /// Primary (read-write) service endpoint.
+    /// Format: {cluster}-primary.{namespace}.svc:5432
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary: Option<String>,
+
+    /// Replica (read-only) service endpoint.
+    /// Format: {cluster}-repl.{namespace}.svc:5432
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicas: Option<String>,
+
+    /// PgBouncer pooler endpoint for primary connections.
+    /// Only present when PgBouncer is enabled.
+    /// Format: {cluster}-pooler.{namespace}.svc:6432
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pooler: Option<String>,
+
+    /// PgBouncer pooler endpoint for replica connections.
+    /// Only present when PgBouncer replica pooler is enabled.
+    /// Format: {cluster}-pooler-repl.{namespace}.svc:6432
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pooler_replicas: Option<String>,
+
+    /// Name of the Secret containing database credentials.
+    /// The secret contains keys: username, password, database
+    pub credentials_secret: String,
+
+    /// Default database name
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
 }
 
 /// Replication lag information for a single replica

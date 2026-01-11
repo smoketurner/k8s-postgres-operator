@@ -9,7 +9,8 @@ use kube::{Api, ResourceExt};
 
 use crate::controller::Context;
 use crate::controller::error::Result;
-use crate::crd::{BackupStatus, ClusterPhase, Condition, PostgresCluster, PostgresClusterStatus};
+use crate::crd::{BackupStatus, ClusterPhase, Condition, ConnectionInfo, PostgresCluster, PostgresClusterStatus};
+use crate::resources::pgbouncer;
 
 /// Standard condition types following Kubernetes conventions
 pub mod condition_types {
@@ -304,6 +305,7 @@ impl<'a> StatusManager<'a> {
                 .status
                 .as_ref()
                 .and_then(|s| s.replicas_lagging),
+            connection_info: self.get_connection_info(),
         };
 
         self.update(status).await
@@ -384,6 +386,7 @@ impl<'a> StatusManager<'a> {
                 .status
                 .as_ref()
                 .and_then(|s| s.replicas_lagging),
+            connection_info: self.get_connection_info(),
         };
 
         self.update(status).await
@@ -475,6 +478,7 @@ impl<'a> StatusManager<'a> {
                 .status
                 .as_ref()
                 .and_then(|s| s.replicas_lagging),
+            connection_info: self.get_connection_info(),
         };
 
         self.update(status).await
@@ -536,6 +540,7 @@ impl<'a> StatusManager<'a> {
                 .unwrap_or_default(),
             max_replication_lag_bytes: existing_status.and_then(|s| s.max_replication_lag_bytes),
             replicas_lagging: existing_status.and_then(|s| s.replicas_lagging),
+            connection_info: self.get_connection_info(),
         };
 
         self.update(status).await
@@ -614,9 +619,16 @@ impl<'a> StatusManager<'a> {
                 .status
                 .as_ref()
                 .and_then(|s| s.replicas_lagging),
+            // Connection info is cleared during deletion
+            connection_info: None,
         };
 
         self.update(status).await
+    }
+
+    /// Generate connection info for this cluster
+    fn get_connection_info(&self) -> Option<ConnectionInfo> {
+        Some(generate_connection_info(self.cluster, self.ns))
     }
 
     /// Get the backup status, preserving existing status or generating from spec
@@ -715,4 +727,39 @@ pub fn get_replica_pod_names(sts_name: &str, replica_count: i32) -> Vec<String> 
     (0..replica_count)
         .map(|i| format!("{}-{}", sts_name, i))
         .collect()
+}
+
+/// Generate connection info for a PostgresCluster
+pub fn generate_connection_info(cluster: &PostgresCluster, namespace: &str) -> ConnectionInfo {
+    let name = cluster.metadata.name.as_deref().unwrap_or("unknown");
+
+    // Build service endpoints
+    let primary = Some(format!("{}-primary.{}.svc:5432", name, namespace));
+    let replicas = if cluster.spec.replicas > 1 {
+        Some(format!("{}-repl.{}.svc:5432", name, namespace))
+    } else {
+        None
+    };
+
+    // PgBouncer endpoints (only if enabled)
+    let (pooler, pooler_replicas) = if pgbouncer::is_pgbouncer_enabled(cluster) {
+        let pooler_primary = Some(format!("{}-pooler.{}.svc:6432", name, namespace));
+        let pooler_repl = if pgbouncer::is_replica_pooler_enabled(cluster) {
+            Some(format!("{}-pooler-repl.{}.svc:6432", name, namespace))
+        } else {
+            None
+        };
+        (pooler_primary, pooler_repl)
+    } else {
+        (None, None)
+    };
+
+    ConnectionInfo {
+        primary,
+        replicas,
+        pooler,
+        pooler_replicas,
+        credentials_secret: format!("{}-credentials", name),
+        database: Some("postgres".to_string()),
+    }
 }

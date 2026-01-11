@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use kube::Client;
 use kube_leader_election::{LeaseLock, LeaseLockParams};
+use tokio::signal;
 use tracing::{error, info, warn};
 
 use postgres_operator::health::{HealthState, run_health_server};
@@ -14,12 +15,24 @@ const LEASE_NAME: &str = "postgres-operator-leader";
 const LEASE_TTL_SECS: u64 = 15;
 const LEASE_RENEW_INTERVAL_SECS: u64 = 5;
 
+/// Grace period for in-flight reconciliations to complete during shutdown
+const SHUTDOWN_GRACE_PERIOD_SECS: u64 = 5;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Install the TLS crypto provider before any TLS operations
-    rustls::crypto::aws_lc_rs::default_provider()
+    // Note: install_default() may fail if called multiple times (e.g., in tests),
+    // but a single failure during startup is fatal since TLS won't work
+    if rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
-        .expect("Failed to install rustls crypto provider");
+        .is_err()
+    {
+        // Check if a provider is already installed (common in test scenarios)
+        if rustls::crypto::CryptoProvider::get_default().is_none() {
+            return Err("Failed to install rustls crypto provider and no provider is available".into());
+        }
+        // A provider is already installed, which is fine
+    }
 
     // Initialize logging
     tracing_subscriber::fmt()
@@ -151,7 +164,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     };
 
-    // Wait for any task to complete (or fail)
+    // Wait for any task to complete (or fail), or shutdown signal
     tokio::select! {
         result = controller_handle => {
             if let Err(e) = result {
@@ -168,8 +181,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) = lease_renewal_handle => {
             error!("Lease renewal task panicked: {}", e);
         }
+        // Handle graceful shutdown on SIGTERM or SIGINT
+        _ = shutdown_signal() => {
+            info!("Received shutdown signal, initiating graceful shutdown...");
+
+            // Mark as not ready to stop receiving new work
+            health_state.set_ready(false).await;
+            info!("Marked operator as not ready");
+
+            // Give in-flight reconciliations time to complete
+            info!(
+                "Waiting {}s for in-flight reconciliations to complete...",
+                SHUTDOWN_GRACE_PERIOD_SECS
+            );
+            tokio::time::sleep(Duration::from_secs(SHUTDOWN_GRACE_PERIOD_SECS)).await;
+
+            info!("Grace period complete, shutting down");
+        }
     }
 
     info!("Operator stopped");
     Ok(())
+}
+
+/// Wait for shutdown signal (SIGTERM or SIGINT)
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
 }

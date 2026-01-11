@@ -42,6 +42,9 @@ check: ## Run cargo check
 test: ## Run unit tests
 	$(CARGO) test
 
+audit: ## Run security audit on dependencies
+	$(CARGO) audit
+
 test-integration: install ## Run fast integration tests (requires running cluster)
 	$(CARGO) test --test integration tests:: -- --ignored --test-threads=1
 

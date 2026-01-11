@@ -24,6 +24,10 @@ spec:
     size: 50Gi
     storageClass: standard
 
+  # TLS disabled for simplicity; enable for production
+  tls:
+    enabled: false
+
   resources:
     requests:
       cpu: "500m"

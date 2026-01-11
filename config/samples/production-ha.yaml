@@ -27,10 +27,12 @@ spec:
     wal_buffers: "64MB"
     checkpoint_completion_target: "0.9"
     random_page_cost: "1.1"  # For SSDs
-  # TLS encryption
+  # TLS encryption (requires cert-manager)
   tls:
     enabled: true
-    certSecret: production-db-tls
+    issuerRef:
+      name: letsencrypt-prod
+      kind: ClusterIssuer
   # Connection pooling
   pgbouncer:
     enabled: true

@@ -30,6 +30,10 @@ spec:
     size: 100Gi
     storageClass: managed-premium
 
+  # TLS disabled for simplicity; enable for production
+  tls:
+    enabled: false
+
   resources:
     requests:
       cpu: "1"

@@ -10,6 +10,9 @@ spec:
   replicas: 3
   storage:
     size: 10Gi
+  # TLS disabled for simplicity; enable for production
+  tls:
+    enabled: false
   pgbouncer:
     enabled: true
     replicas: 2  # Number of PgBouncer instances

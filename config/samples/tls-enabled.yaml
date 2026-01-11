@@ -1,6 +1,6 @@
 # PostgreSQL cluster with TLS encryption
-# Requires a TLS secret to be created beforehand:
-#   kubectl create secret tls my-postgres-tls --cert=server.crt --key=server.key
+# Requires cert-manager to be installed in the cluster
+# See: https://cert-manager.io/docs/installation/
 apiVersion: postgres-operator.smoketurner.com/v1alpha1
 kind: PostgresCluster
 metadata:
@@ -13,22 +13,24 @@ spec:
     size: 10Gi
   tls:
     enabled: true
-    certSecret: my-postgres-tls
-    # Optional: separate CA secret for client certificate verification
-    # caSecret: my-postgres-ca
-    # Optional: custom filenames in the secret (defaults shown)
-    # certificateFile: tls.crt
-    # privateKeyFile: tls.key
-    # caFile: ca.crt
+    issuerRef:
+      name: selfsigned-issuer  # Replace with your ClusterIssuer or Issuer
+      kind: ClusterIssuer      # Use "Issuer" for namespace-scoped issuers
+    # Optional: additional DNS names for the certificate
+    # additionalDnsNames:
+    #   - my-custom-hostname.example.com
+    # Optional: certificate duration (default: 2160h / 90 days)
+    # duration: "2160h"
+    # Optional: renew before expiry (default: 360h / 15 days)
+    # renewBefore: "360h"
   postgresqlParams:
     max_connections: "200"
 ---
-# Example TLS secret (for reference - generate your own certs!)
-# apiVersion: v1
-# kind: Secret
-# metadata:
-#   name: my-postgres-tls
-# type: kubernetes.io/tls
-# data:
-#   tls.crt: <base64-encoded-certificate>
-#   tls.key: <base64-encoded-private-key>
+# Example ClusterIssuer for self-signed certificates (for development)
+# For production, use a real CA like Let's Encrypt
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-issuer
+spec:
+  selfSigned: {}

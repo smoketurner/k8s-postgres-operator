@@ -10,6 +10,9 @@ spec:
   replicas: 1  # Single instance
   storage:
     size: 10Gi
+  # TLS is enabled by default; disable for local development
+  tls:
+    enabled: false
   postgresqlParams:
     max_connections: "200"
     shared_buffers: "256MB"

@@ -10,6 +10,9 @@ spec:
   replicas: 2  # Primary + 1 read replica
   storage:
     size: 50Gi
+  # TLS disabled for simplicity; enable for production
+  tls:
+    enabled: false
   resources:
     requests:
       cpu: "500m"
