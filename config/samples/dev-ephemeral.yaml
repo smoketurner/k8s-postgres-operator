@@ -1,0 +1,60 @@
+# Lightweight PostgreSQL cluster for development and testing
+#
+# This configuration uses minimal resources suitable for:
+# - Local development (minikube, kind, docker-desktop)
+# - CI/CD pipeline testing
+# - Quick prototyping and experimentation
+#
+# NOT suitable for production - no TLS, minimal resources, single replica
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: dev-db
+  namespace: default
+  labels:
+    environment: development
+spec:
+  version: "17"
+  replicas: 1  # Single replica for development
+  storage:
+    size: 1Gi  # Minimal storage
+  # Minimal resource footprint
+  resources:
+    requests:
+      cpu: "50m"        # 50 millicores
+      memory: "128Mi"   # 128 MiB
+    limits:
+      cpu: "500m"       # Allow bursting to 0.5 cores
+      memory: "512Mi"   # Cap at 512 MiB
+  postgresqlParams:
+    # Tuned for minimal memory
+    shared_buffers: "32MB"
+    effective_cache_size: "96MB"
+    work_mem: "4MB"
+    maintenance_work_mem: "16MB"
+    max_connections: "50"
+    # Faster checkpoints for development
+    checkpoint_completion_target: "0.7"
+  # TLS disabled for easier local development
+  # DO NOT use this configuration in production
+  tls:
+    enabled: false
+  # Optional: Add labels for organization
+  labels:
+    purpose: "development"
+    disposable: "true"
+---
+# Example usage with port-forward:
+#
+# 1. Wait for the cluster to be ready:
+#    kubectl wait --for=condition=Ready postgrescluster/dev-db --timeout=300s
+#
+# 2. Get the password:
+#    kubectl get secret dev-db-credentials -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d
+#
+# 3. Port-forward to the primary service:
+#    kubectl port-forward svc/dev-db-primary 5432:5432
+#
+# 4. Connect with psql:
+#    PGPASSWORD=$(kubectl get secret dev-db-credentials -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d) \
+#    psql -h localhost -U postgres -d postgres

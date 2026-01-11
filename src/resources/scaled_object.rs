@@ -12,14 +12,19 @@
 //! - scaling.readers.enabled must be true
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::ResourceExt;
-use kube::api::DynamicObject;
+use kube::api::{Api, ApiResource, DynamicObject, Patch, PatchParams};
+use kube::{Client, ResourceExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
+use tracing::{debug, info};
 
 use crate::crd::PostgresCluster;
 use crate::resources::common::{owner_reference, standard_labels};
+
+/// KEDA annotation to pause scale-out (prevents adding replicas)
+/// When replicas are lagging, we prevent scale-up but allow scale-down
+const KEDA_PAUSED_SCALE_OUT: &str = "autoscaling.keda.sh/paused-scale-out";
 
 /// KEDA API group
 pub const KEDA_API_GROUP: &str = "keda.sh";
@@ -382,6 +387,129 @@ pub fn generate_trigger_auth(cluster: &PostgresCluster) -> Option<DynamicObject>
     Some(obj)
 }
 
+/// Update KEDA ScaledObject pause state based on replication lag
+///
+/// When replicas are lagging beyond the configured threshold, this function
+/// adds the `autoscaling.keda.sh/paused-scale-out` annotation to prevent KEDA
+/// from scaling up. Scale-down is still allowed, which is appropriate since
+/// reducing load when replicas are struggling won't make things worse.
+///
+/// When replication catches up, the annotation is removed to resume normal
+/// scaling behavior (both scale-up and scale-down).
+///
+/// # Arguments
+/// * `client` - Kubernetes client
+/// * `cluster` - The PostgresCluster resource
+/// * `replicas_lagging` - Whether any replica exceeds the lag threshold
+///
+/// # Returns
+/// * `Ok(Some(true))` - Scale-out was paused
+/// * `Ok(Some(false))` - Scale-out was resumed (unpaused)
+/// * `Ok(None)` - No change was needed (ScaledObject doesn't exist or already in desired state)
+/// * `Err(_)` - Failed to update the ScaledObject
+pub async fn update_scaling_pause_state(
+    client: Client,
+    cluster: &PostgresCluster,
+    replicas_lagging: bool,
+) -> Result<Option<bool>, kube::Error> {
+    // Only relevant if reader scaling is enabled
+    if !should_enable_reader_scaling(cluster) {
+        return Ok(None);
+    }
+
+    let name = format!("{}-readers", cluster.name_any());
+    let ns = cluster
+        .namespace()
+        .unwrap_or_else(|| "default".to_string());
+
+    let ar = ApiResource {
+        group: KEDA_API_GROUP.to_string(),
+        version: KEDA_API_VERSION.to_string(),
+        kind: SCALED_OBJECT_KIND.to_string(),
+        api_version: format!("{}/{}", KEDA_API_GROUP, KEDA_API_VERSION),
+        plural: "scaledobjects".to_string(),
+    };
+
+    let api: Api<DynamicObject> = Api::namespaced_with(client, &ns, &ar);
+
+    // Check if ScaledObject exists and get current annotation state
+    let scaled_object = match api.get_opt(&name).await? {
+        Some(obj) => obj,
+        None => {
+            debug!(
+                cluster = %cluster.name_any(),
+                "ScaledObject does not exist, skipping pause state update"
+            );
+            return Ok(None);
+        }
+    };
+
+    let scale_out_paused = scaled_object
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(KEDA_PAUSED_SCALE_OUT))
+        .is_some_and(|v| v == "true");
+
+    // Determine if we need to make a change
+    if replicas_lagging && !scale_out_paused {
+        // Need to pause scale-out: add the annotation
+        let patch = json!({
+            "metadata": {
+                "annotations": {
+                    KEDA_PAUSED_SCALE_OUT: "true"
+                }
+            }
+        });
+
+        api.patch(
+            &name,
+            &PatchParams::apply("postgres-operator"),
+            &Patch::Merge(&patch),
+        )
+        .await?;
+
+        info!(
+            cluster = %cluster.name_any(),
+            "Paused KEDA scale-out due to replication lag exceeding threshold"
+        );
+
+        Ok(Some(true))
+    } else if !replicas_lagging && scale_out_paused {
+        // Need to unpause: remove the annotation by setting it to null
+        let patch = json!({
+            "metadata": {
+                "annotations": {
+                    KEDA_PAUSED_SCALE_OUT: null
+                }
+            }
+        });
+
+        api.patch(
+            &name,
+            &PatchParams::apply("postgres-operator"),
+            &Patch::Merge(&patch),
+        )
+        .await?;
+
+        info!(
+            cluster = %cluster.name_any(),
+            "Resumed KEDA scale-out, replication lag within threshold"
+        );
+
+        Ok(Some(false))
+    } else {
+        // No change needed
+        debug!(
+            cluster = %cluster.name_any(),
+            replicas_lagging = replicas_lagging,
+            scale_out_paused = scale_out_paused,
+            "KEDA pause state already matches desired state"
+        );
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,6 +567,7 @@ mod tests {
                 max_replicas: 10,
                 metrics: None,
                 replication_lag_threshold: "30s".to_string(),
+                ..Default::default()
             }),
         );
 
@@ -455,6 +584,7 @@ mod tests {
                 max_replicas: 3,
                 metrics: None,
                 replication_lag_threshold: "30s".to_string(),
+                ..Default::default()
             }),
         );
 
@@ -475,6 +605,7 @@ mod tests {
                     connections: None,
                 }),
                 replication_lag_threshold: "30s".to_string(),
+                ..Default::default()
             }),
         );
 
@@ -506,6 +637,7 @@ mod tests {
                     }),
                 }),
                 replication_lag_threshold: "30s".to_string(),
+                ..Default::default()
             }),
         );
 
@@ -534,6 +666,7 @@ mod tests {
                     }),
                 }),
                 replication_lag_threshold: "30s".to_string(),
+                ..Default::default()
             }),
         );
 
@@ -558,10 +691,207 @@ mod tests {
                     connections: None,
                 }),
                 replication_lag_threshold: "30s".to_string(),
+                ..Default::default()
             }),
         );
 
         let obj = generate_trigger_auth(&cluster);
         assert!(obj.is_none());
+    }
+
+    #[test]
+    fn test_generate_scaled_object_with_combined_metrics() {
+        let cluster = create_test_cluster(
+            3,
+            Some(ScalingSpec {
+                min_replicas: Some(3),
+                max_replicas: 10,
+                metrics: Some(ScalingMetrics {
+                    cpu: Some(CpuScalingMetric {
+                        target_utilization: 75,
+                    }),
+                    connections: Some(ConnectionScalingMetric {
+                        target_per_replica: 100,
+                    }),
+                }),
+                replication_lag_threshold: "30s".to_string(),
+                ..Default::default()
+            }),
+        );
+
+        let obj = generate_scaled_object(&cluster);
+        assert!(obj.is_some());
+
+        let obj = obj.unwrap();
+        let spec: ScaledObjectSpec =
+            serde_json::from_value(obj.data["spec"].clone()).expect("should parse spec");
+
+        // Should have both CPU and PostgreSQL triggers
+        assert_eq!(spec.triggers.len(), 2);
+
+        let cpu_trigger = spec.triggers.iter().find(|t| t.type_ == "cpu");
+        let pg_trigger = spec.triggers.iter().find(|t| t.type_ == "postgresql");
+
+        assert!(cpu_trigger.is_some(), "Should have CPU trigger");
+        assert!(pg_trigger.is_some(), "Should have PostgreSQL trigger");
+
+        // Verify CPU trigger metadata
+        let cpu = cpu_trigger.unwrap();
+        assert_eq!(cpu.metadata.get("value"), Some(&"75".to_string()));
+
+        // Verify PostgreSQL trigger has auth ref
+        let pg = pg_trigger.unwrap();
+        assert!(pg.authentication_ref.is_some());
+        assert_eq!(
+            pg.authentication_ref.as_ref().unwrap().name,
+            "test-cluster-pg-auth"
+        );
+    }
+
+    #[test]
+    fn test_generate_scaled_object_default_cpu_when_no_metrics() {
+        // When scaling is enabled but no metrics are specified, should default to CPU at 70%
+        let cluster = create_test_cluster(
+            3,
+            Some(ScalingSpec {
+                min_replicas: Some(3),
+                max_replicas: 10,
+                metrics: None, // No metrics specified
+                replication_lag_threshold: "30s".to_string(),
+                ..Default::default()
+            }),
+        );
+
+        let obj = generate_scaled_object(&cluster);
+        assert!(obj.is_some());
+
+        let obj = obj.unwrap();
+        let spec: ScaledObjectSpec =
+            serde_json::from_value(obj.data["spec"].clone()).expect("should parse spec");
+
+        // Should have exactly one trigger (default CPU)
+        assert_eq!(spec.triggers.len(), 1);
+        assert_eq!(spec.triggers[0].type_, "cpu");
+        assert_eq!(
+            spec.triggers[0].metadata.get("value"),
+            Some(&"70".to_string())
+        );
+        assert!(spec.triggers[0].authentication_ref.is_none());
+    }
+
+    #[test]
+    fn test_trigger_auth_references_correct_secret() {
+        let cluster = create_test_cluster(
+            3,
+            Some(ScalingSpec {
+                min_replicas: Some(3),
+                max_replicas: 10,
+                metrics: Some(ScalingMetrics {
+                    cpu: None,
+                    connections: Some(ConnectionScalingMetric {
+                        target_per_replica: 50,
+                    }),
+                }),
+                replication_lag_threshold: "30s".to_string(),
+                ..Default::default()
+            }),
+        );
+
+        let obj = generate_trigger_auth(&cluster);
+        assert!(obj.is_some());
+
+        let obj = obj.unwrap();
+        let spec = obj.data["spec"].clone();
+
+        // Verify the secret reference
+        let secret_refs = spec["secretTargetRef"].as_array().unwrap();
+        assert_eq!(secret_refs.len(), 1);
+
+        let secret_ref = &secret_refs[0];
+        assert_eq!(secret_ref["parameter"], "connection");
+        assert_eq!(secret_ref["name"], "test-cluster-credentials");
+        assert_eq!(secret_ref["key"], "connection-string");
+    }
+
+    #[test]
+    fn test_scaled_object_hpa_behavior_configuration() {
+        let cluster = create_test_cluster(
+            3,
+            Some(ScalingSpec {
+                min_replicas: Some(3),
+                max_replicas: 10,
+                metrics: Some(ScalingMetrics {
+                    cpu: Some(CpuScalingMetric {
+                        target_utilization: 70,
+                    }),
+                    connections: None,
+                }),
+                replication_lag_threshold: "30s".to_string(),
+                ..Default::default()
+            }),
+        );
+
+        let obj = generate_scaled_object(&cluster).unwrap();
+        let spec: ScaledObjectSpec =
+            serde_json::from_value(obj.data["spec"].clone()).expect("should parse spec");
+
+        // Verify HPA behavior is configured
+        let advanced = spec.advanced.as_ref().unwrap();
+        let hpa_config = advanced.horizontal_pod_autoscaler_config.as_ref().unwrap();
+        let behavior = hpa_config.behavior.as_ref().unwrap();
+
+        // Scale down behavior should be conservative
+        let scale_down = behavior.scale_down.as_ref().unwrap();
+        assert_eq!(scale_down.stabilization_window_seconds, Some(300));
+        assert_eq!(scale_down.select_policy, Some("Min".to_string()));
+
+        // Scale up behavior should be more aggressive
+        let scale_up = behavior.scale_up.as_ref().unwrap();
+        assert_eq!(scale_up.stabilization_window_seconds, Some(60));
+        assert_eq!(scale_up.select_policy, Some("Max".to_string()));
+    }
+
+    #[test]
+    fn test_scaled_object_min_replicas_uses_effective() {
+        // Test that effective_min_replicas is used (defaults to base replicas if min not specified)
+        let cluster = create_test_cluster(
+            3,
+            Some(ScalingSpec {
+                min_replicas: None, // Not specified, should default to base replicas
+                max_replicas: 10,
+                metrics: None,
+                replication_lag_threshold: "30s".to_string(),
+                ..Default::default()
+            }),
+        );
+
+        let obj = generate_scaled_object(&cluster).unwrap();
+        let spec: ScaledObjectSpec =
+            serde_json::from_value(obj.data["spec"].clone()).expect("should parse spec");
+
+        // min_replica_count should be 3 (the base replica count)
+        assert_eq!(spec.min_replica_count, 3);
+    }
+
+    #[test]
+    fn test_scaled_object_min_replicas_respects_explicit_value() {
+        // Test that explicit min_replicas is used when specified
+        let cluster = create_test_cluster(
+            3,
+            Some(ScalingSpec {
+                min_replicas: Some(2), // Explicit value lower than base
+                max_replicas: 10,
+                metrics: None,
+                replication_lag_threshold: "30s".to_string(),
+                ..Default::default()
+            }),
+        );
+
+        let obj = generate_scaled_object(&cluster).unwrap();
+        let spec: ScaledObjectSpec =
+            serde_json::from_value(obj.data["spec"].clone()).expect("should parse spec");
+
+        // min_replica_count should be 2 (the explicit value)
+        assert_eq!(spec.min_replica_count, 2);
     }
 }

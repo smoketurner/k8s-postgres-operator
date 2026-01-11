@@ -13,11 +13,11 @@ use postgres_operator::controller::state_machine::{
 };
 use postgres_operator::controller::validation::{validate_spec, validate_version_upgrade};
 use postgres_operator::crd::{
-    ClusterPhase, IssuerKind, IssuerRef, PgBouncerSpec, PostgresCluster, PostgresClusterSpec,
-    PostgresClusterStatus, PostgresVersion, ResourceList, ResourceRequirements, StorageSpec,
-    TLSSpec,
+    ClusterPhase, ConnectionScalingMetric, CpuScalingMetric, IssuerKind, IssuerRef, PgBouncerSpec,
+    PostgresCluster, PostgresClusterSpec, PostgresClusterStatus, PostgresVersion, ResourceList,
+    ResourceRequirements, ScalingMetrics, ScalingSpec, StorageSpec, TLSSpec,
 };
-use postgres_operator::resources::{patroni, pdb, secret, service};
+use postgres_operator::resources::{patroni, pdb, scaled_object, secret, service};
 
 // =============================================================================
 // Strategy generators for PostgreSQL cluster specs
@@ -195,39 +195,178 @@ fn optional_resources() -> impl Strategy<Value = Option<ResourceRequirements>> {
     ]
 }
 
+/// Generate a valid CPU scaling metric
+fn cpu_scaling_metric() -> impl Strategy<Value = CpuScalingMetric> {
+    (10..=100i32).prop_map(|target| CpuScalingMetric {
+        target_utilization: target,
+    })
+}
+
+/// Generate a valid connection scaling metric
+fn connection_scaling_metric() -> impl Strategy<Value = ConnectionScalingMetric> {
+    (10..=500i32).prop_map(|target| ConnectionScalingMetric {
+        target_per_replica: target,
+    })
+}
+
+/// Generate optional scaling metrics
+fn scaling_metrics() -> impl Strategy<Value = Option<ScalingMetrics>> {
+    prop_oneof![
+        // No metrics (will default to CPU 70%)
+        Just(None),
+        // CPU only
+        cpu_scaling_metric().prop_map(|cpu| {
+            Some(ScalingMetrics {
+                cpu: Some(cpu),
+                connections: None,
+            })
+        }),
+        // Connections only
+        connection_scaling_metric().prop_map(|conn| {
+            Some(ScalingMetrics {
+                cpu: None,
+                connections: Some(conn),
+            })
+        }),
+        // Both CPU and connections
+        (cpu_scaling_metric(), connection_scaling_metric()).prop_map(|(cpu, conn)| {
+            Some(ScalingMetrics {
+                cpu: Some(cpu),
+                connections: Some(conn),
+            })
+        }),
+    ]
+}
+
+/// Generate a valid scaling spec with valid constraints (min <= base <= max)
+fn valid_scaling_spec(base_replicas: i32) -> impl Strategy<Value = Option<ScalingSpec>> {
+    prop_oneof![
+        // No scaling
+        Just(None),
+        // Scaling disabled (max == base, no room to scale)
+        Just(Some(ScalingSpec {
+            min_replicas: Some(base_replicas),
+            max_replicas: base_replicas,
+            metrics: None,
+            replication_lag_threshold: "30s".to_string(),
+            ..Default::default()
+        })),
+        // Valid scaling range with headroom
+        scaling_metrics().prop_map(move |metrics| {
+            // max_replicas must be > base_replicas for scaling to be enabled
+            Some(ScalingSpec {
+                min_replicas: Some(base_replicas),
+                max_replicas: base_replicas + 5, // Room to scale up
+                metrics,
+                replication_lag_threshold: "30s".to_string(),
+                ..Default::default()
+            })
+        }),
+        // Different min than base
+        scaling_metrics().prop_map(move |metrics| {
+            let min = std::cmp::max(1, base_replicas - 1);
+            Some(ScalingSpec {
+                min_replicas: Some(min),
+                max_replicas: base_replicas + 10,
+                metrics,
+                replication_lag_threshold: "1m".to_string(),
+                ..Default::default()
+            })
+        }),
+    ]
+}
+
 /// Generate a valid PostgresClusterSpec
 fn valid_spec() -> impl Strategy<Value = PostgresClusterSpec> {
-    (
-        valid_version(),
-        valid_replicas(),
-        valid_storage_size(),
-        optional_storage_class(),
-        tls_spec(),
-        optional_pgbouncer(),
-        optional_resources(),
-    )
-        .prop_map(
-            |(version, replicas, size, storage_class, tls, pgbouncer, resources)| {
-                PostgresClusterSpec {
+    // First generate replicas, then use it for scaling spec
+    valid_replicas().prop_flat_map(|replicas| {
+        (
+            valid_version(),
+            Just(replicas),
+            valid_storage_size(),
+            optional_storage_class(),
+            tls_spec(),
+            optional_pgbouncer(),
+            optional_resources(),
+            valid_scaling_spec(replicas),
+        )
+            .prop_map(
+                |(version, replicas, size, storage_class, tls, pgbouncer, resources, scaling)| {
+                    PostgresClusterSpec {
+                        version,
+                        replicas,
+                        storage: StorageSpec {
+                            size,
+                            storage_class,
+                        },
+                        resources,
+                        postgresql_params: Default::default(),
+                        labels: Default::default(),
+                        backup: None,
+                        pgbouncer,
+                        tls,
+                        metrics: None,
+                        service: None,
+                        restore: None,
+                        scaling,
+                    }
+                },
+            )
+    })
+}
+
+/// Generate a valid PostgresClusterSpec with scaling enabled
+fn valid_spec_with_scaling() -> impl Strategy<Value = PostgresClusterSpec> {
+    // Generate replicas first, then scaling that enables KEDA
+    (2..=10i32).prop_flat_map(|replicas| {
+        (
+            valid_version(),
+            Just(replicas),
+            valid_storage_size(),
+            optional_storage_class(),
+            tls_spec(),
+            optional_pgbouncer(),
+            optional_resources(),
+            scaling_metrics(),
+        )
+            .prop_map(
+                move |(
                     version,
                     replicas,
-                    storage: StorageSpec {
-                        size,
-                        storage_class,
-                    },
-                    resources,
-                    postgresql_params: Default::default(),
-                    labels: Default::default(),
-                    backup: None,
-                    pgbouncer,
+                    size,
+                    storage_class,
                     tls,
-                    metrics: None,
-                    service: None,
-                    restore: None,
-                    scaling: None,
-                }
-            },
-        )
+                    pgbouncer,
+                    resources,
+                    metrics,
+                )| {
+                    PostgresClusterSpec {
+                        version,
+                        replicas,
+                        storage: StorageSpec {
+                            size,
+                            storage_class,
+                        },
+                        resources,
+                        postgresql_params: Default::default(),
+                        labels: Default::default(),
+                        backup: None,
+                        pgbouncer,
+                        tls,
+                        metrics: None,
+                        service: None,
+                        restore: None,
+                        scaling: Some(ScalingSpec {
+                            min_replicas: Some(replicas),
+                            max_replicas: replicas + 5,
+                            metrics,
+                            replication_lag_threshold: "30s".to_string(),
+                            ..Default::default()
+                        }),
+                    }
+                },
+            )
+    })
 }
 
 /// Generate a PostgresCluster from a spec
@@ -514,6 +653,251 @@ proptest! {
             Some(replicas),
             "StatefulSet replicas should match spec"
         );
+    }
+
+    // =========================================================================
+    // Scaling property tests
+    // =========================================================================
+
+    /// Property: ScaledObject is generated only when maxReplicas > replicas
+    #[test]
+    fn prop_scaledobject_generated_when_headroom_exists(spec in valid_spec_with_scaling()) {
+        let cluster = cluster_from_spec(spec);
+        let obj = scaled_object::generate_scaled_object(&cluster);
+
+        // With scaling enabled and headroom, ScaledObject should be generated
+        prop_assert!(obj.is_some(), "ScaledObject should be generated when scaling is enabled with headroom");
+
+        let obj = obj.unwrap();
+        prop_assert!(obj.metadata.name.is_some());
+    }
+
+    /// Property: ScaledObject is NOT generated when no scaling or no headroom
+    #[test]
+    fn prop_no_scaledobject_without_scaling(replicas in 1..=10i32) {
+        let spec = PostgresClusterSpec {
+            version: PostgresVersion::V16,
+            replicas,
+            storage: StorageSpec {
+                size: "10Gi".to_string(),
+                storage_class: None,
+            },
+            resources: None,
+            postgresql_params: Default::default(),
+            labels: Default::default(),
+            backup: None,
+            pgbouncer: None,
+            tls: TLSSpec::default(),
+            metrics: None,
+            service: None,
+            restore: None,
+            scaling: None,
+        };
+        let cluster = cluster_from_spec(spec);
+        let obj = scaled_object::generate_scaled_object(&cluster);
+
+        prop_assert!(obj.is_none(), "ScaledObject should not be generated without scaling config");
+    }
+
+    /// Property: ScaledObject is NOT generated when max_replicas <= replicas (no headroom)
+    #[test]
+    fn prop_no_scaledobject_without_headroom(replicas in 1..=10i32) {
+        let spec = PostgresClusterSpec {
+            version: PostgresVersion::V16,
+            replicas,
+            storage: StorageSpec {
+                size: "10Gi".to_string(),
+                storage_class: None,
+            },
+            resources: None,
+            postgresql_params: Default::default(),
+            labels: Default::default(),
+            backup: None,
+            pgbouncer: None,
+            tls: TLSSpec::default(),
+            metrics: None,
+            service: None,
+            restore: None,
+            scaling: Some(ScalingSpec {
+                min_replicas: Some(replicas),
+                max_replicas: replicas, // No headroom
+                metrics: None,
+                replication_lag_threshold: "30s".to_string(),
+                ..Default::default()
+            }),
+        };
+        let cluster = cluster_from_spec(spec);
+        let obj = scaled_object::generate_scaled_object(&cluster);
+
+        prop_assert!(obj.is_none(), "ScaledObject should not be generated without scaling headroom");
+    }
+
+    /// Property: TriggerAuthentication is generated only with connection-based scaling
+    #[test]
+    fn prop_trigger_auth_with_connection_scaling(
+        replicas in 2..=10i32,
+        target_connections in 10..=200i32
+    ) {
+        let spec = PostgresClusterSpec {
+            version: PostgresVersion::V16,
+            replicas,
+            storage: StorageSpec {
+                size: "10Gi".to_string(),
+                storage_class: None,
+            },
+            resources: None,
+            postgresql_params: Default::default(),
+            labels: Default::default(),
+            backup: None,
+            pgbouncer: None,
+            tls: TLSSpec::default(),
+            metrics: None,
+            service: None,
+            restore: None,
+            scaling: Some(ScalingSpec {
+                min_replicas: Some(replicas),
+                max_replicas: replicas + 5,
+                metrics: Some(ScalingMetrics {
+                    cpu: None,
+                    connections: Some(ConnectionScalingMetric {
+                        target_per_replica: target_connections,
+                    }),
+                }),
+                replication_lag_threshold: "30s".to_string(),
+                ..Default::default()
+            }),
+        };
+        let cluster = cluster_from_spec(spec);
+        let obj = scaled_object::generate_trigger_auth(&cluster);
+
+        prop_assert!(obj.is_some(), "TriggerAuthentication should be generated with connection scaling");
+    }
+
+    /// Property: TriggerAuthentication is NOT generated with CPU-only scaling
+    #[test]
+    fn prop_no_trigger_auth_with_cpu_only(
+        replicas in 2..=10i32,
+        target_cpu in 50..=90i32
+    ) {
+        let spec = PostgresClusterSpec {
+            version: PostgresVersion::V16,
+            replicas,
+            storage: StorageSpec {
+                size: "10Gi".to_string(),
+                storage_class: None,
+            },
+            resources: None,
+            postgresql_params: Default::default(),
+            labels: Default::default(),
+            backup: None,
+            pgbouncer: None,
+            tls: TLSSpec::default(),
+            metrics: None,
+            service: None,
+            restore: None,
+            scaling: Some(ScalingSpec {
+                min_replicas: Some(replicas),
+                max_replicas: replicas + 5,
+                metrics: Some(ScalingMetrics {
+                    cpu: Some(CpuScalingMetric {
+                        target_utilization: target_cpu,
+                    }),
+                    connections: None,
+                }),
+                replication_lag_threshold: "30s".to_string(),
+                ..Default::default()
+            }),
+        };
+        let cluster = cluster_from_spec(spec);
+        let obj = scaled_object::generate_trigger_auth(&cluster);
+
+        prop_assert!(obj.is_none(), "TriggerAuthentication should not be generated with CPU-only scaling");
+    }
+
+    /// Property: is_keda_managing_replicas returns true iff maxReplicas > replicas
+    #[test]
+    fn prop_keda_managing_replicas_correct(
+        replicas in 1..=10i32,
+        max_delta in 0..=10i32
+    ) {
+        let max_replicas = replicas + max_delta;
+        let spec = PostgresClusterSpec {
+            version: PostgresVersion::V16,
+            replicas,
+            storage: StorageSpec {
+                size: "10Gi".to_string(),
+                storage_class: None,
+            },
+            resources: None,
+            postgresql_params: Default::default(),
+            labels: Default::default(),
+            backup: None,
+            pgbouncer: None,
+            tls: TLSSpec::default(),
+            metrics: None,
+            service: None,
+            restore: None,
+            scaling: Some(ScalingSpec {
+                min_replicas: Some(replicas),
+                max_replicas,
+                metrics: None,
+                replication_lag_threshold: "30s".to_string(),
+                ..Default::default()
+            }),
+        };
+        let cluster = cluster_from_spec(spec);
+        let is_managing = scaled_object::is_keda_managing_replicas(&cluster);
+
+        if max_replicas > replicas {
+            prop_assert!(is_managing, "KEDA should manage replicas when max > base");
+        } else {
+            prop_assert!(!is_managing, "KEDA should not manage when max <= base");
+        }
+    }
+
+    /// Property: StatefulSet has no replicas field when KEDA is managing
+    #[test]
+    fn prop_statefulset_no_replicas_when_keda_manages(spec in valid_spec_with_scaling()) {
+        let cluster = cluster_from_spec(spec.clone());
+
+        // When KEDA manages replicas, StatefulSet should be generated with keda_manages=true
+        if scaled_object::is_keda_managing_replicas(&cluster) {
+            let sts = patroni::generate_patroni_statefulset(&cluster, true);
+            prop_assert!(
+                sts.spec.as_ref().unwrap().replicas.is_none(),
+                "StatefulSet should have no replicas when KEDA manages"
+            );
+        }
+    }
+
+    /// Property: ScaledObject triggers count matches metrics configuration
+    #[test]
+    fn prop_scaledobject_trigger_count_matches_metrics(spec in valid_spec_with_scaling()) {
+        let cluster = cluster_from_spec(spec.clone());
+        let obj = scaled_object::generate_scaled_object(&cluster);
+
+        if let Some(obj) = obj {
+            let spec_json: serde_json::Value = obj.data["spec"].clone();
+            let triggers = spec_json["triggers"].as_array().unwrap();
+
+            let scaling = cluster.spec.scaling.as_ref().unwrap();
+            let metrics = scaling.metrics.as_ref();
+
+            let expected_triggers = match metrics {
+                None => 1, // Default CPU trigger
+                Some(m) => {
+                    let cpu_count = if m.cpu.is_some() { 1 } else { 0 };
+                    let conn_count = if m.connections.is_some() { 1 } else { 0 };
+                    if cpu_count + conn_count == 0 { 1 } else { cpu_count + conn_count }
+                }
+            };
+
+            prop_assert_eq!(
+                triggers.len(),
+                expected_triggers,
+                "Trigger count should match metrics configuration"
+            );
+        }
     }
 }
 

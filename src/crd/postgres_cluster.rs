@@ -289,9 +289,35 @@ pub struct ScalingSpec {
     /// Default: 30s
     #[serde(default = "default_replication_lag_threshold")]
     pub replication_lag_threshold: String,
+
+    /// Replication lag threshold in bytes (alternative to time-based threshold).
+    /// If set, this takes precedence over `replication_lag_threshold`.
+    /// Use this for more precise control when you know your write throughput.
+    /// Example: 1000000000 (1GB)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lag_threshold_bytes: Option<i64>,
+
+    /// Estimated write throughput in MB/s for converting time-based lag thresholds to bytes.
+    /// Only used when `lag_threshold_bytes` is not set.
+    /// Default: 100 (100 MB/s)
+    #[serde(default = "default_estimated_throughput")]
+    pub estimated_throughput_mb_per_sec: i32,
+}
+
+fn default_estimated_throughput() -> i32 {
+    100
 }
 
 impl ScalingSpec {
+    /// Returns the effective lag threshold in bytes.
+    /// Uses `lag_threshold_bytes` if set, otherwise calculates from time threshold.
+    pub fn effective_lag_threshold_bytes(&self, threshold_secs: f64) -> i64 {
+        self.lag_threshold_bytes.unwrap_or_else(|| {
+            let throughput_bytes_per_sec =
+                self.estimated_throughput_mb_per_sec as f64 * 1_000_000.0;
+            (threshold_secs * throughput_bytes_per_sec) as i64
+        })
+    }
     /// Returns the effective minimum replicas, defaulting to the cluster's desired replicas
     pub fn effective_min_replicas(&self, desired_replicas: i32) -> i32 {
         self.min_replicas.unwrap_or(desired_replicas)
@@ -301,6 +327,19 @@ impl ScalingSpec {
     pub fn is_scaling_enabled(&self, desired_replicas: i32) -> bool {
         let min = self.effective_min_replicas(desired_replicas);
         self.max_replicas > min
+    }
+}
+
+impl Default for ScalingSpec {
+    fn default() -> Self {
+        Self {
+            min_replicas: None,
+            max_replicas: default_max_replicas(),
+            metrics: None,
+            replication_lag_threshold: default_replication_lag_threshold(),
+            lag_threshold_bytes: None,
+            estimated_throughput_mb_per_sec: default_estimated_throughput(),
+        }
     }
 }
 

@@ -224,6 +224,33 @@ impl<'a> StatusManager<'a> {
         version: &str,
         backup_status: Option<BackupStatus>,
     ) -> Result<()> {
+        self.set_running_full(
+            ready_replicas,
+            total_replicas,
+            primary_pod,
+            replica_pods,
+            version,
+            backup_status,
+            None,
+        )
+        .await
+    }
+
+    /// Update status for a running cluster with all optional status fields
+    ///
+    /// This is the consolidated method that updates backup status and replication lag
+    /// in a single atomic operation, avoiding race conditions from multiple status updates.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn set_running_full(
+        &self,
+        ready_replicas: i32,
+        total_replicas: i32,
+        primary_pod: Option<String>,
+        replica_pods: Vec<String>,
+        version: &str,
+        backup_status: Option<BackupStatus>,
+        replication_lag_status: Option<&crate::controller::replication_lag::ReplicationLagStatus>,
+    ) -> Result<()> {
         let generation = self.cluster.metadata.generation;
         let existing_conditions = self
             .cluster
@@ -247,6 +274,33 @@ impl<'a> StatusManager<'a> {
 
         // Use provided backup status or fall back to existing/default
         let final_backup_status = backup_status.or_else(|| self.get_backup_status());
+
+        // Use provided replication lag status or preserve existing
+        let (replication_lag, max_replication_lag_bytes, replicas_lagging) =
+            if let Some(lag_status) = replication_lag_status {
+                (
+                    lag_status.replicas.clone(),
+                    lag_status.max_lag_bytes,
+                    Some(lag_status.any_exceeds_threshold),
+                )
+            } else {
+                // Preserve existing replication lag status
+                (
+                    self.cluster
+                        .status
+                        .as_ref()
+                        .map(|s| s.replication_lag.clone())
+                        .unwrap_or_default(),
+                    self.cluster
+                        .status
+                        .as_ref()
+                        .and_then(|s| s.max_replication_lag_bytes),
+                    self.cluster
+                        .status
+                        .as_ref()
+                        .and_then(|s| s.replicas_lagging),
+                )
+            };
 
         let status = PostgresClusterStatus {
             phase: ClusterPhase::Running,
@@ -290,23 +344,10 @@ impl<'a> StatusManager<'a> {
                 .status
                 .as_ref()
                 .and_then(|s| s.restored_from.clone()),
-            // Replication lag tracking (preserved from existing status)
-            replication_lag: self
-                .cluster
-                .status
-                .as_ref()
-                .map(|s| s.replication_lag.clone())
-                .unwrap_or_default(),
-            max_replication_lag_bytes: self
-                .cluster
-                .status
-                .as_ref()
-                .and_then(|s| s.max_replication_lag_bytes),
-            replicas_lagging: self
-                .cluster
-                .status
-                .as_ref()
-                .and_then(|s| s.replicas_lagging),
+            // Replication lag tracking
+            replication_lag,
+            max_replication_lag_bytes,
+            replicas_lagging,
             connection_info: self.get_connection_info(),
         };
 
@@ -732,7 +773,7 @@ pub fn get_replica_pod_names(sts_name: &str, replica_count: i32) -> Vec<String> 
 }
 
 /// Generate connection info for a PostgresCluster
-pub fn generate_connection_info(cluster: &PostgresCluster, namespace: &str) -> ConnectionInfo {
+fn generate_connection_info(cluster: &PostgresCluster, namespace: &str) -> ConnectionInfo {
     let name = cluster.metadata.name.as_deref().unwrap_or("unknown");
 
     // Build service endpoints

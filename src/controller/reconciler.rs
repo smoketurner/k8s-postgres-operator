@@ -26,6 +26,7 @@ use tracing::{debug, error, info, instrument, warn};
 use crate::controller::backup_status::{BackupEvent, BackupStatusCollector, detect_backup_events};
 use crate::controller::context::Context;
 use crate::controller::error::{BackoffConfig, Error, Result};
+use crate::controller::replication_lag::collect_replication_lag;
 use crate::controller::state_machine::{
     ClusterEvent, ClusterStateMachine, TransitionContext, TransitionResult, determine_event,
 };
@@ -364,6 +365,98 @@ async fn check_and_update_status(
             None
         };
 
+    // Collect replication lag status for running clusters with replicas
+    // This is collected before the main status update to consolidate into a single update
+    let collected_replication_lag =
+        if current_phase == ClusterPhase::Running && cluster.spec.replicas > 1 {
+            match collect_replication_lag(ctx.client.clone(), cluster).await {
+                Ok(lag_status) => {
+                    // Log if any replicas are lagging
+                    if lag_status.any_exceeds_threshold {
+                        warn!(
+                            cluster = %name,
+                            max_lag_bytes = ?lag_status.max_lag_bytes,
+                            lagging_replicas = lag_status.replicas.iter()
+                                .filter(|r| r.exceeds_threshold)
+                                .map(|r| r.pod_name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            "Replicas exceeding replication lag threshold"
+                        );
+                    } else {
+                        debug!(
+                            cluster = %name,
+                            max_lag_bytes = ?lag_status.max_lag_bytes,
+                            "Replication lag within threshold"
+                        );
+                    }
+                    Some(lag_status)
+                }
+                Err(e) => {
+                    debug!(
+                        cluster = %name,
+                        error = %e,
+                        "Failed to collect replication lag (non-fatal)"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+    // Update KEDA pause state based on replication lag
+    // This prevents KEDA from scaling up while replicas are struggling to catch up
+    // Scale-down is still allowed since reducing load won't make lag worse
+    if let Some(lag_status) = &collected_replication_lag
+        && scaled_object::should_enable_reader_scaling(cluster)
+    {
+        match scaled_object::update_scaling_pause_state(
+            ctx.client.clone(),
+            cluster,
+            lag_status.any_exceeds_threshold,
+        )
+        .await
+        {
+            Ok(Some(true)) => {
+                // Scale-out was paused - emit event
+                ctx.publish_warning_event(
+                    cluster,
+                    "ScaleOutPaused",
+                    "UpdateScaling",
+                    Some(
+                        "Paused KEDA scale-out due to replication lag exceeding threshold (scale-down still allowed)"
+                            .to_string(),
+                    ),
+                )
+                .await;
+            }
+            Ok(Some(false)) => {
+                // Scale-out was resumed - emit event
+                ctx.publish_normal_event(
+                    cluster,
+                    "ScaleOutResumed",
+                    "UpdateScaling",
+                    Some(
+                        "Resumed KEDA scale-out, replication lag within threshold".to_string(),
+                    ),
+                )
+                .await;
+            }
+            Ok(None) => {
+                // No change needed
+            }
+            Err(e) => {
+                // Non-fatal - log and continue
+                warn!(
+                    cluster = %name,
+                    error = %e,
+                    "Failed to update KEDA pause state"
+                );
+            }
+        }
+    }
+
     // Check for manual backup trigger annotation
     if current_phase == ClusterPhase::Running
         && backup::is_backup_enabled(cluster)
@@ -396,14 +489,17 @@ async fn check_and_update_status(
                 .await?;
         }
     } else if ready_replicas >= cluster.spec.replicas {
+        // Consolidated status update: backup status + replication lag in a single call
+        // This avoids race conditions from multiple separate status updates
         status_manager
-            .set_running_with_backup(
+            .set_running_full(
                 ready_replicas,
                 cluster.spec.replicas,
                 primary_pod,
                 replica_pods,
                 cluster.spec.version.as_str(),
                 collected_backup_status,
+                collected_replication_lag.as_ref(),
             )
             .await?;
     }
@@ -1244,6 +1340,43 @@ async fn delete_keda_resource(
     }
 }
 
+/// Check if metrics-server is available in the cluster
+///
+/// Returns true if the metrics.k8s.io API group is available,
+/// indicating metrics-server is installed and can provide pod metrics.
+async fn is_metrics_server_available(ctx: &Context) -> bool {
+    match ctx.client.list_api_groups().await {
+        Ok(groups) => groups.groups.iter().any(|g| g.name == "metrics.k8s.io"),
+        Err(e) => {
+            debug!("Failed to list API groups: {}", e);
+            false
+        }
+    }
+}
+
+/// Check if connection-based scaling is configured
+fn has_connection_scaling(cluster: &PostgresCluster) -> bool {
+    cluster
+        .spec
+        .scaling
+        .as_ref()
+        .and_then(|s| s.metrics.as_ref())
+        .is_some_and(|m| m.connections.is_some())
+}
+
+/// Check if CPU-based scaling is configured (or will use default CPU trigger)
+fn has_cpu_scaling(cluster: &PostgresCluster) -> bool {
+    cluster.spec.scaling.as_ref().is_some_and(|scaling| {
+        // CPU scaling is used if:
+        // 1. Explicitly configured via metrics.cpu, OR
+        // 2. No metrics configured at all (defaults to CPU at 70%)
+        scaling
+            .metrics
+            .as_ref()
+            .is_none_or(|m| m.cpu.is_some() || m.connections.is_none())
+    })
+}
+
 /// Apply or clean up KEDA scaling resources based on cluster configuration
 async fn reconcile_keda_resources(
     cluster: &PostgresCluster,
@@ -1256,6 +1389,57 @@ async fn reconcile_keda_resources(
 
     // Reader auto-scaling (ScaledObject)
     if let Some(scaled_obj) = scaled_object::generate_scaled_object(cluster) {
+        // Validate prerequisites before creating KEDA resources
+
+        // Check metrics-server availability for CPU-based scaling
+        if has_cpu_scaling(cluster) && !is_metrics_server_available(ctx).await {
+            warn!(
+                cluster = %name,
+                "CPU-based scaling configured but metrics-server not available. \
+                 KEDA ScaledObject will be created but CPU scaling may not work until \
+                 metrics-server is installed."
+            );
+            // Continue creating ScaledObject - KEDA will handle fallback gracefully
+        }
+
+        // Validate connection-string secret for connection-based scaling
+        if has_connection_scaling(cluster) {
+            let secret_name = format!("{}-credentials", name);
+            let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
+
+            match secrets_api.get_opt(&secret_name).await? {
+                Some(secret) => {
+                    // Verify connection-string key exists
+                    let has_connection_string = secret
+                        .data
+                        .as_ref()
+                        .is_some_and(|d| d.contains_key("connection-string"));
+
+                    if !has_connection_string {
+                        warn!(
+                            cluster = %name,
+                            secret = %secret_name,
+                            "Credentials secret exists but missing 'connection-string' key. \
+                             Connection-based scaling requires this key. \
+                             The secret should contain a PostgreSQL connection string."
+                        );
+                        // Don't fail - log warning and continue without TriggerAuthentication
+                        // The ScaledObject will be created but connection scaling won't work
+                    }
+                }
+                None => {
+                    warn!(
+                        cluster = %name,
+                        secret = %secret_name,
+                        "Credentials secret not found. Connection-based scaling requires \
+                         the credentials secret to exist with a 'connection-string' key."
+                    );
+                    // Don't fail - the secret should be created by the reconciler
+                    // Continue and let TriggerAuthentication reference it
+                }
+            }
+        }
+
         info!(cluster = %name, "Applying KEDA ScaledObject for reader auto-scaling");
         apply_keda_resource(ctx, ns, &scaled_obj).await?;
 

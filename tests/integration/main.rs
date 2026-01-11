@@ -19,6 +19,7 @@ mod operator;
 mod wait;
 
 // Test modules
+mod keda_scaling_tests;
 mod slow_tests;
 mod tests;
 

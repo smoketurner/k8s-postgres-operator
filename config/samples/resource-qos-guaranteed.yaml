@@ -1,0 +1,49 @@
+# PostgreSQL cluster with Guaranteed QoS class
+#
+# This configuration uses equal requests and limits for CPU and memory,
+# which places pods in the Guaranteed QoS class. This provides:
+# - Highest priority during resource contention
+# - Protection from OOM kills (pods are only killed as a last resort)
+# - Predictable performance characteristics
+#
+# Best for production workloads requiring consistent performance.
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: guaranteed-qos-db
+  namespace: default
+  labels:
+    environment: production
+    qos-class: guaranteed
+spec:
+  version: "17"
+  replicas: 3
+  storage:
+    size: 50Gi
+    storageClass: fast-ssd  # Use SSD storage for predictable I/O
+  # Guaranteed QoS: requests == limits
+  # This ensures pods get exactly what they request, no more, no less
+  resources:
+    requests:
+      cpu: "2"
+      memory: "4Gi"
+    limits:
+      cpu: "2"        # Same as request for Guaranteed QoS
+      memory: "4Gi"   # Same as request for Guaranteed QoS
+  postgresqlParams:
+    # Memory settings tuned for 4Gi container
+    shared_buffers: "1GB"           # ~25% of memory
+    effective_cache_size: "3GB"     # ~75% of memory
+    work_mem: "32MB"
+    maintenance_work_mem: "256MB"
+    # Connection settings
+    max_connections: "200"
+    # WAL settings for reliability
+    wal_buffers: "64MB"
+    checkpoint_completion_target: "0.9"
+  tls:
+    enabled: false  # Enable in production with proper issuer
+  # Labels for cost tracking
+  labels:
+    cost-center: "eng-platform"
+    team: "database-team"

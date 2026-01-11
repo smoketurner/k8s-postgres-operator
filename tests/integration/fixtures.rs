@@ -8,9 +8,10 @@
 
 use kube::core::ObjectMeta;
 use postgres_operator::crd::{
-    ExternalTrafficPolicy, IssuerKind, IssuerRef, MetricsSpec, PgBouncerSpec, PostgresCluster,
-    PostgresClusterSpec, PostgresVersion, ResourceList, ResourceRequirements, ServiceSpec,
-    ServiceType, StorageSpec, TLSSpec,
+    ConnectionScalingMetric, CpuScalingMetric, ExternalTrafficPolicy, IssuerKind, IssuerRef,
+    MetricsSpec, PgBouncerSpec, PostgresCluster, PostgresClusterSpec, PostgresVersion,
+    ResourceList, ResourceRequirements, ScalingMetrics, ScalingSpec, ServiceSpec, ServiceType,
+    StorageSpec, TLSSpec,
 };
 use std::collections::BTreeMap;
 
@@ -28,6 +29,7 @@ pub struct PostgresClusterBuilder {
     pgbouncer: Option<PgBouncerSpec>,
     metrics: Option<MetricsSpec>,
     service: Option<ServiceSpec>,
+    scaling: Option<ScalingSpec>,
 }
 
 impl PostgresClusterBuilder {
@@ -54,6 +56,7 @@ impl PostgresClusterBuilder {
             pgbouncer: None,
             metrics: None,
             service: None,
+            scaling: None,
         }
     }
 
@@ -316,6 +319,86 @@ impl PostgresClusterBuilder {
         self
     }
 
+    /// Enable CPU-based auto-scaling with KEDA
+    pub fn with_cpu_scaling(
+        mut self,
+        min_replicas: i32,
+        max_replicas: i32,
+        target_cpu: i32,
+    ) -> Self {
+        self.scaling = Some(ScalingSpec {
+            min_replicas: Some(min_replicas),
+            max_replicas,
+            metrics: Some(ScalingMetrics {
+                cpu: Some(CpuScalingMetric {
+                    target_utilization: target_cpu,
+                }),
+                connections: None,
+            }),
+            replication_lag_threshold: "30s".to_string(),
+            ..Default::default()
+        });
+        self
+    }
+
+    /// Enable connection-based auto-scaling with KEDA
+    pub fn with_connection_scaling(
+        mut self,
+        min_replicas: i32,
+        max_replicas: i32,
+        target_per_replica: i32,
+    ) -> Self {
+        self.scaling = Some(ScalingSpec {
+            min_replicas: Some(min_replicas),
+            max_replicas,
+            metrics: Some(ScalingMetrics {
+                cpu: None,
+                connections: Some(ConnectionScalingMetric { target_per_replica }),
+            }),
+            replication_lag_threshold: "30s".to_string(),
+            ..Default::default()
+        });
+        self
+    }
+
+    /// Enable combined CPU and connection-based auto-scaling with KEDA
+    pub fn with_combined_scaling(
+        mut self,
+        min_replicas: i32,
+        max_replicas: i32,
+        target_cpu: i32,
+        target_connections: i32,
+    ) -> Self {
+        self.scaling = Some(ScalingSpec {
+            min_replicas: Some(min_replicas),
+            max_replicas,
+            metrics: Some(ScalingMetrics {
+                cpu: Some(CpuScalingMetric {
+                    target_utilization: target_cpu,
+                }),
+                connections: Some(ConnectionScalingMetric {
+                    target_per_replica: target_connections,
+                }),
+            }),
+            replication_lag_threshold: "30s".to_string(),
+            ..Default::default()
+        });
+        self
+    }
+
+    /// Enable scaling with disabled headroom (max == min, no scaling)
+    pub fn with_scaling_disabled(mut self) -> Self {
+        let replicas = self.replicas;
+        self.scaling = Some(ScalingSpec {
+            min_replicas: Some(replicas),
+            max_replicas: replicas,
+            metrics: None,
+            replication_lag_threshold: "30s".to_string(),
+            ..Default::default()
+        });
+        self
+    }
+
     /// Build the PostgresCluster resource
     pub fn build(self) -> PostgresCluster {
         PostgresCluster {
@@ -340,7 +423,7 @@ impl PostgresClusterBuilder {
                 metrics: self.metrics,
                 service: self.service,
                 restore: None,
-                scaling: None,
+                scaling: self.scaling,
             },
             status: None,
         }
