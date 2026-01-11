@@ -513,7 +513,10 @@ mod tls_statefulset_tests {
 
         // cert-manager creates a secret named {cluster-name}-tls
         let secret_source = tls_volume.unwrap().secret.as_ref().unwrap();
-        assert_eq!(secret_source.secret_name, Some("my-cluster-tls".to_string()));
+        assert_eq!(
+            secret_source.secret_name,
+            Some("my-cluster-tls".to_string())
+        );
     }
 
     #[test]

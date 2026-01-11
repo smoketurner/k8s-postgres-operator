@@ -36,7 +36,10 @@ pub fn generate_pdb(cluster: &PostgresCluster) -> PodDisruptionBudget {
     // Match all pods in the Patroni cluster (both master and replicas)
     let match_labels = BTreeMap::from([
         ("app.kubernetes.io/name".to_string(), cluster_name.clone()),
-        ("postgres-operator.smoketurner.com/cluster".to_string(), cluster_name),
+        (
+            "postgres-operator.smoketurner.com/cluster".to_string(),
+            cluster_name,
+        ),
     ]);
 
     // Calculate min_available based on replica count

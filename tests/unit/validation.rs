@@ -82,7 +82,8 @@ mod validate_spec_tests {
 
     #[test]
     fn test_invalid_replicas_above_max() {
-        let cluster = create_test_cluster("test", "default", MAX_REPLICAS + 1, PostgresVersion::V16);
+        let cluster =
+            create_test_cluster("test", "default", MAX_REPLICAS + 1, PostgresVersion::V16);
         let result = validate_spec(&cluster);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("exceeds maximum"));
@@ -273,7 +274,8 @@ mod edge_case_tests {
 
     #[test]
     fn test_above_max_replicas_rejected() {
-        let cluster = create_test_cluster("test", "default", MAX_REPLICAS + 1, PostgresVersion::V16);
+        let cluster =
+            create_test_cluster("test", "default", MAX_REPLICAS + 1, PostgresVersion::V16);
         let result = validate_spec(&cluster);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("exceeds maximum"));

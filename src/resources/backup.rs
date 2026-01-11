@@ -43,7 +43,9 @@ use k8s_openapi::api::core::v1::{
     EnvVar, EnvVarSource, KeyToPath, SecretKeySelector, SecretVolumeSource, Volume, VolumeMount,
 };
 
-use crate::crd::{BackupDestination, EncryptionMethod, PostgresCluster, RecoveryTarget, RestoreSource};
+use crate::crd::{
+    BackupDestination, EncryptionMethod, PostgresCluster, RecoveryTarget, RestoreSource,
+};
 
 /// GCS credentials mount path inside the container
 const GCS_CREDENTIALS_PATH: &str = "/var/secrets/google";

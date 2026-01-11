@@ -28,7 +28,10 @@ pub fn generate_primary_service(cluster: &PostgresCluster) -> Service {
     // Patroni sets this label on the leader pod
     let selector = BTreeMap::from([
         ("app.kubernetes.io/name".to_string(), cluster_name.clone()),
-        ("postgres-operator.smoketurner.com/cluster".to_string(), cluster_name),
+        (
+            "postgres-operator.smoketurner.com/cluster".to_string(),
+            cluster_name,
+        ),
         ("spilo-role".to_string(), "master".to_string()), // Patroni/Spilo label
     ]);
 
@@ -98,7 +101,10 @@ pub fn generate_replicas_service(cluster: &PostgresCluster) -> Service {
     // Patroni sets this label on replica pods
     let selector = BTreeMap::from([
         ("app.kubernetes.io/name".to_string(), cluster_name.clone()),
-        ("postgres-operator.smoketurner.com/cluster".to_string(), cluster_name),
+        (
+            "postgres-operator.smoketurner.com/cluster".to_string(),
+            cluster_name,
+        ),
         ("spilo-role".to_string(), "replica".to_string()), // Patroni/Spilo label
     ]);
 
@@ -168,7 +174,10 @@ pub fn generate_headless_service(cluster: &PostgresCluster) -> Service {
 
     let selector = BTreeMap::from([
         ("app.kubernetes.io/name".to_string(), cluster_name.clone()),
-        ("postgres-operator.smoketurner.com/cluster".to_string(), cluster_name),
+        (
+            "postgres-operator.smoketurner.com/cluster".to_string(),
+            cluster_name,
+        ),
     ]);
 
     Service {

@@ -145,7 +145,9 @@ mod tests {
 
     #[test]
     fn test_cluster_labels_with_user_labels() {
-        use crate::crd::{PostgresCluster, PostgresClusterSpec, PostgresVersion, StorageSpec, TLSSpec};
+        use crate::crd::{
+            PostgresCluster, PostgresClusterSpec, PostgresVersion, StorageSpec, TLSSpec,
+        };
         use kube::core::ObjectMeta;
 
         let mut user_labels = BTreeMap::new();
@@ -205,7 +207,9 @@ mod tests {
 
     #[test]
     fn test_cluster_labels_cannot_override_cluster_identifier() {
-        use crate::crd::{PostgresCluster, PostgresClusterSpec, PostgresVersion, StorageSpec, TLSSpec};
+        use crate::crd::{
+            PostgresCluster, PostgresClusterSpec, PostgresVersion, StorageSpec, TLSSpec,
+        };
         use kube::core::ObjectMeta;
 
         let mut user_labels = BTreeMap::new();

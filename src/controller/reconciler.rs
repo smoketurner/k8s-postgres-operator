@@ -699,8 +699,10 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
             .and_then(|r| r.restart_on_resize)
             .unwrap_or(false);
         let pgbouncer_deployment = pgbouncer::generate_pgbouncer_deployment(cluster);
-        let pgbouncer_deployment =
-            pgbouncer::add_resize_policy_to_deployment(pgbouncer_deployment, pgbouncer_restart_on_resize);
+        let pgbouncer_deployment = pgbouncer::add_resize_policy_to_deployment(
+            pgbouncer_deployment,
+            pgbouncer_restart_on_resize,
+        );
         apply_resource(ctx, ns, &pgbouncer_deployment).await?;
 
         // Apply PgBouncer Service
@@ -1050,11 +1052,7 @@ where
 ///
 /// This uses the dynamic API since cert-manager Certificate is a CRD,
 /// not a built-in Kubernetes resource.
-async fn apply_certificate(
-    ctx: &Context,
-    ns: &str,
-    cert: &certificate::Certificate,
-) -> Result<()> {
+async fn apply_certificate(ctx: &Context, ns: &str, cert: &certificate::Certificate) -> Result<()> {
     use kube::api::{ApiResource, DynamicObject, GroupVersionKind};
 
     let name = cert
@@ -1076,7 +1074,8 @@ async fn apply_certificate(
     let api: Api<DynamicObject> = Api::namespaced_with(ctx.client.clone(), ns, &ar);
     let params = PatchParams::apply("postgres-operator").force();
 
-    api.patch(name, &params, &Patch::Apply(&dynamic_obj)).await?;
+    api.patch(name, &params, &Patch::Apply(&dynamic_obj))
+        .await?;
     debug!("Applied cert-manager Certificate: {}", name);
 
     Ok(())

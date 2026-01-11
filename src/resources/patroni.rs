@@ -42,7 +42,6 @@ const DEFAULT_POSTGRESQL_PARAMS: &[(&str, &str)] = &[
     ("hot_standby_feedback", "on"),
 ];
 
-
 /// Generate the Patroni configuration as a ConfigMap
 ///
 /// This ConfigMap stores the effective Patroni configuration for auditing/debugging.

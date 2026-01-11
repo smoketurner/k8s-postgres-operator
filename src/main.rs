@@ -139,7 +139,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     };
 
-    info!("Watching PostgresCluster resources (apiVersion: postgres-operator.smoketurner.com/v1alpha1)");
+    info!(
+        "Watching PostgresCluster resources (apiVersion: postgres-operator.smoketurner.com/v1alpha1)"
+    );
 
     // Start controller (only runs as leader)
     let controller_handle = {

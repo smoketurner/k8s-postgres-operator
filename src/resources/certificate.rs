@@ -12,7 +12,7 @@ use kube::api::ObjectMeta;
 use serde::{Deserialize, Serialize};
 
 use crate::crd::PostgresCluster;
-use crate::resources::common::{owner_reference, standard_labels, FIELD_MANAGER};
+use crate::resources::common::{FIELD_MANAGER, owner_reference, standard_labels};
 
 /// cert-manager Certificate resource
 ///
@@ -143,10 +143,7 @@ pub fn generate_certificate(cluster: &PostgresCluster) -> Option<Certificate> {
 
     // Build labels for the secret
     let mut labels = standard_labels(name);
-    labels.insert(
-        "app.kubernetes.io/component".to_string(),
-        "tls".to_string(),
-    );
+    labels.insert("app.kubernetes.io/component".to_string(), "tls".to_string());
 
     let cert_issuer_ref = CertIssuerRef {
         name: issuer_ref.name.clone(),
@@ -263,9 +260,21 @@ mod tests {
         assert_eq!(cert.spec.issuer_ref.kind, "ClusterIssuer");
 
         // Check DNS names
-        assert!(cert.spec.dns_names.contains(&"test-cluster-primary".to_string()));
-        assert!(cert.spec.dns_names.contains(&"test-cluster-repl".to_string()));
-        assert!(cert.spec.dns_names.contains(&"custom.example.com".to_string()));
+        assert!(
+            cert.spec
+                .dns_names
+                .contains(&"test-cluster-primary".to_string())
+        );
+        assert!(
+            cert.spec
+                .dns_names
+                .contains(&"test-cluster-repl".to_string())
+        );
+        assert!(
+            cert.spec
+                .dns_names
+                .contains(&"custom.example.com".to_string())
+        );
 
         // Check duration settings
         assert_eq!(cert.spec.duration, Some("2160h".to_string()));
@@ -350,6 +359,8 @@ mod tests {
         assert!(dns_names.contains(&"test-cluster-repl.test-ns.svc.cluster.local".to_string()));
 
         // Headless service with wildcard for pods
-        assert!(dns_names.contains(&"*.test-cluster-headless.test-ns.svc.cluster.local".to_string()));
+        assert!(
+            dns_names.contains(&"*.test-cluster-headless.test-ns.svc.cluster.local".to_string())
+        );
     }
 }

@@ -989,7 +989,10 @@ pub fn is_replica_pooler_enabled(cluster: &PostgresCluster) -> bool {
 ///     },
 /// ]),
 /// ```
-pub fn add_resize_policy_to_deployment(deployment: Deployment, restart_on_resize: bool) -> Deployment {
+pub fn add_resize_policy_to_deployment(
+    deployment: Deployment,
+    restart_on_resize: bool,
+) -> Deployment {
     let policy = if restart_on_resize {
         "RestartContainer"
     } else {
