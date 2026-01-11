@@ -29,7 +29,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         // Check if a provider is already installed (common in test scenarios)
         if rustls::crypto::CryptoProvider::get_default().is_none() {
-            return Err("Failed to install rustls crypto provider and no provider is available".into());
+            return Err(
+                "Failed to install rustls crypto provider and no provider is available".into(),
+            );
         }
         // A provider is already installed, which is fine
     }

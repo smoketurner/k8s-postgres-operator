@@ -9,7 +9,9 @@ use kube::{Api, ResourceExt};
 
 use crate::controller::Context;
 use crate::controller::error::Result;
-use crate::crd::{BackupStatus, ClusterPhase, Condition, ConnectionInfo, PostgresCluster, PostgresClusterStatus};
+use crate::crd::{
+    BackupStatus, ClusterPhase, Condition, ConnectionInfo, PostgresCluster, PostgresClusterStatus,
+};
 use crate::resources::pgbouncer;
 
 /// Standard condition types following Kubernetes conventions
