@@ -1,0 +1,28 @@
+# Simple test cluster for CPU-based auto-scaling
+# No TLS for easier testing
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: test-cpu-scaling
+  namespace: default
+spec:
+  version: "17"
+  replicas: 2
+  storage:
+    size: 1Gi
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  tls:
+    enabled: false
+  # CPU-based auto-scaling
+  scaling:
+    minReplicas: 2
+    maxReplicas: 5
+    metrics:
+      cpu:
+        targetUtilization: 70

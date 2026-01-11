@@ -1,0 +1,86 @@
+# Production cluster with combined CPU + connection-based auto-scaling
+# Scales up on either high CPU OR high connection count (whichever triggers first)
+#
+# KEDA Resources Created:
+# - ScaledObject: Both CPU and PostgreSQL triggers
+# - TriggerAuthentication: For PostgreSQL connection query
+#
+# Requirements:
+# - KEDA installed
+# - Metrics Server installed
+#
+# Test Scenario:
+# 1. Apply this manifest
+# 2. Wait for 3 replicas to be ready
+# 3. Test CPU-based scaling:
+#    - Run CPU-intensive queries (complex JOINs, aggregations)
+#    - Verify scale-up when CPU > 60%
+# 4. Test connection-based scaling (separately):
+#    - Open many idle connections
+#    - Verify scale-up when connections > 100 per replica
+# 5. Test combined load:
+#    - Both metrics active, whichever is higher drives scaling
+# 6. Monitor with: kubectl get hpa,scaledobject -w
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: prod-combined-db
+  namespace: default
+  labels:
+    environment: production
+    team: data-platform
+    cost-center: dp-001
+spec:
+  version: "16"
+  replicas: 3
+  storage:
+    size: 100Gi
+    storageClass: fast-ssd
+  resources:
+    requests:
+      cpu: "2"
+      memory: "4Gi"
+    limits:
+      cpu: "4"
+      memory: "8Gi"
+  postgresqlParams:
+    max_connections: "500"
+    shared_buffers: "1GB"
+    effective_cache_size: "3GB"
+    work_mem: "64MB"
+  tls:
+    enabled: true
+    issuerRef:
+      name: letsencrypt-prod
+      kind: ClusterIssuer
+  pgbouncer:
+    enabled: true
+    replicas: 3
+    poolMode: transaction
+    maxDbConnections: 150
+    defaultPoolSize: 50
+    maxClientConn: 20000
+    enableReplicaPooler: true
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "512Mi"
+      limits:
+        cpu: "1"
+        memory: "1Gi"
+  service:
+    type: LoadBalancer
+    loadBalancerSourceRanges:
+      - 10.0.0.0/8
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-internal: "true"
+  # Combined metrics auto-scaling
+  scaling:
+    minReplicas: 3
+    maxReplicas: 20
+    metrics:
+      cpu:
+        targetUtilization: 60   # More aggressive CPU threshold
+      connections:
+        targetPerReplica: 100   # Higher connection threshold
+    replicationLagThreshold: 30s

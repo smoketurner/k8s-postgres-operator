@@ -340,6 +340,7 @@ impl PostgresClusterBuilder {
                 metrics: self.metrics,
                 service: self.service,
                 restore: None,
+                scaling: None,
             },
             status: None,
         }

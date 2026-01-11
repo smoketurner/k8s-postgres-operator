@@ -177,6 +177,7 @@ mod tests {
                 metrics: None,
                 service: None,
                 restore: None,
+                scaling: None,
             },
             status: None,
         };
@@ -241,6 +242,7 @@ mod tests {
                 metrics: None,
                 service: None,
                 restore: None,
+                scaling: None,
             },
             status: None,
         };

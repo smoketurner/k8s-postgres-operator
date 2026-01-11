@@ -1,0 +1,49 @@
+# Cluster with scaling configured but effectively disabled
+# Useful for: Testing KEDA resource cleanup when scaling is removed
+#
+# KEDA Resources Created:
+# - None (maxReplicas == minReplicas, no scaling headroom)
+#
+# Test Scenario:
+# 1. First apply a scaling-enabled cluster (e.g., scaling-prod-cpu.yaml)
+# 2. Verify KEDA resources exist:
+#    kubectl get scaledobject,triggerauthentication -l app.kubernetes.io/instance=fixed-db
+# 3. Update to this manifest (scaling effectively disabled)
+# 4. Verify KEDA resources are cleaned up by operator
+# 5. Verify cluster continues running with fixed 3 replicas
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: fixed-db
+  namespace: default
+  labels:
+    environment: production
+    scaling: disabled
+spec:
+  version: "16"
+  replicas: 3
+  storage:
+    size: 50Gi
+  resources:
+    requests:
+      cpu: "1"
+      memory: "2Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+  tls:
+    enabled: true
+    issuerRef:
+      name: letsencrypt-prod
+      kind: ClusterIssuer
+  pgbouncer:
+    enabled: true
+    replicas: 2
+    poolMode: transaction
+  # Scaling configured but no headroom (effectively disabled)
+  scaling:
+    minReplicas: 3
+    maxReplicas: 3         # Same as minReplicas = no scaling
+    metrics:
+      cpu:
+        targetUtilization: 70

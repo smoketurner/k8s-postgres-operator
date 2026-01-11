@@ -15,6 +15,7 @@ use axum::{
 use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
+use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::metrics::histogram::{Histogram, exponential_buckets};
 use prometheus_client::registry::Registry;
 use std::sync::Arc;
@@ -41,6 +42,23 @@ impl prometheus_client::encoding::EncodeLabelSet for ReconcileLabels {
     }
 }
 
+/// Labels for cluster phase metrics
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct PhaseLabels {
+    pub phase: String,
+}
+
+impl prometheus_client::encoding::EncodeLabelSet for PhaseLabels {
+    fn encode(
+        &self,
+        encoder: &mut prometheus_client::encoding::LabelSetEncoder,
+    ) -> Result<(), std::fmt::Error> {
+        use prometheus_client::encoding::EncodeLabel;
+        ("phase", self.phase.as_str()).encode(encoder.encode_label())?;
+        Ok(())
+    }
+}
+
 /// Shared metrics state
 pub struct Metrics {
     /// Total reconciliations counter
@@ -49,6 +67,15 @@ pub struct Metrics {
     pub reconciliation_errors_total: Family<ReconcileLabels, Counter>,
     /// Reconciliation duration histogram
     pub reconcile_duration_seconds: Family<ReconcileLabels, Histogram>,
+
+    // Fleet metrics
+    /// Total clusters by phase
+    pub clusters_total: Family<PhaseLabels, Gauge>,
+    /// Desired replicas per cluster
+    pub cluster_replicas_desired: Family<ReconcileLabels, Gauge>,
+    /// Ready replicas per cluster
+    pub cluster_replicas_ready: Family<ReconcileLabels, Gauge>,
+
     /// Prometheus registry
     registry: Registry,
 }
@@ -87,10 +114,35 @@ impl Metrics {
             reconcile_duration_seconds.clone(),
         );
 
+        // Fleet metrics
+        let clusters_total = Family::<PhaseLabels, Gauge>::default();
+        registry.register(
+            "postgres_operator_clusters_total",
+            "Total number of PostgreSQL clusters by phase",
+            clusters_total.clone(),
+        );
+
+        let cluster_replicas_desired = Family::<ReconcileLabels, Gauge>::default();
+        registry.register(
+            "postgres_operator_cluster_replicas_desired",
+            "Desired number of replicas for each cluster",
+            cluster_replicas_desired.clone(),
+        );
+
+        let cluster_replicas_ready = Family::<ReconcileLabels, Gauge>::default();
+        registry.register(
+            "postgres_operator_cluster_replicas_ready",
+            "Number of ready replicas for each cluster",
+            cluster_replicas_ready.clone(),
+        );
+
         Self {
             reconciliations_total,
             reconciliation_errors_total,
             reconcile_duration_seconds,
+            clusters_total,
+            cluster_replicas_desired,
+            cluster_replicas_ready,
             registry,
         }
     }
@@ -116,6 +168,31 @@ impl Metrics {
         self.reconciliation_errors_total
             .get_or_create(&labels)
             .inc();
+    }
+
+    /// Update cluster phase count
+    ///
+    /// This should be called with the current count for each phase
+    /// after listing all clusters.
+    pub fn set_clusters_by_phase(&self, phase: &str, count: i64) {
+        let labels = PhaseLabels {
+            phase: phase.to_string(),
+        };
+        self.clusters_total.get_or_create(&labels).set(count);
+    }
+
+    /// Update cluster replica metrics
+    pub fn set_cluster_replicas(&self, namespace: &str, name: &str, desired: i64, ready: i64) {
+        let labels = ReconcileLabels {
+            namespace: namespace.to_string(),
+            name: name.to_string(),
+        };
+        self.cluster_replicas_desired
+            .get_or_create(&labels)
+            .set(desired);
+        self.cluster_replicas_ready
+            .get_or_create(&labels)
+            .set(ready);
     }
 
     /// Encode metrics to Prometheus text format
@@ -234,6 +311,25 @@ mod tests {
         assert!(encoded.contains("postgres_operator_reconciliations"));
         assert!(encoded.contains("postgres_operator_reconciliation_errors"));
         assert!(encoded.contains("postgres_operator_reconcile_duration_seconds"));
+    }
+
+    #[test]
+    fn test_fleet_metrics() {
+        let metrics = Metrics::new();
+
+        // Set cluster counts by phase
+        metrics.set_clusters_by_phase("Running", 5);
+        metrics.set_clusters_by_phase("Degraded", 1);
+        metrics.set_clusters_by_phase("Creating", 2);
+
+        // Set replica metrics for a cluster
+        metrics.set_cluster_replicas("default", "prod-db", 3, 3);
+        metrics.set_cluster_replicas("staging", "staging-db", 2, 1);
+
+        let encoded = metrics.encode();
+        assert!(encoded.contains("postgres_operator_clusters_total"));
+        assert!(encoded.contains("postgres_operator_cluster_replicas_desired"));
+        assert!(encoded.contains("postgres_operator_cluster_replicas_ready"));
     }
 
     #[tokio::test]

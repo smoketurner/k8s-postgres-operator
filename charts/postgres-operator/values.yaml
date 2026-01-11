@@ -155,3 +155,34 @@ extraVolumes: []
 #   - Production: Let's Encrypt, HashiCorp Vault, or internal PKI
 #
 # See: https://cert-manager.io/docs/configuration/
+
+# =============================================================================
+# Auto-Scaling Configuration (optional - requires KEDA)
+# =============================================================================
+# OPTIONAL PREREQUISITE: KEDA must be installed for auto-scaling features.
+# Auto-scaling is opt-in and configured per PostgresCluster via spec.scaling.
+#
+# Features:
+#   - Reader auto-scaling: Scale read replicas based on CPU/connections
+#   - Scale-to-zero: Scale development clusters to 0 when idle
+#
+# Install KEDA:
+#   helm repo add kedacore https://kedacore.github.io/charts
+#   helm install keda kedacore/keda --namespace keda --create-namespace
+#
+# For scale-to-zero, also install the KEDA HTTP Add-on:
+#   helm install keda-http-add-on kedacore/keda-add-ons-http \
+#     --namespace keda
+#
+# Example PostgresCluster with auto-scaling:
+#   spec:
+#     replicas: 3
+#     scaling:
+#       minReplicas: 3      # Minimum replicas (0 enables scale-to-zero)
+#       maxReplicas: 10     # Maximum replicas for auto-scaling
+#       idleTimeout: 30m    # Time before scaling to minReplicas
+#       metrics:
+#         cpu:
+#           targetUtilization: 70
+#
+# See: https://keda.sh/docs/latest/deploy/

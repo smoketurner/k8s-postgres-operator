@@ -1,0 +1,59 @@
+# Test cluster for replication lag threshold behavior
+# Demonstrates how lagging replicas are excluded from read routing
+#
+# KEDA Resources Created:
+# - ScaledObject: CPU-based trigger
+#
+# Status Fields to Monitor:
+# - status.replicationLag[]: Per-replica lag information
+# - status.maxReplicationLagBytes: Highest lag across replicas
+# - status.replicasLagging: True if any replica exceeds threshold
+#
+# Test Scenario:
+# 1. Apply this manifest
+# 2. Wait for 3 replicas to be ready
+# 3. Check replication lag status:
+#    kubectl get pgc lag-test-db -o jsonpath='{.status.replicationLag}'
+# 4. Generate heavy write load on primary to create lag:
+#    kubectl exec -it lag-test-db-0 -- psql -c "
+#      CREATE TABLE test_lag AS SELECT generate_series(1,10000000) as id;
+#      INSERT INTO test_lag SELECT generate_series(1,10000000);
+#    "
+# 5. Monitor lag status:
+#    kubectl get pgc lag-test-db -o yaml | grep -A 20 replicationLag
+# 6. Verify replicas exceeding 15s threshold show exceeds_threshold: true
+# 7. Those replicas should be excluded from reader service routing
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: lag-test-db
+  namespace: default
+  labels:
+    environment: test
+    test-case: replication-lag
+spec:
+  version: "17"
+  replicas: 3
+  storage:
+    size: 20Gi
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "1"
+      memory: "2Gi"
+  postgresqlParams:
+    # Slower replication to simulate lag
+    max_wal_senders: "5"
+    wal_keep_size: "512MB"
+  tls:
+    enabled: false
+  # Auto-scaling with strict replication lag threshold
+  scaling:
+    minReplicas: 3
+    maxReplicas: 6
+    metrics:
+      cpu:
+        targetUtilization: 70
+    replicationLagThreshold: 15s   # Strict 15-second threshold

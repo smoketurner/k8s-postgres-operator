@@ -1,0 +1,63 @@
+# Production cluster with CPU-based reader auto-scaling
+# Scales read replicas from 3 to 10 based on CPU utilization
+#
+# KEDA Resources Created:
+# - ScaledObject: CPU-based trigger targeting StatefulSet
+#
+# Requirements:
+# - KEDA installed
+# - Metrics Server installed (for CPU metrics)
+#
+# Test Scenario:
+# 1. Apply this manifest
+# 2. Wait for 3 replicas to be ready
+# 3. Generate read-heavy load using pgbench:
+#    kubectl exec -it prod-cpu-db-0 -- pgbench -i -s 100 postgres
+#    kubectl exec -it prod-cpu-db-0 -- pgbench -c 50 -j 4 -T 300 -S postgres
+# 4. Monitor scaling: kubectl get hpa -w
+# 5. Verify replicas scale up as CPU exceeds 70%
+# 6. Stop load and verify scale-down after stabilization window (5 min)
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: prod-cpu-db
+  namespace: default
+  labels:
+    environment: production
+    team: platform
+spec:
+  version: "16"
+  replicas: 3              # Baseline HA configuration
+  storage:
+    size: 50Gi
+    storageClass: fast-ssd
+  resources:
+    requests:
+      cpu: "1"
+      memory: "2Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+  postgresqlParams:
+    max_connections: "200"
+    shared_buffers: "512MB"
+    effective_cache_size: "1536MB"
+  tls:
+    enabled: true
+    issuerRef:
+      name: letsencrypt-prod
+      kind: ClusterIssuer
+  pgbouncer:
+    enabled: true
+    replicas: 2
+    poolMode: transaction
+    maxDbConnections: 60
+    enableReplicaPooler: true  # Separate pooler for read replicas
+  # CPU-based auto-scaling
+  scaling:
+    minReplicas: 3         # Never scale below HA threshold
+    maxReplicas: 10        # Maximum read replicas
+    metrics:
+      cpu:
+        targetUtilization: 70  # Scale up when average CPU > 70%
+    replicationLagThreshold: 30s  # Exclude lagging replicas from routing

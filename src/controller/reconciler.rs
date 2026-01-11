@@ -31,7 +31,10 @@ use crate::controller::state_machine::{
 };
 use crate::controller::status::{StatusManager, spec_changed};
 use crate::crd::{ClusterPhase, PostgresCluster};
-use crate::resources::{backup, certificate, patroni, pdb, pgbouncer, secret, service};
+use crate::resources::{
+    backup, certificate, http_scaled_object, patroni, pdb, pgbouncer, scaled_object, secret,
+    service,
+};
 
 /// Finalizer name for cleanup
 pub const FINALIZER: &str = "postgres-operator.smoketurner.com/finalizer";
@@ -315,6 +318,9 @@ async fn check_and_update_status(
 
     let (ready_replicas, _, _) = get_statefulset_status(&sts_api, &name).await;
 
+    // Record cluster replica metrics for fleet observability
+    ctx.record_cluster_replicas(ns, &name, cluster.spec.replicas, ready_replicas);
+
     // Get pod names from Patroni labels (spilo-role)
     let primary_pod = get_patroni_leader(&pods_api, &name).await;
     let replica_pods = get_patroni_replicas(&pods_api, &name).await;
@@ -401,6 +407,16 @@ async fn check_and_update_status(
                 collected_backup_status,
             )
             .await?;
+    }
+
+    // Apply KEDA scaling resources if configured (also needed in status-only path)
+    // This ensures KEDA resources are created even for running clusters
+    if let Err(e) = reconcile_keda_resources(cluster, ctx, ns).await {
+        warn!(
+            cluster = %name,
+            error = %e,
+            "Failed to reconcile KEDA resources (non-fatal)"
+        );
     }
 
     // Requeue based on phase - running clusters need less frequent checks
@@ -676,8 +692,36 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
     let primary_svc = service::generate_primary_service(cluster);
     apply_resource(ctx, ns, &primary_svc).await?;
 
-    let replicas_svc = service::generate_replicas_service(cluster);
-    apply_resource(ctx, ns, &replicas_svc).await?;
+    // Only create replicas service if replicas > 1 (production mode)
+    // With replicas=1 (development mode), there are no read replicas
+    if cluster.spec.replicas > 1 {
+        let replicas_svc = service::generate_replicas_service(cluster);
+        apply_resource(ctx, ns, &replicas_svc).await?;
+    } else {
+        // Clean up replicas service if it exists (cluster scaled down to 1 replica)
+        let replicas_svc_name = format!("{}-repl", name);
+        let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
+        match svc_api
+            .delete(&replicas_svc_name, &DeleteParams::default())
+            .await
+        {
+            Ok(_) => {
+                info!(
+                    "Deleted replicas service {} (cluster scaled to single replica)",
+                    replicas_svc_name
+                );
+            }
+            Err(kube::Error::Api(err)) if err.code == 404 => {
+                // Service doesn't exist, that's fine
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to delete replicas service {}: {}",
+                    replicas_svc_name, e
+                );
+            }
+        }
+    }
 
     let headless_svc = service::generate_headless_service(cluster);
     apply_resource(ctx, ns, &headless_svc).await?;
@@ -729,12 +773,27 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
         }
     }
 
+    // Apply KEDA scaling resources if configured
+    // This is a no-op if scaling is not configured or KEDA is not installed
+    if let Err(e) = reconcile_keda_resources(cluster, ctx, ns).await {
+        warn!(
+            cluster = %name,
+            error = %e,
+            "Failed to reconcile KEDA resources (non-fatal)"
+        );
+        // Don't fail reconciliation if KEDA resources can't be applied
+        // The cluster will still work, just without auto-scaling
+    }
+
     // Check StatefulSet status
     let sts_api: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), ns);
     let pods_api: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
     let pvc_api: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), ns);
 
     let (ready_replicas, _, _) = get_statefulset_status(&sts_api, &name).await;
+
+    // Record cluster replica metrics for fleet observability
+    ctx.record_cluster_replicas(ns, &name, cluster.spec.replicas, ready_replicas);
 
     // Get pod names from Patroni labels (spilo-role)
     let primary_pod = get_patroni_leader(&pods_api, &name).await;
@@ -851,6 +910,10 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
                 ClusterPhase::Pending | ClusterPhase::Deleting => {
                     // These are handled elsewhere (initial state / deletion handler)
                 }
+                ClusterPhase::Hibernating => {
+                    // Cluster is hibernating (scaled to zero)
+                    // No status update needed - KEDA will handle wake-up
+                }
             }
         }
         TransitionResult::InvalidTransition { current, event } => {
@@ -919,6 +982,7 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
         ClusterPhase::Running => Duration::from_secs(60),
         ClusterPhase::Failed => Duration::from_secs(30),
         ClusterPhase::Pending | ClusterPhase::Deleting => Duration::from_secs(5),
+        ClusterPhase::Hibernating => Duration::from_secs(300), // 5 minutes - KEDA handles wake-up
     };
 
     Ok(Action::requeue(requeue_duration))
@@ -1077,6 +1141,184 @@ async fn apply_certificate(ctx: &Context, ns: &str, cert: &certificate::Certific
     api.patch(name, &params, &Patch::Apply(&dynamic_obj))
         .await?;
     debug!("Applied cert-manager Certificate: {}", name);
+
+    Ok(())
+}
+
+/// Apply a KEDA resource (ScaledObject, HTTPScaledObject, TriggerAuthentication)
+///
+/// Uses the dynamic API since KEDA CRDs are not built-in Kubernetes resources.
+/// Gracefully handles the case where KEDA is not installed.
+async fn apply_keda_resource(
+    ctx: &Context,
+    ns: &str,
+    obj: &kube::api::DynamicObject,
+) -> Result<()> {
+    use kube::api::ApiResource;
+
+    let name = obj.name_any();
+    let ar = ApiResource {
+        group: obj
+            .types
+            .as_ref()
+            .map(|t| t.api_version.split('/').next().unwrap_or(""))
+            .unwrap_or("")
+            .to_string(),
+        version: obj
+            .types
+            .as_ref()
+            .map(|t| {
+                let parts: Vec<&str> = t.api_version.split('/').collect();
+                parts.get(1).unwrap_or(&parts[0]).to_string()
+            })
+            .unwrap_or_default(),
+        kind: obj
+            .types
+            .as_ref()
+            .map(|t| t.kind.clone())
+            .unwrap_or_default(),
+        api_version: obj
+            .types
+            .as_ref()
+            .map(|t| t.api_version.clone())
+            .unwrap_or_default(),
+        plural: format!(
+            "{}s",
+            obj.types
+                .as_ref()
+                .map(|t| t.kind.to_lowercase())
+                .unwrap_or_default()
+        ),
+    };
+
+    let api: Api<kube::api::DynamicObject> = Api::namespaced_with(ctx.client.clone(), ns, &ar);
+    let params = PatchParams::apply("postgres-operator").force();
+
+    match api.patch(&name, &params, &Patch::Apply(obj)).await {
+        Ok(_) => {
+            debug!("Applied KEDA resource {}: {}", ar.kind, name);
+            Ok(())
+        }
+        Err(kube::Error::Api(ae)) if ae.code == 404 => {
+            // CRD not found - KEDA is not installed
+            warn!(
+                "KEDA CRD {} not found - KEDA may not be installed. Skipping {}",
+                ar.kind, name
+            );
+            Ok(())
+        }
+        Err(e) => Err(Error::KubeError(e)),
+    }
+}
+
+/// Delete a KEDA resource if it exists
+///
+/// Used to clean up KEDA resources when scaling is disabled.
+async fn delete_keda_resource(
+    ctx: &Context,
+    ns: &str,
+    group: &str,
+    version: &str,
+    kind: &str,
+    name: &str,
+) -> Result<()> {
+    use kube::api::ApiResource;
+
+    let ar = ApiResource {
+        group: group.to_string(),
+        version: version.to_string(),
+        kind: kind.to_string(),
+        api_version: format!("{}/{}", group, version),
+        plural: format!("{}s", kind.to_lowercase()),
+    };
+
+    let api: Api<kube::api::DynamicObject> = Api::namespaced_with(ctx.client.clone(), ns, &ar);
+
+    match api.delete(name, &DeleteParams::default()).await {
+        Ok(_) => {
+            debug!("Deleted KEDA resource {}: {}", kind, name);
+            Ok(())
+        }
+        Err(kube::Error::Api(ae)) if ae.code == 404 => {
+            // Resource doesn't exist, nothing to delete
+            Ok(())
+        }
+        Err(e) => Err(Error::KubeError(e)),
+    }
+}
+
+/// Apply or clean up KEDA scaling resources based on cluster configuration
+async fn reconcile_keda_resources(
+    cluster: &PostgresCluster,
+    ctx: &Context,
+    ns: &str,
+) -> Result<()> {
+    let name = cluster.name_any();
+
+    info!(cluster = %name, "Reconciling KEDA resources");
+
+    // Reader auto-scaling (ScaledObject)
+    if let Some(scaled_obj) = scaled_object::generate_scaled_object(cluster) {
+        info!(cluster = %name, "Applying KEDA ScaledObject for reader auto-scaling");
+        apply_keda_resource(ctx, ns, &scaled_obj).await?;
+
+        // Also create TriggerAuthentication if needed for connection-based scaling
+        if let Some(trigger_auth) = scaled_object::generate_trigger_auth(cluster) {
+            apply_keda_resource(ctx, ns, &trigger_auth).await?;
+        }
+    } else {
+        // Clean up ScaledObject if scaling is disabled
+        delete_keda_resource(
+            ctx,
+            ns,
+            scaled_object::KEDA_API_GROUP,
+            scaled_object::KEDA_API_VERSION,
+            scaled_object::SCALED_OBJECT_KIND,
+            &format!("{}-readers", name),
+        )
+        .await?;
+
+        delete_keda_resource(
+            ctx,
+            ns,
+            scaled_object::KEDA_API_GROUP,
+            scaled_object::KEDA_API_VERSION,
+            "TriggerAuthentication",
+            &format!("{}-pg-auth", name),
+        )
+        .await?;
+    }
+
+    // Scale-to-zero (HTTPScaledObject)
+    if let Some(http_obj) = http_scaled_object::generate_http_scaled_object(cluster) {
+        apply_keda_resource(ctx, ns, &http_obj).await?;
+
+        // Also create the StatefulSet scaler if PgBouncer is enabled
+        if let Some(sts_scaler) = http_scaled_object::generate_statefulset_scaled_object(cluster) {
+            apply_keda_resource(ctx, ns, &sts_scaler).await?;
+        }
+    } else {
+        // Clean up HTTPScaledObject if scale-to-zero is disabled
+        delete_keda_resource(
+            ctx,
+            ns,
+            http_scaled_object::HTTP_API_GROUP,
+            http_scaled_object::HTTP_API_VERSION,
+            http_scaled_object::HTTP_SCALED_OBJECT_KIND,
+            &format!("{}-scale-to-zero", name),
+        )
+        .await?;
+
+        delete_keda_resource(
+            ctx,
+            ns,
+            scaled_object::KEDA_API_GROUP,
+            scaled_object::KEDA_API_VERSION,
+            scaled_object::SCALED_OBJECT_KIND,
+            &format!("{}-sts-scaler", name),
+        )
+        .await?;
+    }
 
     Ok(())
 }
@@ -1281,6 +1523,7 @@ async fn emit_state_transition_event(
         ClusterPhase::Failed => "ClusterFailed",
         ClusterPhase::Deleting => "ClusterDeleting",
         ClusterPhase::Pending => "ClusterPending",
+        ClusterPhase::Hibernating => "ClusterHibernating",
     };
 
     let note = Some(format!(

@@ -1,0 +1,44 @@
+# Development cluster with scale-to-zero capability
+# Scales down to 0 pods after 30 minutes of idle, wakes on connection
+#
+# KEDA Resources Created:
+# - HTTPScaledObject: Intercepts connections and wakes cluster
+#
+# Requirements:
+# - KEDA installed with HTTP Add-on (keda-http-add-on)
+#
+# Test Scenario:
+# 1. Apply this manifest
+# 2. Wait for cluster to start (kubectl get pgc dev-db -w)
+# 3. Connect to PostgreSQL and run some queries
+# 4. Disconnect and wait 30+ minutes
+# 5. Verify pods scale to 0 (kubectl get pods -l app.kubernetes.io/instance=dev-db)
+# 6. Reconnect - cluster should wake up automatically
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: dev-db
+  namespace: default
+  labels:
+    environment: development
+spec:
+  version: "17"
+  replicas: 1
+  storage:
+    size: 5Gi
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+  # TLS disabled for development simplicity
+  tls:
+    enabled: false
+  # Scale-to-zero configuration
+  scaling:
+    minReplicas: 0      # Enable scale-to-zero
+    maxReplicas: 1      # Single instance (development)
+    idleTimeout: 30m    # Scale down after 30 minutes idle
+    wakeupTimeout: 5m   # Max wait time for wake-up

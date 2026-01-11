@@ -225,6 +225,7 @@ mod tests {
                 pgbouncer: None,
                 metrics: None,
                 service: None,
+                scaling: None,
             },
             status: None,
         }

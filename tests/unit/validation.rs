@@ -38,6 +38,7 @@ fn create_test_cluster(
             metrics: None,
             service: None,
             restore: None,
+            scaling: None,
         },
         status: None,
     }

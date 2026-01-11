@@ -1,0 +1,58 @@
+# Aggressive auto-scaling for bursty workloads
+# Quick scale-up, slower scale-down to handle traffic spikes
+#
+# KEDA Resources Created:
+# - ScaledObject with aggressive scale-up policies
+#
+# Test Scenario:
+# 1. Apply this manifest
+# 2. Wait for 2 replicas to be ready
+# 3. Simulate traffic burst:
+#    kubectl exec -it bursty-db-0 -- pgbench -c 100 -j 10 -T 60 -S postgres
+# 4. Observe rapid scale-up (within 1-2 minutes)
+# 5. Stop load and observe slower scale-down (5+ minute stabilization)
+# 6. Useful for: E-commerce flash sales, event-driven traffic spikes
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: bursty-db
+  namespace: default
+  labels:
+    environment: production
+    workload-type: bursty
+spec:
+  version: "17"
+  replicas: 2              # Lower baseline for cost savings
+  storage:
+    size: 50Gi
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+  postgresqlParams:
+    max_connections: "300"
+    shared_buffers: "256MB"
+  tls:
+    enabled: true
+    issuerRef:
+      name: letsencrypt-prod
+      kind: ClusterIssuer
+  pgbouncer:
+    enabled: true
+    replicas: 2
+    poolMode: transaction
+    maxDbConnections: 80
+    maxClientConn: 5000
+  # Aggressive scaling for bursty workloads
+  scaling:
+    minReplicas: 2         # Can scale down to 2 during quiet periods
+    maxReplicas: 12        # High ceiling for traffic spikes
+    metrics:
+      cpu:
+        targetUtilization: 50   # Scale up earlier (50% CPU)
+      connections:
+        targetPerReplica: 30    # Scale up with fewer connections
+    replicationLagThreshold: 10s  # Strict lag threshold for consistency

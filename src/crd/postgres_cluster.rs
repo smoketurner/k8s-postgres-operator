@@ -137,6 +137,11 @@ pub struct PostgresClusterSpec {
     /// This is only used during initial cluster creation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore: Option<RestoreSpec>,
+
+    /// Auto-scaling configuration for the cluster.
+    /// Requires KEDA to be installed in the cluster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scaling: Option<ScalingSpec>,
 }
 
 fn default_replicas() -> i32 {
@@ -237,6 +242,162 @@ pub enum RecoveryTarget {
     /// Restore to a specific timeline.
     #[serde(rename = "timeline")]
     Timeline(i32),
+}
+
+/// Auto-scaling configuration for PostgreSQL clusters.
+///
+/// Requires KEDA (Kubernetes Event-driven Autoscaling) to be installed.
+///
+/// Scaling behavior is determined by `minReplicas` and `maxReplicas`:
+/// - `minReplicas: 0` enables scale-to-zero (development clusters)
+/// - `minReplicas > 0` with `maxReplicas > replicas` enables auto-scaling
+///
+/// The `replicas` field in the spec defines the desired/baseline replica count.
+/// KEDA will scale between `minReplicas` and `maxReplicas` based on the
+/// configured metrics.
+///
+/// # Example
+/// ```yaml
+/// # Development cluster with scale-to-zero
+/// spec:
+///   replicas: 1
+///   scaling:
+///     minReplicas: 0
+///     maxReplicas: 1
+///     idleTimeout: 30m
+///     wakeupTimeout: 5m
+///
+/// # Production cluster with reader auto-scaling
+/// spec:
+///   replicas: 3
+///   scaling:
+///     minReplicas: 3
+///     maxReplicas: 10
+///     metrics:
+///       cpu:
+///         targetUtilization: 70
+/// ```
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScalingSpec {
+    /// Minimum number of replicas.
+    /// Set to 0 to enable scale-to-zero for development clusters.
+    /// For production, this should be >= 1 (typically >= spec.replicas).
+    /// Default: spec.replicas (no scale-down below desired)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_replicas: Option<i32>,
+
+    /// Maximum number of replicas.
+    /// The cluster will scale up to this many replicas under load.
+    /// Default: 10
+    #[serde(default = "default_max_replicas")]
+    pub max_replicas: i32,
+
+    /// Time without connections before scaling to minReplicas.
+    /// Particularly important when minReplicas=0 (scale-to-zero).
+    /// Format: duration string (e.g., "30m", "1h").
+    /// Default: 30m
+    #[serde(default = "default_idle_timeout")]
+    pub idle_timeout: String,
+
+    /// Maximum time to wait for cluster wake-up on connection attempt.
+    /// Only applies when minReplicas=0 (scale-to-zero).
+    /// If exceeded, the connection will fail.
+    /// Format: duration string (e.g., "5m", "10m").
+    /// Default: 5m
+    #[serde(default = "default_wakeup_timeout")]
+    pub wakeup_timeout: String,
+
+    /// Scaling metrics configuration.
+    /// Defines what triggers scaling (CPU, connections, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<ScalingMetrics>,
+
+    /// Replication lag threshold for reader service routing.
+    /// Replicas with lag exceeding this threshold are excluded from the reader service.
+    /// Format: duration string (e.g., "30s", "1m").
+    /// Default: 30s
+    #[serde(default = "default_replication_lag_threshold")]
+    pub replication_lag_threshold: String,
+}
+
+impl ScalingSpec {
+    /// Returns the effective minimum replicas, defaulting to the cluster's desired replicas
+    pub fn effective_min_replicas(&self, desired_replicas: i32) -> i32 {
+        self.min_replicas.unwrap_or(desired_replicas)
+    }
+
+    /// Returns true if scale-to-zero is enabled (minReplicas = 0)
+    pub fn is_scale_to_zero(&self) -> bool {
+        self.min_replicas == Some(0)
+    }
+
+    /// Returns true if auto-scaling is effectively enabled
+    /// (maxReplicas > minReplicas or scale-to-zero is enabled)
+    pub fn is_scaling_enabled(&self, desired_replicas: i32) -> bool {
+        let min = self.effective_min_replicas(desired_replicas);
+        self.max_replicas > min || self.is_scale_to_zero()
+    }
+}
+
+fn default_max_replicas() -> i32 {
+    10
+}
+
+fn default_idle_timeout() -> String {
+    "30m".to_string()
+}
+
+fn default_wakeup_timeout() -> String {
+    "5m".to_string()
+}
+
+fn default_replication_lag_threshold() -> String {
+    "30s".to_string()
+}
+
+/// Scaling metrics for KEDA triggers.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScalingMetrics {
+    /// CPU-based scaling configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<CpuScalingMetric>,
+
+    /// Connection-based scaling configuration using PostgreSQL pg_stat_activity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections: Option<ConnectionScalingMetric>,
+}
+
+/// CPU-based scaling metric.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CpuScalingMetric {
+    /// Target CPU utilization percentage (0-100).
+    /// Scale up when average CPU exceeds this threshold.
+    /// Default: 70
+    #[serde(default = "default_cpu_target")]
+    pub target_utilization: i32,
+}
+
+fn default_cpu_target() -> i32 {
+    70
+}
+
+/// Connection-based scaling metric using PostgreSQL pg_stat_activity.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionScalingMetric {
+    /// Target active connections per replica.
+    /// Scale up when connections per replica exceeds this threshold.
+    /// Uses: SELECT count(*) FROM pg_stat_activity WHERE state = 'active'
+    /// Default: 100
+    #[serde(default = "default_connections_target")]
+    pub target_per_replica: i32,
+}
+
+fn default_connections_target() -> i32 {
+    100
 }
 
 /// Storage configuration for PostgreSQL data volumes
@@ -1020,6 +1181,50 @@ pub struct PostgresClusterStatus {
     /// This is set after a successful restore and prevents re-restore on subsequent reconciles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restored_from: Option<RestoredFromInfo>,
+
+    /// Replication lag information for each replica pod.
+    /// Used for auto-scaling decisions and monitoring.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replication_lag: Vec<ReplicaLagInfo>,
+
+    /// Maximum replication lag across all replicas (in bytes).
+    /// Useful for quick status checks and alerting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_replication_lag_bytes: Option<i64>,
+
+    /// Whether any replica exceeds the configured lag threshold.
+    /// When true, those replicas are excluded from reader service routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicas_lagging: Option<bool>,
+}
+
+/// Replication lag information for a single replica
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplicaLagInfo {
+    /// Name of the replica pod
+    pub pod_name: String,
+
+    /// Replication lag in bytes (from pg_stat_replication.replay_lag or similar)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lag_bytes: Option<i64>,
+
+    /// Replication lag as a duration string (e.g., "1.5s", "30ms")
+    /// Derived from replay_lag interval
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lag_time: Option<String>,
+
+    /// Whether this replica exceeds the configured lag threshold
+    #[serde(default)]
+    pub exceeds_threshold: bool,
+
+    /// Last time the lag was measured (RFC3339 format)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_measured: Option<String>,
+
+    /// Replication state (streaming, catchup, etc.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
 }
 
 /// Information about the backup a cluster was restored from
@@ -1067,6 +1272,9 @@ pub enum ClusterPhase {
     Recovering,
     /// Cluster is in a failed state
     Failed,
+    /// Cluster is hibernating (scaled to zero, waiting for connections)
+    /// Only applicable when scaling.minReplicas = 0
+    Hibernating,
     /// Cluster is being deleted
     Deleting,
 }
@@ -1082,6 +1290,7 @@ impl std::fmt::Display for ClusterPhase {
             ClusterPhase::Degraded => write!(f, "Degraded"),
             ClusterPhase::Recovering => write!(f, "Recovering"),
             ClusterPhase::Failed => write!(f, "Failed"),
+            ClusterPhase::Hibernating => write!(f, "Hibernating"),
             ClusterPhase::Deleting => write!(f, "Deleting"),
         }
     }

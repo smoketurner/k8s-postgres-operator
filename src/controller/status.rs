@@ -287,6 +287,23 @@ impl<'a> StatusManager<'a> {
                 .status
                 .as_ref()
                 .and_then(|s| s.restored_from.clone()),
+            // Replication lag tracking (preserved from existing status)
+            replication_lag: self
+                .cluster
+                .status
+                .as_ref()
+                .map(|s| s.replication_lag.clone())
+                .unwrap_or_default(),
+            max_replication_lag_bytes: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.max_replication_lag_bytes),
+            replicas_lagging: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.replicas_lagging),
         };
 
         self.update(status).await
@@ -350,6 +367,23 @@ impl<'a> StatusManager<'a> {
                 .status
                 .as_ref()
                 .and_then(|s| s.restored_from.clone()),
+            // Replication lag tracking (preserved from existing status)
+            replication_lag: self
+                .cluster
+                .status
+                .as_ref()
+                .map(|s| s.replication_lag.clone())
+                .unwrap_or_default(),
+            max_replication_lag_bytes: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.max_replication_lag_bytes),
+            replicas_lagging: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.replicas_lagging),
         };
 
         self.update(status).await
@@ -424,6 +458,23 @@ impl<'a> StatusManager<'a> {
                 .status
                 .as_ref()
                 .and_then(|s| s.restored_from.clone()),
+            // Replication lag tracking (preserved from existing status)
+            replication_lag: self
+                .cluster
+                .status
+                .as_ref()
+                .map(|s| s.replication_lag.clone())
+                .unwrap_or_default(),
+            max_replication_lag_bytes: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.max_replication_lag_bytes),
+            replicas_lagging: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.replicas_lagging),
         };
 
         self.update(status).await
@@ -479,6 +530,12 @@ impl<'a> StatusManager<'a> {
             all_pods_synced: existing_status.and_then(|s| s.all_pods_synced),
             // Preserve restore status
             restored_from: existing_status.and_then(|s| s.restored_from.clone()),
+            // Replication lag tracking (preserved from existing status)
+            replication_lag: existing_status
+                .map(|s| s.replication_lag.clone())
+                .unwrap_or_default(),
+            max_replication_lag_bytes: existing_status.and_then(|s| s.max_replication_lag_bytes),
+            replicas_lagging: existing_status.and_then(|s| s.replicas_lagging),
         };
 
         self.update(status).await
@@ -540,6 +597,23 @@ impl<'a> StatusManager<'a> {
                 .status
                 .as_ref()
                 .and_then(|s| s.restored_from.clone()),
+            // Replication lag tracking (preserved from existing status)
+            replication_lag: self
+                .cluster
+                .status
+                .as_ref()
+                .map(|s| s.replication_lag.clone())
+                .unwrap_or_default(),
+            max_replication_lag_bytes: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.max_replication_lag_bytes),
+            replicas_lagging: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.replicas_lagging),
         };
 
         self.update(status).await

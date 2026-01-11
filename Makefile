@@ -29,10 +29,10 @@ run: ## Run the operator locally (uses current kubeconfig)
 	RUST_LOG=info $(CARGO) run
 
 fmt: ## Format code
-	$(CARGO) fmt
+	$(CARGO) fmt --all --check
 
 lint: ## Run clippy lints
-	$(CARGO) clippy
+	$(CARGO) clippy --all-targets --all-features -- -D warnings
 
 check: ## Run cargo check
 	$(CARGO) check

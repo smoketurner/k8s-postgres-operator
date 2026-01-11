@@ -128,9 +128,6 @@ spec:
                     # If backup is configured with a destination, schedule is required
                     - rule: "!has(self.destination) || has(self.schedule)"
                       message: "backup.schedule is required when backup.destination is configured"
-                    # If encryption is enabled, keySecret is required
-                    - rule: "!has(self.encryption) || !self.encryption.enabled || has(self.encryption.keySecret)"
-                      message: "backup.encryption.keySecret is required when encryption is enabled"
                   properties:
                     schedule:
                       type: string
@@ -436,6 +433,69 @@ spec:
                       description: NodePort for PostgreSQL port (only for NodePort type)
                       minimum: 30000
                       maximum: 32767
+                scaling:
+                  type: object
+                  description: |
+                    Auto-scaling configuration for the cluster.
+                    Requires KEDA to be installed in the cluster.
+                  properties:
+                    minReplicas:
+                      type: integer
+                      description: |
+                        Minimum number of replicas.
+                        Set to 0 to enable scale-to-zero for development clusters.
+                        Default: spec.replicas (no scale-down below desired)
+                      minimum: 0
+                    maxReplicas:
+                      type: integer
+                      description: Maximum number of replicas
+                      minimum: 1
+                      default: 10
+                    idleTimeout:
+                      type: string
+                      description: |
+                        Time without connections before scaling to minReplicas.
+                        Format: duration string (e.g., "30m", "1h").
+                        Default: 30m
+                      default: "30m"
+                    wakeupTimeout:
+                      type: string
+                      description: |
+                        Maximum time to wait for cluster wake-up on connection attempt.
+                        Only applies when minReplicas=0 (scale-to-zero).
+                        Default: 5m
+                      default: "5m"
+                    replicationLagThreshold:
+                      type: string
+                      description: |
+                        Replication lag threshold for reader service routing.
+                        Replicas exceeding this threshold are excluded from the reader service.
+                        Format: duration string (e.g., "30s", "1m").
+                        Default: 30s
+                      default: "30s"
+                    metrics:
+                      type: object
+                      description: Scaling metrics configuration
+                      properties:
+                        cpu:
+                          type: object
+                          description: CPU-based scaling configuration
+                          properties:
+                            targetUtilization:
+                              type: integer
+                              description: Target CPU utilization percentage (0-100)
+                              minimum: 1
+                              maximum: 100
+                              default: 70
+                        connections:
+                          type: object
+                          description: Connection-based scaling configuration
+                          properties:
+                            targetPerReplica:
+                              type: integer
+                              description: Target active connections per replica
+                              minimum: 1
+                              default: 100
             status:
               type: object
               properties:
@@ -450,6 +510,7 @@ spec:
                     - Degraded
                     - Failed
                     - Recovering
+                    - Hibernating
                     - Deleting
                 readyReplicas:
                   type: integer
@@ -556,3 +617,35 @@ spec:
                 pgbouncerReadyReplicas:
                   type: integer
                   description: Number of ready PgBouncer replicas
+                replicationLag:
+                  type: array
+                  description: Replication lag information for each replica pod
+                  items:
+                    type: object
+                    properties:
+                      podName:
+                        type: string
+                        description: Name of the replica pod
+                      lagBytes:
+                        type: integer
+                        format: int64
+                        description: Replication lag in bytes
+                      lagTime:
+                        type: string
+                        description: Replication lag as duration string
+                      exceedsThreshold:
+                        type: boolean
+                        description: Whether this replica exceeds the configured lag threshold
+                      lastMeasured:
+                        type: string
+                        description: Last time the lag was measured (RFC3339)
+                      state:
+                        type: string
+                        description: Replication state (streaming, catchup, etc.)
+                maxReplicationLagBytes:
+                  type: integer
+                  format: int64
+                  description: Maximum replication lag across all replicas (in bytes)
+                replicasLagging:
+                  type: boolean
+                  description: Whether any replica exceeds the configured lag threshold

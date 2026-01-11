@@ -54,6 +54,15 @@ impl Context {
         }
     }
 
+    /// Record cluster replica metrics
+    pub fn record_cluster_replicas(&self, namespace: &str, name: &str, desired: i32, ready: i32) {
+        if let Some(ref state) = self.health_state {
+            state
+                .metrics
+                .set_cluster_replicas(namespace, name, desired as i64, ready as i64);
+        }
+    }
+
     /// Create an event recorder
     fn recorder(&self) -> Recorder {
         Recorder::new(self.client.clone(), self.reporter.clone())
