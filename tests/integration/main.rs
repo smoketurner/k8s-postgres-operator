@@ -28,9 +28,12 @@ mod crd;
 mod fixtures;
 mod namespace;
 mod operator;
+mod port_forward;
+mod postgres;
 mod wait;
 
-// Functional test module (fast, uses polling)
+// Test modules
+mod connectivity_tests;
 mod functional_tests;
 
 // Re-export common test utilities
@@ -40,4 +43,6 @@ pub use crd::*;
 pub use fixtures::*;
 pub use namespace::*;
 pub use operator::*;
+pub use port_forward::*;
+pub use postgres::*;
 pub use wait::*;

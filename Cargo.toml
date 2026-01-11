@@ -11,7 +11,15 @@ license = "MIT"
 # Note: Using v1_34 feature but targeting K8s 1.35 clusters.
 # New 1.35 fields (like resizePolicy) are added via JSON patching.
 #
-# TODO(k8s-openapi-upgrade): When k8s-openapi releases a version with v1_35 support:
+# TODO(k8s-openapi-upgrade): Upgrade to k8s-openapi 0.27.0 with v1_35 when ecosystem is ready.
+#
+# Blockers as of 2026-01-11:
+# 1. kube-rs: Main branch has k8s-openapi 0.27.0 support, but no release yet (still 2.0.1)
+# 2. kube-leader-election: Uses k8s_openapi::chrono which was replaced with jiff in 0.27.0
+#    - No PR or issue exists to update kube-leader-election for jiff
+#    - See: https://github.com/hendrikmaus/kube-leader-election/issues
+#
+# When all blockers are resolved:
 # 1. Update to: k8s-openapi = { version = "=0.27.x", features = ["v1_35"] }
 # 2. In src/resources/patroni.rs:
 #    - Remove add_resize_policy_to_statefulset() function
@@ -19,8 +27,14 @@ license = "MIT"
 # 3. In src/resources/pgbouncer.rs:
 #    - Remove add_resize_policy_to_deployment() function
 #    - Use native ContainerResizePolicy type directly in generate_pgbouncer_deployment()
-# 4. Run `cargo check` to verify everything compiles
-# 5. Track progress at: https://github.com/Arnavion/k8s-openapi/issues
+# 4. In src/controller/reconciler.rs:
+#    - Simplify get_pod_resize_status() to use native pod.status.resize field
+#    - Use native container.allocatedResources field
+# 5. Run `cargo check` to verify everything compiles
+# 6. Track progress at:
+#    - kube-rs: https://github.com/kube-rs/kube/releases
+#    - k8s-openapi: https://github.com/Arnavion/k8s-openapi/releases
+#    - kube-leader-election: https://github.com/hendrikmaus/kube-leader-election/releases
 kube = { version = "=2.0.1", default-features = false, features = ["runtime", "derive", "client", "rustls-tls", "ws"] }
 k8s-openapi = { version = "=0.26.1", default-features = false, features = ["v1_34"] }
 
@@ -67,6 +81,7 @@ hostname = { version = "=0.4.2", default-features = false }
 
 [dev-dependencies]
 tokio-test = { version = "=0.4.5", default-features = false }
+tokio-postgres = { version = "=0.7.13", default-features = false, features = ["runtime"] }
 uuid = { version = "=1.19.0", default-features = false, features = ["v4"] }
 serde_yaml = { version = "=0.9.34", default-features = false }
 proptest = { version = "=1.9.0", default-features = false, features = ["std"] }

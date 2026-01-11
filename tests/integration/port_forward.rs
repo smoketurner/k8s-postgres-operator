@@ -1,0 +1,381 @@
+//! Port forwarding utilities for integration tests
+//!
+//! Provides `PortForward` which uses kube-rs native port-forwarding.
+//! When a `PortForward` goes out of scope, it will automatically stop
+//! the forwarding.
+
+use k8s_openapi::api::core::v1::Pod;
+use kube::api::ListParams;
+use kube::{Api, Client};
+use std::net::TcpListener;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+use thiserror::Error;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+
+#[derive(Error, Debug)]
+pub enum PortForwardError {
+    #[error("Kubernetes API error: {0}")]
+    Kube(#[from] kube::Error),
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("Port forward failed to become ready within timeout")]
+    Timeout,
+
+    #[error("No pods found for service: {0}")]
+    NoPodsFound(String),
+
+    #[error("Pod has no IP address")]
+    NoPodIp,
+
+    #[error("Port forward task failed")]
+    TaskFailed,
+
+    #[error("Port forward join error: {0}")]
+    JoinError(String),
+}
+
+/// Target for port forwarding
+pub enum PortForwardTarget {
+    /// Forward to a Kubernetes Service (resolves to a pod)
+    Service { name: String, port: u16 },
+    /// Forward to a specific Pod
+    Pod { name: String, port: u16 },
+}
+
+impl PortForwardTarget {
+    /// Create a target for a service
+    pub fn service(name: impl Into<String>, port: u16) -> Self {
+        Self::Service {
+            name: name.into(),
+            port,
+        }
+    }
+
+    /// Create a target for a pod
+    pub fn pod(name: impl Into<String>, port: u16) -> Self {
+        Self::Pod {
+            name: name.into(),
+            port,
+        }
+    }
+
+    fn remote_port(&self) -> u16 {
+        match self {
+            Self::Service { port, .. } | Self::Pod { port, .. } => *port,
+        }
+    }
+}
+
+/// RAII wrapper for port forwarding using kube-rs
+///
+/// When this struct is dropped, it will stop the port-forward.
+pub struct PortForward {
+    local_port: u16,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    _handle: JoinHandle<()>,
+    cleanup_initiated: AtomicBool,
+}
+
+impl PortForward {
+    /// Start a port-forward to the specified target
+    ///
+    /// For Service targets, this resolves to a pod backing the service.
+    /// If `local_port` is None, an available port will be automatically selected.
+    pub async fn start(
+        client: Client,
+        namespace: &str,
+        target: PortForwardTarget,
+        local_port: Option<u16>,
+    ) -> Result<Self, PortForwardError> {
+        let local_port = match local_port {
+            Some(p) => p,
+            None => get_available_port()?,
+        };
+
+        let remote_port = target.remote_port();
+
+        // Resolve target to a pod name
+        let pod_name = match &target {
+            PortForwardTarget::Pod { name, .. } => name.clone(),
+            PortForwardTarget::Service { name, .. } => {
+                resolve_service_to_pod(&client, namespace, name).await?
+            }
+        };
+
+        tracing::debug!(
+            namespace = namespace,
+            pod = %pod_name,
+            local_port = local_port,
+            remote_port = remote_port,
+            "Starting port-forward"
+        );
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        // Clone values for the spawned task
+        let ns = namespace.to_string();
+        let pod = pod_name.clone();
+
+        // Start the port forwarding task
+        let handle = tokio::spawn(async move {
+            if let Err(e) =
+                run_port_forward(client, &ns, &pod, local_port, remote_port, shutdown_rx).await
+            {
+                tracing::warn!(error = %e, "Port forward error");
+            }
+        });
+
+        // Wait a moment for the listener to start
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        tracing::info!(
+            local_port = local_port,
+            pod = %pod_name,
+            "Port-forward established"
+        );
+
+        Ok(Self {
+            local_port,
+            shutdown_tx: Some(shutdown_tx),
+            _handle: handle,
+            cleanup_initiated: AtomicBool::new(false),
+        })
+    }
+
+    /// Get the local port that is forwarding to the remote target
+    pub fn local_port(&self) -> u16 {
+        self.local_port
+    }
+
+    /// Stop the port-forward
+    pub fn stop(&mut self) {
+        if self.cleanup_initiated.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        tracing::debug!(local_port = self.local_port, "Stopping port-forward");
+
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+impl Drop for PortForward {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Resolve a service name to a pod name by finding pods with matching labels
+async fn resolve_service_to_pod(
+    client: &Client,
+    namespace: &str,
+    service_name: &str,
+) -> Result<String, PortForwardError> {
+    // Common pattern: service selects pods with app={service-name} or similar
+    // For this operator, services select pods in the StatefulSet with the same name pattern
+
+    // First, try to find pods with the cluster label that match the service
+    // The service name pattern is: {cluster}-primary, {cluster}-repl, {cluster}-pooler
+    let cluster_name = service_name
+        .strip_suffix("-primary")
+        .or_else(|| service_name.strip_suffix("-repl"))
+        .or_else(|| service_name.strip_suffix("-pooler"))
+        .unwrap_or(service_name);
+
+    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
+
+    // For primary service, look for the pod with spilo-role=master label
+    let label_selector = if service_name.ends_with("-primary") {
+        format!(
+            "postgres-operator.smoketurner.com/cluster={},spilo-role=master",
+            cluster_name
+        )
+    } else if service_name.ends_with("-repl") {
+        format!(
+            "postgres-operator.smoketurner.com/cluster={},spilo-role=replica",
+            cluster_name
+        )
+    } else if service_name.ends_with("-pooler") {
+        format!(
+            "postgres-operator.smoketurner.com/cluster={},app.kubernetes.io/component=pgbouncer",
+            cluster_name
+        )
+    } else {
+        format!(
+            "postgres-operator.smoketurner.com/cluster={}",
+            cluster_name
+        )
+    };
+
+    tracing::debug!(label_selector = %label_selector, "Resolving service to pod");
+
+    let pod_list = pods
+        .list(&ListParams::default().labels(&label_selector))
+        .await?;
+
+    let pod = pod_list
+        .items
+        .into_iter()
+        .find(|p| {
+            // Find a running pod
+            p.status
+                .as_ref()
+                .and_then(|s| s.phase.as_ref())
+                .is_some_and(|phase| phase == "Running")
+        })
+        .ok_or_else(|| PortForwardError::NoPodsFound(service_name.to_string()))?;
+
+    pod.metadata
+        .name
+        .ok_or_else(|| PortForwardError::NoPodsFound(service_name.to_string()))
+}
+
+/// Run the port forwarding loop
+async fn run_port_forward(
+    client: Client,
+    namespace: &str,
+    pod_name: &str,
+    local_port: u16,
+    remote_port: u16,
+    mut shutdown_rx: oneshot::Receiver<()>,
+) -> Result<(), PortForwardError> {
+    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
+
+    // Bind to the local port
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", local_port)).await?;
+
+    tracing::debug!(
+        local_port = local_port,
+        "Port forward listener started"
+    );
+
+    loop {
+        tokio::select! {
+            _ = &mut shutdown_rx => {
+                tracing::debug!("Port forward shutdown requested");
+                break;
+            }
+            result = listener.accept() => {
+                match result {
+                    Ok((stream, addr)) => {
+                        tracing::trace!(client_addr = %addr, "New port forward connection");
+
+                        // Clone for the connection handler
+                        let pods = pods.clone();
+                        let pod_name = pod_name.to_string();
+
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_connection(
+                                pods,
+                                &pod_name,
+                                remote_port,
+                                stream
+                            ).await {
+                                tracing::warn!(error = %e, "Port forward connection error");
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Port forward accept error");
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle a single port-forward connection
+async fn handle_connection(
+    pods: Api<Pod>,
+    pod_name: &str,
+    remote_port: u16,
+    mut local_stream: TcpStream,
+) -> Result<(), PortForwardError> {
+    // Create the port forward to the pod
+    let mut pf = pods.portforward(pod_name, &[remote_port]).await?;
+
+    // Get the stream for the port
+    let upstream = pf
+        .take_stream(remote_port)
+        .ok_or(PortForwardError::TaskFailed)?;
+
+    // Copy data bidirectionally
+    let (mut local_read, mut local_write) = local_stream.split();
+    let (mut upstream_read, mut upstream_write) = tokio::io::split(upstream);
+
+    let client_to_server = async {
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = local_read.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            upstream_write.write_all(&buf[..n]).await?;
+        }
+        upstream_write.shutdown().await?;
+        Ok::<_, std::io::Error>(())
+    };
+
+    let server_to_client = async {
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = upstream_read.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            local_write.write_all(&buf[..n]).await?;
+        }
+        local_write.shutdown().await?;
+        Ok::<_, std::io::Error>(())
+    };
+
+    // Run both directions concurrently
+    let _ = tokio::try_join!(client_to_server, server_to_client);
+
+    // Join the port forward to clean up
+    pf.join()
+        .await
+        .map_err(|e| PortForwardError::JoinError(e.to_string()))?;
+
+    Ok(())
+}
+
+/// Find an available local port by binding to port 0
+pub fn get_available_port() -> Result<u16, PortForwardError> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    Ok(port)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_available_port() {
+        let port = get_available_port().expect("should find port");
+        assert!(port > 0);
+    }
+
+    #[test]
+    fn test_port_forward_target_service() {
+        let target = PortForwardTarget::service("my-service", 5432);
+        assert_eq!(target.remote_port(), 5432);
+    }
+
+    #[test]
+    fn test_port_forward_target_pod() {
+        let target = PortForwardTarget::pod("my-pod-0", 5432);
+        assert_eq!(target.remote_port(), 5432);
+    }
+}

@@ -144,6 +144,27 @@ pub fn primary_pod_changed_from(old_primary: &str) -> impl Condition<PostgresClu
     }
 }
 
+/// Condition that checks if cluster is fully operational
+///
+/// This means:
+/// - Phase is Running
+/// - Ready replicas >= expected count
+/// - Primary pod is set
+///
+/// Use this condition when you need to verify PostgreSQL is actually ready
+/// to accept connections, not just that Kubernetes resources are created.
+pub fn cluster_operational(expected_replicas: i32) -> impl Condition<PostgresCluster> {
+    move |obj: Option<&PostgresCluster>| {
+        obj.and_then(|cluster| cluster.status.as_ref())
+            .map(|status| {
+                status.phase == ClusterPhase::Running
+                    && status.ready_replicas >= expected_replicas
+                    && status.primary_pod.is_some()
+            })
+            .unwrap_or(false)
+    }
+}
+
 /// Wait for a PostgresCluster to reach a condition with timeout
 pub async fn wait_for_cluster<C>(
     api: &Api<PostgresCluster>,
