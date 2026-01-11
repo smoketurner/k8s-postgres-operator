@@ -546,6 +546,7 @@ mod tests {
                 metrics: None,
                 service: None,
                 restore: None,
+                network_policy: None,
             },
             status: None,
         }

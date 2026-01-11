@@ -39,6 +39,7 @@ fn create_test_cluster_with_status(
             service: None,
             restore: None,
             scaling: None,
+            network_policy: None,
         },
         status,
     }

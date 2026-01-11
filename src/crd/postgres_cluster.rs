@@ -142,6 +142,12 @@ pub struct PostgresClusterSpec {
     /// Requires KEDA to be installed in the cluster.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scaling: Option<ScalingSpec>,
+
+    /// Network policy configuration for the cluster.
+    /// Controls which pods/namespaces can access PostgreSQL.
+    /// NetworkPolicy is always generated - this controls additional access rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_policy: Option<NetworkPolicySpec>,
 }
 
 fn default_replicas() -> i32 {
@@ -1084,6 +1090,88 @@ impl std::fmt::Display for ExternalTrafficPolicy {
 
 fn default_service_type() -> ServiceType {
     ServiceType::ClusterIP
+}
+
+/// Network policy configuration for controlling access to PostgreSQL pods.
+///
+/// By default, NetworkPolicy allows:
+/// - Same namespace to access PostgreSQL (5432)
+/// - Cluster pods to communicate for replication
+/// - Operator namespace (always allowed, cannot be disabled)
+///
+/// Use this to expand access beyond the default rules.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkPolicySpec {
+    /// Allow connections from RFC1918 private networks (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16).
+    ///
+    /// **WARNING**: This is intended for development/testing environments only.
+    /// Do NOT enable this in production namespaces.
+    ///
+    /// Use cases:
+    /// - Integration tests running outside the cluster
+    /// - Developer machines connecting for debugging
+    /// - CI/CD pipelines that need database access
+    #[serde(default)]
+    pub allow_external_access: bool,
+
+    /// Additional namespace/pod selectors that can access the PostgreSQL port.
+    /// Use this for cross-namespace access in production environments.
+    ///
+    /// Example:
+    /// ```yaml
+    /// allowFrom:
+    ///   - namespaceSelector:
+    ///       matchLabels:
+    ///         postgres-access: my-cluster
+    /// ```
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_from: Vec<NetworkPolicyPeer>,
+}
+
+/// Network policy peer selector for specifying which pods/namespaces can access the database.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkPolicyPeer {
+    /// Namespace selector - matches namespaces by label
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace_selector: Option<LabelSelectorConfig>,
+
+    /// Pod selector - matches pods by label (within selected namespaces)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod_selector: Option<LabelSelectorConfig>,
+}
+
+/// Label selector configuration for network policy peers.
+/// This mirrors Kubernetes LabelSelector for use in CRD schema.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelSelectorConfig {
+    /// Map of {key,value} pairs to match exactly
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_labels: Option<std::collections::BTreeMap<String, String>>,
+
+    /// List of label selector requirements. The requirements are ANDed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub match_expressions: Vec<LabelSelectorRequirement>,
+}
+
+/// A label selector requirement is a selector that contains values, a key, and an operator.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelSelectorRequirement {
+    /// The label key that the selector applies to.
+    pub key: String,
+
+    /// Represents a key's relationship to a set of values.
+    /// Valid operators are In, NotIn, Exists and DoesNotExist.
+    pub operator: String,
+
+    /// Values is an array of string values. If the operator is In or NotIn,
+    /// the values array must be non-empty. If the operator is Exists or DoesNotExist,
+    /// the values array must be empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<String>,
 }
 
 /// Status of the PostgresCluster

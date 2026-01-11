@@ -33,7 +33,7 @@ use crate::controller::state_machine::{
 use crate::controller::status::{StatusManager, spec_changed};
 use crate::crd::{ClusterPhase, PostgresCluster};
 use crate::resources::{
-    backup, certificate, patroni, pdb, pgbouncer, scaled_object, secret, service,
+    backup, certificate, network_policy, patroni, pdb, pgbouncer, scaled_object, secret, service,
 };
 
 /// Finalizer name for cleanup
@@ -770,6 +770,10 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
     // Ensure PodDisruptionBudget exists
     let pdb = pdb::generate_pdb(cluster);
     apply_resource(ctx, ns, &pdb).await?;
+
+    // Ensure NetworkPolicy exists (always generated - primary security boundary)
+    let np = network_policy::generate_network_policy(cluster);
+    apply_resource(ctx, ns, &np).await?;
 
     // Ensure Patroni StatefulSet exists (single StatefulSet for all members)
     // Apply resize policy for Kubernetes 1.35+ in-place resource resizing

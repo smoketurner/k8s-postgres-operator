@@ -39,6 +39,7 @@ fn create_test_cluster(
             service: None,
             restore: None,
             scaling: None,
+            network_policy: None,
         },
         status: None,
     }

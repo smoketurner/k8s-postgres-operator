@@ -30,6 +30,7 @@ pub struct PostgresClusterBuilder {
     metrics: Option<MetricsSpec>,
     service: Option<ServiceSpec>,
     scaling: Option<ScalingSpec>,
+    network_policy: Option<postgres_operator::crd::NetworkPolicySpec>,
 }
 
 impl PostgresClusterBuilder {
@@ -57,6 +58,7 @@ impl PostgresClusterBuilder {
             metrics: None,
             service: None,
             scaling: None,
+            network_policy: None,
         }
     }
 
@@ -424,6 +426,7 @@ impl PostgresClusterBuilder {
                 service: self.service,
                 restore: None,
                 scaling: self.scaling,
+                network_policy: self.network_policy,
             },
             status: None,
         }

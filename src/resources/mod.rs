@@ -1,6 +1,7 @@
 pub mod backup;
 pub mod certificate;
 pub mod common;
+pub mod network_policy;
 pub mod patroni;
 pub mod pdb;
 pub mod pgbouncer;

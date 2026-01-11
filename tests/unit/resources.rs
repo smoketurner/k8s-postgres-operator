@@ -43,6 +43,7 @@ fn create_test_cluster(name: &str, namespace: &str, replicas: i32) -> PostgresCl
             service: None,
             restore: None,
             scaling: None,
+            network_policy: None,
         },
         status: None,
     }

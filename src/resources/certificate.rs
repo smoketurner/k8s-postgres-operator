@@ -226,6 +226,7 @@ mod tests {
                 metrics: None,
                 service: None,
                 scaling: None,
+                network_policy: None,
             },
             status: None,
         }

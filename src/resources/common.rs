@@ -178,6 +178,7 @@ mod tests {
                 service: None,
                 restore: None,
                 scaling: None,
+                network_policy: None,
             },
             status: None,
         };
@@ -243,6 +244,7 @@ mod tests {
                 service: None,
                 restore: None,
                 scaling: None,
+                network_policy: None,
             },
             status: None,
         };

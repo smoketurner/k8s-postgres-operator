@@ -155,15 +155,16 @@ bootstrap:
     - data-checksums
 
   pg_hba:
+    # Local socket access (for maintenance, Patroni)
     - local all all trust
+    # Loopback (for local health checks)
     - host all all 127.0.0.1/32 scram-sha-256
     - host all all ::1/128 scram-sha-256
-    - host all all 10.0.0.0/8 scram-sha-256
-    - host all all 172.16.0.0/12 scram-sha-256
-    - host all all 192.168.0.0/16 scram-sha-256
-    - host replication replication 10.0.0.0/8 scram-sha-256
-    - host replication replication 172.16.0.0/12 scram-sha-256
-    - host replication replication 192.168.0.0/16 scram-sha-256
+    # Cluster pods - replication between nodes (samenet = same network as server)
+    - host replication standby samenet scram-sha-256
+    # Application access - restricted to pods that can reach the service
+    # NetworkPolicy is the primary security boundary; this provides defense in depth
+    - host all all samenet scram-sha-256
 
 postgresql:
   listen: 0.0.0.0:5432

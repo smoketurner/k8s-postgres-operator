@@ -309,6 +309,7 @@ fn valid_spec() -> impl Strategy<Value = PostgresClusterSpec> {
                         service: None,
                         restore: None,
                         scaling,
+                        network_policy: None,
                     }
                 },
             )
@@ -363,6 +364,7 @@ fn valid_spec_with_scaling() -> impl Strategy<Value = PostgresClusterSpec> {
                             replication_lag_threshold: "30s".to_string(),
                             ..Default::default()
                         }),
+                        network_policy: None,
                     }
                 },
             )
@@ -503,6 +505,7 @@ proptest! {
             service: None,
             restore: None,
                     scaling: None,
+                    network_policy: None,
         };
         let cluster = cluster_from_spec(spec);
         let result = validate_spec(&cluster);
@@ -529,6 +532,7 @@ proptest! {
             service: None,
             restore: None,
                     scaling: None,
+                    network_policy: None,
         };
         let cluster = cluster_from_spec(spec);
         let result = validate_spec(&cluster);
@@ -606,6 +610,7 @@ proptest! {
             service: None,
             restore: None,
                     scaling: None,
+                    network_policy: None,
         };
         let cluster = cluster_from_spec(spec);
         let pdb_resource = pdb::generate_pdb(&cluster);
@@ -644,6 +649,7 @@ proptest! {
             service: None,
             restore: None,
                     scaling: None,
+                    network_policy: None,
         };
         let cluster = cluster_from_spec(spec);
         let sts = patroni::generate_patroni_statefulset(&cluster, false);
@@ -692,6 +698,7 @@ proptest! {
             service: None,
             restore: None,
             scaling: None,
+            network_policy: None,
         };
         let cluster = cluster_from_spec(spec);
         let obj = scaled_object::generate_scaled_object(&cluster);
@@ -725,6 +732,7 @@ proptest! {
                 replication_lag_threshold: "30s".to_string(),
                 ..Default::default()
             }),
+            network_policy: None,
         };
         let cluster = cluster_from_spec(spec);
         let obj = scaled_object::generate_scaled_object(&cluster);
@@ -766,6 +774,7 @@ proptest! {
                 replication_lag_threshold: "30s".to_string(),
                 ..Default::default()
             }),
+            network_policy: None,
         };
         let cluster = cluster_from_spec(spec);
         let obj = scaled_object::generate_trigger_auth(&cluster);
@@ -807,6 +816,7 @@ proptest! {
                 replication_lag_threshold: "30s".to_string(),
                 ..Default::default()
             }),
+            network_policy: None,
         };
         let cluster = cluster_from_spec(spec);
         let obj = scaled_object::generate_trigger_auth(&cluster);
@@ -844,6 +854,7 @@ proptest! {
                 replication_lag_threshold: "30s".to_string(),
                 ..Default::default()
             }),
+            network_policy: None,
         };
         let cluster = cluster_from_spec(spec);
         let is_managing = scaled_object::is_keda_managing_replicas(&cluster);
@@ -928,6 +939,7 @@ mod edge_case_tests {
             service: None,
             restore: None,
             scaling: None,
+            network_policy: None,
         };
         let cluster = cluster_from_spec(spec);
 
@@ -962,6 +974,7 @@ mod edge_case_tests {
             service: None,
             restore: None,
             scaling: None,
+            network_policy: None,
         });
 
         cluster.status = Some(PostgresClusterStatus {
