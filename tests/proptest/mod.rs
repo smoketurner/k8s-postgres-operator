@@ -296,7 +296,7 @@ proptest! {
     fn prop_valid_spec_generates_statefulset(spec in valid_spec()) {
         let cluster = cluster_from_spec(spec);
         // This should not panic
-        let sts = patroni::generate_patroni_statefulset(&cluster);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false);
         prop_assert!(sts.metadata.name.is_some());
         prop_assert!(sts.spec.is_some());
     }
@@ -507,7 +507,7 @@ proptest! {
                     scaling: None,
         };
         let cluster = cluster_from_spec(spec);
-        let sts = patroni::generate_patroni_statefulset(&cluster);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false);
 
         prop_assert_eq!(
             sts.spec.as_ref().unwrap().replicas,
@@ -548,7 +548,7 @@ mod edge_case_tests {
         let cluster = cluster_from_spec(spec);
 
         // All resource generation should succeed
-        let sts = patroni::generate_patroni_statefulset(&cluster);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false);
         let cm = patroni::generate_patroni_config(&cluster);
         let primary = service::generate_primary_service(&cluster);
         let pdb_resource = pdb::generate_pdb(&cluster);
@@ -588,7 +588,7 @@ mod edge_case_tests {
         });
 
         // Resource generation should still work with status present
-        let sts = patroni::generate_patroni_statefulset(&cluster);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false);
         assert!(sts.metadata.name.is_some());
     }
 }

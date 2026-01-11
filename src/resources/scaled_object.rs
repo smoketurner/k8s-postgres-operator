@@ -168,6 +168,28 @@ pub fn should_enable_reader_scaling(cluster: &PostgresCluster) -> bool {
     scaling.max_replicas > cluster.spec.replicas
 }
 
+/// Check if KEDA is managing replicas for this cluster
+///
+/// Returns true if either:
+/// - Scale-to-zero is enabled (minReplicas = 0)
+/// - Reader auto-scaling is enabled (maxReplicas > replicas)
+///
+/// When KEDA manages replicas, the operator should not set the StatefulSet
+/// replica count to avoid conflicts with KEDA's scaling decisions.
+pub fn is_keda_managing_replicas(cluster: &PostgresCluster) -> bool {
+    let Some(scaling) = &cluster.spec.scaling else {
+        return false;
+    };
+
+    // Scale-to-zero means KEDA manages replicas
+    if scaling.is_scale_to_zero() {
+        return true;
+    }
+
+    // Reader auto-scaling means KEDA manages replicas
+    scaling.max_replicas > cluster.spec.replicas
+}
+
 /// Generate a KEDA ScaledObject for reader auto-scaling
 ///
 /// Creates a ScaledObject that targets the PostgreSQL StatefulSet and
@@ -196,7 +218,10 @@ pub fn generate_scaled_object(cluster: &PostgresCluster) -> Option<DynamicObject
             triggers.push(ScaleTrigger {
                 type_: "cpu".to_string(),
                 metric_type: Some("Utilization".to_string()),
-                metadata: BTreeMap::from([("value".to_string(), cpu.target_utilization.to_string())]),
+                metadata: BTreeMap::from([(
+                    "value".to_string(),
+                    cpu.target_utilization.to_string(),
+                )]),
                 authentication_ref: None,
             });
         }

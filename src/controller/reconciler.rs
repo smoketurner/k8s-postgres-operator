@@ -684,7 +684,10 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
         .as_ref()
         .and_then(|r| r.restart_on_resize)
         .unwrap_or(false);
-    let sts = patroni::generate_patroni_statefulset(cluster);
+    // Check if KEDA is managing replicas - if so, don't set replica count
+    // to avoid conflicts between the operator and KEDA's scaling decisions
+    let keda_managed = scaled_object::is_keda_managing_replicas(cluster);
+    let sts = patroni::generate_patroni_statefulset(cluster, keda_managed);
     let sts = patroni::add_resize_policy_to_statefulset(sts, restart_on_resize);
     apply_resource(ctx, ns, &sts).await?;
 

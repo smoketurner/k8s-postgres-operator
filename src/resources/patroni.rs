@@ -357,11 +357,20 @@ fn generate_anti_affinity(cluster_name: &str) -> Affinity {
 ///
 /// Unlike the streaming replication mode which has separate primary/replica StatefulSets,
 /// Patroni manages a single StatefulSet where any pod can become the primary.
-pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
+///
+/// When `keda_managed` is true, the replicas field is not set, allowing KEDA to manage
+/// the replica count via ScaledObject/HPA. This prevents conflicts between the operator
+/// and KEDA's autoscaling decisions.
+pub fn generate_patroni_statefulset(cluster: &PostgresCluster, keda_managed: bool) -> StatefulSet {
     let name = cluster.name_any();
     let ns = cluster.namespace();
     let labels = patroni_labels(&name);
-    let replicas = cluster.spec.replicas;
+    // When KEDA manages replicas, don't set the field to avoid conflicts
+    let replicas = if keda_managed {
+        None
+    } else {
+        Some(cluster.spec.replicas)
+    };
 
     // Use Spilo image (Zalando's PostgreSQL + Patroni) based on requested version
     let image = cluster.spec.version.spilo_image();
@@ -721,7 +730,9 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
     // For single replica: 1 (minimum allowed by Kubernetes 1.35+)
     // For 2 replicas: 1 (one at a time)
     // For 3+ replicas: allow up to half to update in parallel while maintaining quorum
-    let max_unavailable = match replicas {
+    // When KEDA manages replicas (None), use the spec value for calculation
+    let effective_replicas = replicas.unwrap_or(cluster.spec.replicas);
+    let max_unavailable = match effective_replicas {
         1 => 1,                             // Single replica - minimum allowed
         2 => 1,                             // Two replicas - one at a time
         n => std::cmp::max(1, (n - 1) / 2), // Keep quorum: at most (n-1)/2
@@ -748,7 +759,7 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster) -> StatefulSet {
         },
         spec: Some(StatefulSetSpec {
             service_name: Some(headless_service_name),
-            replicas: Some(replicas),
+            replicas,
             selector: LabelSelector {
                 match_labels: Some(labels.clone()),
                 ..Default::default()

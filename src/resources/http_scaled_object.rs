@@ -294,14 +294,14 @@ fn parse_duration_to_seconds(duration: &str) -> Option<i64> {
     }
 
     // Try to parse as a number with a suffix
-    let (num_str, multiplier) = if duration.ends_with('s') {
-        (&duration[..duration.len() - 1], 1)
-    } else if duration.ends_with('m') {
-        (&duration[..duration.len() - 1], 60)
-    } else if duration.ends_with('h') {
-        (&duration[..duration.len() - 1], 3600)
-    } else if duration.ends_with('d') {
-        (&duration[..duration.len() - 1], 86400)
+    let (num_str, multiplier) = if let Some(stripped) = duration.strip_suffix('s') {
+        (stripped, 1)
+    } else if let Some(stripped) = duration.strip_suffix('m') {
+        (stripped, 60)
+    } else if let Some(stripped) = duration.strip_suffix('h') {
+        (stripped, 3600)
+    } else if let Some(stripped) = duration.strip_suffix('d') {
+        (stripped, 86400)
     } else {
         // Assume seconds if no suffix
         (duration, 1)
