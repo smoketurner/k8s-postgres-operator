@@ -31,10 +31,6 @@ pub enum ClusterEvent {
     RecoveryCompleted,
     /// Cluster has fully recovered from degraded state
     FullyRecovered,
-    /// Cluster has scaled to zero (hibernating)
-    ScaledToZero,
-    /// Cluster is waking up from hibernation
-    WakeUpRequested,
 }
 
 impl fmt::Display for ClusterEvent {
@@ -50,8 +46,6 @@ impl fmt::Display for ClusterEvent {
             ClusterEvent::RecoveryInitiated => write!(f, "RecoveryInitiated"),
             ClusterEvent::RecoveryCompleted => write!(f, "RecoveryCompleted"),
             ClusterEvent::FullyRecovered => write!(f, "FullyRecovered"),
-            ClusterEvent::ScaledToZero => write!(f, "ScaledToZero"),
-            ClusterEvent::WakeUpRequested => write!(f, "WakeUpRequested"),
         }
     }
 }
@@ -389,37 +383,6 @@ impl ClusterStateMachine {
                     ClusterEvent::DeletionRequested,
                     "Cluster deletion requested during recovery",
                 ),
-                // === Hibernating state transitions (scale-to-zero) ===
-                Transition::new(
-                    ClusterPhase::Running,
-                    ClusterPhase::Hibernating,
-                    ClusterEvent::ScaledToZero,
-                    "Cluster scaled to zero, entering hibernation",
-                ),
-                Transition::new(
-                    ClusterPhase::Hibernating,
-                    ClusterPhase::Running,
-                    ClusterEvent::WakeUpRequested,
-                    "Wake-up requested, starting cluster",
-                ),
-                Transition::new(
-                    ClusterPhase::Hibernating,
-                    ClusterPhase::Running,
-                    ClusterEvent::AllReplicasReady,
-                    "Cluster woken up and ready",
-                ),
-                Transition::new(
-                    ClusterPhase::Hibernating,
-                    ClusterPhase::Updating,
-                    ClusterEvent::SpecChanged,
-                    "Spec changed while hibernating",
-                ),
-                Transition::new(
-                    ClusterPhase::Hibernating,
-                    ClusterPhase::Deleting,
-                    ClusterEvent::DeletionRequested,
-                    "Cluster deletion requested while hibernating",
-                ),
                 // === Deleting state transitions (terminal) ===
                 // Deleting is a terminal state - no transitions out except completion
             ],
@@ -672,7 +635,6 @@ mod tests {
             ClusterPhase::Degraded,
             ClusterPhase::Failed,
             ClusterPhase::Recovering,
-            ClusterPhase::Hibernating,
         ];
 
         for state in states {

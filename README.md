@@ -13,7 +13,7 @@ A Kubernetes operator for managing PostgreSQL clusters with high availability us
 - **Cloud Backups**: Continuous WAL archiving and scheduled base backups to S3, GCS, or Azure with point-in-time recovery (PITR)
 - **Metrics**: Prometheus-compatible metrics endpoint
 - **Zero-Downtime Updates**: Rolling updates with PodDisruptionBudgets
-- **Auto-Scaling**: KEDA-based auto-scaling with scale-to-zero support for dev environments
+- **Auto-Scaling**: KEDA-based auto-scaling for read replicas
 
 ## Prerequisites
 
@@ -21,7 +21,6 @@ A Kubernetes operator for managing PostgreSQL clusters with high availability us
 - kubectl configured to access your cluster
 - [cert-manager](https://cert-manager.io/) v1.0+ (required for TLS certificate management)
 - [KEDA](https://keda.sh/) v2.10+ (optional, for auto-scaling features)
-- [KEDA HTTP Add-on](https://github.com/kedacore/http-add-on) (optional, for scale-to-zero)
 - Rust 1.92+ (for building from source)
 
 ## Quick Start
@@ -274,18 +273,6 @@ helm install keda kedacore/keda \
   --create-namespace
 ```
 
-### Installing KEDA HTTP Add-on (for Scale-to-Zero)
-
-For scale-to-zero functionality in development environments, install the KEDA HTTP Add-on:
-
-```bash
-# Install the HTTP Add-on
-helm install keda-http-add-on kedacore/keda-add-ons-http \
-  --namespace keda
-```
-
-The HTTP Add-on intercepts TCP connections and wakes up scaled-to-zero clusters when connection requests arrive.
-
 ### Auto-Scaling Configuration
 
 Enable auto-scaling by adding a `scaling` section to your PostgresCluster:
@@ -316,40 +303,11 @@ spec:
 
 | Field | Type | Description | Default |
 |-------|------|-------------|---------|
-| `scaling.minReplicas` | integer | Minimum replica count (0 enables scale-to-zero) | spec.replicas |
+| `scaling.minReplicas` | integer | Minimum replica count | spec.replicas |
 | `scaling.maxReplicas` | integer | Maximum replica count | spec.replicas |
-| `scaling.idleTimeout` | duration | Time to wait before scaling down (e.g., "30m") | 5m |
-| `scaling.wakeupTimeout` | duration | Max time to wait for cluster wakeup | 5m |
 | `scaling.metrics.cpu.targetUtilization` | integer | Target CPU percentage (1-100) | - |
 | `scaling.metrics.connections.threshold` | integer | Connection count trigger | - |
 | `scaling.replicationLagThreshold` | string | Max replication lag (e.g., "10MB") | - |
-
-### Scale-to-Zero (Development Environments)
-
-Scale-to-zero allows development clusters to shut down completely when idle, reducing costs:
-
-```yaml
-apiVersion: postgres-operator.smoketurner.com/v1alpha1
-kind: PostgresCluster
-metadata:
-  name: dev-postgres
-spec:
-  version: "16"
-  replicas: 1
-  storage:
-    size: 5Gi
-  tls:
-    issuerRef:
-      name: selfsigned-issuer
-      kind: ClusterIssuer
-  scaling:
-    minReplicas: 0       # Enable scale-to-zero
-    maxReplicas: 1
-    idleTimeout: 30m     # Scale to zero after 30 minutes idle
-    wakeupTimeout: 5m    # Allow up to 5 minutes for cluster to wake up
-```
-
-When a connection request arrives at a scaled-to-zero cluster, the KEDA HTTP Add-on intercepts it and triggers the cluster to scale up. The connection is held until the cluster is ready.
 
 ### CPU-Based Scaling (Production)
 
@@ -403,7 +361,6 @@ spec:
 
 | File | Description |
 |------|-------------|
-| `config/samples/scaling-dev-scale-to-zero.yaml` | Development with scale-to-zero |
 | `config/samples/scaling-prod-cpu.yaml` | Production CPU-based scaling |
 | `config/samples/scaling-prod-connections.yaml` | Connection-based scaling |
 | `config/samples/scaling-prod-combined.yaml` | Combined metrics scaling |
@@ -488,7 +445,6 @@ kubectl get secret my-postgres-credentials -o jsonpath='{.data.password}' | base
 | Degraded | Some replicas unavailable |
 | Recovering | Automatic recovery in progress |
 | Failed | Cluster needs manual intervention |
-| Hibernating | Cluster scaled to zero (KEDA scale-to-zero) |
 | Deleting | Cluster is being deleted |
 
 ## Development

@@ -1,7 +1,6 @@
 pub mod backup;
 pub mod certificate;
 pub mod common;
-pub mod http_scaled_object;
 pub mod patroni;
 pub mod pdb;
 pub mod pgbouncer;

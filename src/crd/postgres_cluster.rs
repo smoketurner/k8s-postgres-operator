@@ -248,25 +248,11 @@ pub enum RecoveryTarget {
 ///
 /// Requires KEDA (Kubernetes Event-driven Autoscaling) to be installed.
 ///
-/// Scaling behavior is determined by `minReplicas` and `maxReplicas`:
-/// - `minReplicas: 0` enables scale-to-zero (development clusters)
-/// - `minReplicas > 0` with `maxReplicas > replicas` enables auto-scaling
-///
-/// The `replicas` field in the spec defines the desired/baseline replica count.
-/// KEDA will scale between `minReplicas` and `maxReplicas` based on the
-/// configured metrics.
+/// When `maxReplicas > replicas`, KEDA will auto-scale the cluster based on
+/// the configured metrics (CPU, connections).
 ///
 /// # Example
 /// ```yaml
-/// # Development cluster with scale-to-zero
-/// spec:
-///   replicas: 1
-///   scaling:
-///     minReplicas: 0
-///     maxReplicas: 1
-///     idleTimeout: 30m
-///     wakeupTimeout: 5m
-///
 /// # Production cluster with reader auto-scaling
 /// spec:
 ///   replicas: 3
@@ -280,9 +266,8 @@ pub enum RecoveryTarget {
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ScalingSpec {
-    /// Minimum number of replicas.
-    /// Set to 0 to enable scale-to-zero for development clusters.
-    /// For production, this should be >= 1 (typically >= spec.replicas).
+    /// Minimum number of replicas for auto-scaling.
+    /// Should be >= 1 (typically >= spec.replicas).
     /// Default: spec.replicas (no scale-down below desired)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_replicas: Option<i32>,
@@ -292,21 +277,6 @@ pub struct ScalingSpec {
     /// Default: 10
     #[serde(default = "default_max_replicas")]
     pub max_replicas: i32,
-
-    /// Time without connections before scaling to minReplicas.
-    /// Particularly important when minReplicas=0 (scale-to-zero).
-    /// Format: duration string (e.g., "30m", "1h").
-    /// Default: 30m
-    #[serde(default = "default_idle_timeout")]
-    pub idle_timeout: String,
-
-    /// Maximum time to wait for cluster wake-up on connection attempt.
-    /// Only applies when minReplicas=0 (scale-to-zero).
-    /// If exceeded, the connection will fail.
-    /// Format: duration string (e.g., "5m", "10m").
-    /// Default: 5m
-    #[serde(default = "default_wakeup_timeout")]
-    pub wakeup_timeout: String,
 
     /// Scaling metrics configuration.
     /// Defines what triggers scaling (CPU, connections, etc.).
@@ -327,29 +297,15 @@ impl ScalingSpec {
         self.min_replicas.unwrap_or(desired_replicas)
     }
 
-    /// Returns true if scale-to-zero is enabled (minReplicas = 0)
-    pub fn is_scale_to_zero(&self) -> bool {
-        self.min_replicas == Some(0)
-    }
-
-    /// Returns true if auto-scaling is effectively enabled
-    /// (maxReplicas > minReplicas or scale-to-zero is enabled)
+    /// Returns true if auto-scaling is effectively enabled (maxReplicas > minReplicas)
     pub fn is_scaling_enabled(&self, desired_replicas: i32) -> bool {
         let min = self.effective_min_replicas(desired_replicas);
-        self.max_replicas > min || self.is_scale_to_zero()
+        self.max_replicas > min
     }
 }
 
 fn default_max_replicas() -> i32 {
     10
-}
-
-fn default_idle_timeout() -> String {
-    "30m".to_string()
-}
-
-fn default_wakeup_timeout() -> String {
-    "5m".to_string()
 }
 
 fn default_replication_lag_threshold() -> String {
@@ -1312,9 +1268,6 @@ pub enum ClusterPhase {
     Recovering,
     /// Cluster is in a failed state
     Failed,
-    /// Cluster is hibernating (scaled to zero, waiting for connections)
-    /// Only applicable when scaling.minReplicas = 0
-    Hibernating,
     /// Cluster is being deleted
     Deleting,
 }
@@ -1330,7 +1283,6 @@ impl std::fmt::Display for ClusterPhase {
             ClusterPhase::Degraded => write!(f, "Degraded"),
             ClusterPhase::Recovering => write!(f, "Recovering"),
             ClusterPhase::Failed => write!(f, "Failed"),
-            ClusterPhase::Hibernating => write!(f, "Hibernating"),
             ClusterPhase::Deleting => write!(f, "Deleting"),
         }
     }

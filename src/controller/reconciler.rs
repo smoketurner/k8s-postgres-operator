@@ -32,8 +32,7 @@ use crate::controller::state_machine::{
 use crate::controller::status::{StatusManager, spec_changed};
 use crate::crd::{ClusterPhase, PostgresCluster};
 use crate::resources::{
-    backup, certificate, http_scaled_object, patroni, pdb, pgbouncer, scaled_object, secret,
-    service,
+    backup, certificate, patroni, pdb, pgbouncer, scaled_object, secret, service,
 };
 
 /// Finalizer name for cleanup
@@ -913,10 +912,6 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
                 ClusterPhase::Pending | ClusterPhase::Deleting => {
                     // These are handled elsewhere (initial state / deletion handler)
                 }
-                ClusterPhase::Hibernating => {
-                    // Cluster is hibernating (scaled to zero)
-                    // No status update needed - KEDA will handle wake-up
-                }
             }
         }
         TransitionResult::InvalidTransition { current, event } => {
@@ -985,7 +980,6 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
         ClusterPhase::Running => Duration::from_secs(60),
         ClusterPhase::Failed => Duration::from_secs(30),
         ClusterPhase::Pending | ClusterPhase::Deleting => Duration::from_secs(5),
-        ClusterPhase::Hibernating => Duration::from_secs(300), // 5 minutes - KEDA handles wake-up
     };
 
     Ok(Action::requeue(requeue_duration))
@@ -1292,37 +1286,6 @@ async fn reconcile_keda_resources(
         .await?;
     }
 
-    // Scale-to-zero (HTTPScaledObject)
-    if let Some(http_obj) = http_scaled_object::generate_http_scaled_object(cluster) {
-        apply_keda_resource(ctx, ns, &http_obj).await?;
-
-        // Also create the StatefulSet scaler if PgBouncer is enabled
-        if let Some(sts_scaler) = http_scaled_object::generate_statefulset_scaled_object(cluster) {
-            apply_keda_resource(ctx, ns, &sts_scaler).await?;
-        }
-    } else {
-        // Clean up HTTPScaledObject if scale-to-zero is disabled
-        delete_keda_resource(
-            ctx,
-            ns,
-            http_scaled_object::HTTP_API_GROUP,
-            http_scaled_object::HTTP_API_VERSION,
-            http_scaled_object::HTTP_SCALED_OBJECT_KIND,
-            &format!("{}-scale-to-zero", name),
-        )
-        .await?;
-
-        delete_keda_resource(
-            ctx,
-            ns,
-            scaled_object::KEDA_API_GROUP,
-            scaled_object::KEDA_API_VERSION,
-            scaled_object::SCALED_OBJECT_KIND,
-            &format!("{}-sts-scaler", name),
-        )
-        .await?;
-    }
-
     Ok(())
 }
 
@@ -1526,7 +1489,6 @@ async fn emit_state_transition_event(
         ClusterPhase::Failed => "ClusterFailed",
         ClusterPhase::Deleting => "ClusterDeleting",
         ClusterPhase::Pending => "ClusterPending",
-        ClusterPhase::Hibernating => "ClusterHibernating",
     };
 
     let note = Some(format!(

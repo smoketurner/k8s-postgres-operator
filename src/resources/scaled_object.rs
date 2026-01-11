@@ -159,20 +159,13 @@ pub fn should_enable_reader_scaling(cluster: &PostgresCluster) -> bool {
         return false;
     };
 
-    // Reader scaling requires maxReplicas > current replicas (not scale-to-zero)
-    if scaling.is_scale_to_zero() {
-        return false;
-    }
-
     // Must have potential to scale up
     scaling.max_replicas > cluster.spec.replicas
 }
 
 /// Check if KEDA is managing replicas for this cluster
 ///
-/// Returns true if either:
-/// - Scale-to-zero is enabled (minReplicas = 0)
-/// - Reader auto-scaling is enabled (maxReplicas > replicas)
+/// Returns true if reader auto-scaling is enabled (maxReplicas > replicas).
 ///
 /// When KEDA manages replicas, the operator should not set the StatefulSet
 /// replica count to avoid conflicts with KEDA's scaling decisions.
@@ -180,11 +173,6 @@ pub fn is_keda_managing_replicas(cluster: &PostgresCluster) -> bool {
     let Some(scaling) = &cluster.spec.scaling else {
         return false;
     };
-
-    // Scale-to-zero means KEDA manages replicas
-    if scaling.is_scale_to_zero() {
-        return true;
-    }
 
     // Reader auto-scaling means KEDA manages replicas
     scaling.max_replicas > cluster.spec.replicas
@@ -442,24 +430,6 @@ mod tests {
     }
 
     #[test]
-    fn test_should_enable_reader_scaling_scale_to_zero() {
-        // Scale-to-zero clusters should not enable reader scaling
-        let cluster = create_test_cluster(
-            1,
-            Some(ScalingSpec {
-                min_replicas: Some(0),
-                max_replicas: 1,
-                idle_timeout: "30m".to_string(),
-                wakeup_timeout: "5m".to_string(),
-                metrics: None,
-                replication_lag_threshold: "30s".to_string(),
-            }),
-        );
-
-        assert!(!should_enable_reader_scaling(&cluster));
-    }
-
-    #[test]
     fn test_should_enable_reader_scaling_with_headroom() {
         // Reader scaling enabled when maxReplicas > replicas
         let cluster = create_test_cluster(
@@ -467,8 +437,6 @@ mod tests {
             Some(ScalingSpec {
                 min_replicas: Some(3),
                 max_replicas: 10,
-                idle_timeout: "30m".to_string(),
-                wakeup_timeout: "5m".to_string(),
                 metrics: None,
                 replication_lag_threshold: "30s".to_string(),
             }),
@@ -485,8 +453,6 @@ mod tests {
             Some(ScalingSpec {
                 min_replicas: Some(3),
                 max_replicas: 3,
-                idle_timeout: "30m".to_string(),
-                wakeup_timeout: "5m".to_string(),
                 metrics: None,
                 replication_lag_threshold: "30s".to_string(),
             }),
@@ -502,8 +468,6 @@ mod tests {
             Some(ScalingSpec {
                 min_replicas: Some(3),
                 max_replicas: 10,
-                idle_timeout: "30m".to_string(),
-                wakeup_timeout: "5m".to_string(),
                 metrics: Some(ScalingMetrics {
                     cpu: Some(CpuScalingMetric {
                         target_utilization: 80,
@@ -535,8 +499,6 @@ mod tests {
             Some(ScalingSpec {
                 min_replicas: Some(3),
                 max_replicas: 10,
-                idle_timeout: "30m".to_string(),
-                wakeup_timeout: "5m".to_string(),
                 metrics: Some(ScalingMetrics {
                     cpu: None,
                     connections: Some(ConnectionScalingMetric {
@@ -565,8 +527,6 @@ mod tests {
             Some(ScalingSpec {
                 min_replicas: Some(3),
                 max_replicas: 10,
-                idle_timeout: "30m".to_string(),
-                wakeup_timeout: "5m".to_string(),
                 metrics: Some(ScalingMetrics {
                     cpu: None,
                     connections: Some(ConnectionScalingMetric {
@@ -591,8 +551,6 @@ mod tests {
             Some(ScalingSpec {
                 min_replicas: Some(3),
                 max_replicas: 10,
-                idle_timeout: "30m".to_string(),
-                wakeup_timeout: "5m".to_string(),
                 metrics: Some(ScalingMetrics {
                     cpu: Some(CpuScalingMetric {
                         target_utilization: 70,
