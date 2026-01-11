@@ -13,17 +13,14 @@ A Kubernetes operator for managing PostgreSQL clusters with high availability us
 - **Cloud Backups**: Continuous WAL archiving and scheduled base backups to S3, GCS, or Azure with point-in-time recovery (PITR)
 - **Metrics**: Prometheus-compatible metrics endpoint
 - **Zero-Downtime Updates**: Rolling updates with PodDisruptionBudgets
-- **Auto-Scaling**: KEDA-based auto-scaling for read replicas
 
 ## Prerequisites
 
-- Kubernetes 1.35+ (required for in-place resource resizing, pod generation tracking)
+- Kubernetes 1.35+
 - kubectl configured to access your cluster
 - [cert-manager](https://cert-manager.io/) v1.0+ (required for TLS certificate management)
-- [KEDA](https://keda.sh/) v2.10+ (optional, for auto-scaling features)
-- Rust 1.92+ (for building from source)
 
-## Quick Start
+## Installation
 
 ### Install the Operator
 
@@ -33,20 +30,6 @@ make install
 
 # Deploy the operator
 make deploy
-```
-
-### Set Up cert-manager
-
-TLS is enabled by default. First, ensure you have a ClusterIssuer:
-
-```yaml
-# Create a self-signed issuer for development
-apiVersion: cert-manager.io/v1
-kind: ClusterIssuer
-metadata:
-  name: selfsigned-issuer
-spec:
-  selfSigned: {}
 ```
 
 ### Create a PostgreSQL Cluster
@@ -75,529 +58,46 @@ kubectl apply -f my-postgres.yaml
 ### Check Status
 
 ```bash
-# List clusters
 kubectl get postgresclusters
-
-# Watch cluster status
-kubectl get pgc my-postgres -w
-
-# View detailed status
 kubectl describe pgc my-postgres
 ```
 
-## Configuration
-
-### PostgresCluster Spec
-
-| Field | Type | Description | Default |
-|-------|------|-------------|---------|
-| `version` | string | PostgreSQL version (e.g., "15", "16", "17") | Required |
-| `replicas` | integer | Number of cluster members (1-100) | 1 |
-| `storage.size` | string | PVC size (e.g., "10Gi") | Required |
-| `storage.storageClass` | string | Kubernetes StorageClass | cluster default |
-| `resources` | object | CPU/memory requests and limits | none |
-| `postgresqlParams` | map | Custom PostgreSQL parameters | none |
-| `labels` | map | Custom labels for cost allocation (team, cost-center, etc.) | none |
-| `service.type` | string | Service type (ClusterIP, NodePort, LoadBalancer) | ClusterIP |
-| `tls.enabled` | boolean | Enable TLS connections | true |
-| `tls.issuerRef` | object | cert-manager Issuer/ClusterIssuer reference | Required when TLS enabled |
-| `pgbouncer.enabled` | boolean | Enable PgBouncer sidecar | false |
-| `metrics.enabled` | boolean | Enable metrics exporter | false |
-| `backup` | object | Backup configuration (encryption required) | none |
-
-### Kubernetes 1.35+ Features
-
-When running on Kubernetes 1.35+, the operator leverages these enhanced capabilities:
-
-| Feature | Description |
-|---------|-------------|
-| **In-Place Resource Resizing** | Change CPU/memory without pod restarts using container resize policies |
-| **Pod Generation Tracking** | Monitor `pod.status.observedGeneration` for spec sync status |
-| **Resize Status Monitoring** | Track resize progress via `pod.status.resize` (Proposed, InProgress, Infeasible) |
-
-The operator automatically detects Kubernetes version and enables these features when available. On older clusters, resource changes trigger rolling restarts as usual.
-
-### Replica Configurations
-
-| Replicas | Description |
-|----------|-------------|
-| 1 | Single server (development) |
-| 2 | Primary + 1 replica (no HA benefit) |
-| 3+ | Highly available cluster with automatic failover |
-
-### Example: Production HA Cluster
-
-```yaml
-apiVersion: postgres-operator.smoketurner.com/v1alpha1
-kind: PostgresCluster
-metadata:
-  name: production-db
-spec:
-  version: "16"
-  replicas: 3
-  storage:
-    size: 100Gi
-    storageClass: fast-ssd
-  resources:
-    requests:
-      cpu: "2"
-      memory: 4Gi
-    limits:
-      cpu: "4"
-      memory: 8Gi
-  labels:
-    team: platform
-    cost-center: eng-001
-    environment: production
-  postgresqlParams:
-    max_connections: "200"
-    shared_buffers: "1GB"
-    effective_cache_size: "3GB"
-  service:
-    type: LoadBalancer
-    loadBalancerSourceRanges:
-      - 10.0.0.0/8
-  tls:
-    issuerRef:
-      name: letsencrypt-prod
-      kind: ClusterIssuer
-  pgbouncer:
-    enabled: true
-    poolMode: transaction
-    maxClientConn: 1000
-  backup:
-    schedule: "0 2 * * *"
-    retention:
-      count: 7
-    destination:
-      type: S3
-      bucket: my-backups
-      region: us-east-1
-      credentialsSecret: aws-credentials
-    encryption:
-      method: aes256
-      keySecret: backup-encryption-key
-```
-
-## Backup and Recovery
-
-The operator integrates with WAL-G for continuous backups with point-in-time recovery support.
-
-### Backup Features
-
-- **Continuous WAL archiving**: Every transaction is streamed to cloud storage
-- **Scheduled base backups**: Full physical backups on a cron schedule
-- **Point-in-time recovery (PITR)**: Restore to any moment between backups
-- **Multiple cloud providers**: AWS S3, Google Cloud Storage, Azure Blob Storage
-- **S3-compatible storage**: MinIO, Ceph RadosGW, Wasabi, etc.
-- **Encryption**: AES-256 or PGP encryption for backups at rest
-- **Delta backups**: Store only changed pages to reduce backup size
-
-### Quick Start: S3 Backup
+### Connect to PostgreSQL
 
 ```bash
-# Create credentials secret
-kubectl create secret generic aws-backup-credentials \
-  --from-literal=AWS_ACCESS_KEY_ID=<your-key> \
-  --from-literal=AWS_SECRET_ACCESS_KEY=<your-secret>
-
-# Create encryption key secret (32-byte key for AES-256)
-kubectl create secret generic backup-encryption-key \
-  --from-literal=WALG_LIBSODIUM_KEY=$(openssl rand -hex 32)
-```
-
-```yaml
-apiVersion: postgres-operator.smoketurner.com/v1alpha1
-kind: PostgresCluster
-metadata:
-  name: my-postgres
-spec:
-  version: "16"
-  replicas: 3
-  storage:
-    size: 100Gi
-  tls:
-    issuerRef:
-      name: selfsigned-issuer
-      kind: ClusterIssuer
-  backup:
-    schedule: "0 2 * * *"  # Daily at 2 AM
-    retention:
-      count: 7
-    destination:
-      type: S3
-      bucket: my-postgres-backups
-      region: us-east-1
-      credentialsSecret: aws-backup-credentials
-    compression: zstd
-    encryption:
-      method: aes256
-      keySecret: backup-encryption-key
-    backupFromReplica: true
-```
-
-### Sample Configurations
-
-| File | Description |
-|------|-------------|
-| `config/samples/backup-s3.yaml` | AWS S3 backup |
-| `config/samples/backup-gcs.yaml` | Google Cloud Storage backup |
-| `config/samples/backup-azure.yaml` | Azure Blob Storage backup |
-| `config/samples/backup-minio.yaml` | MinIO (S3-compatible) backup |
-| `config/samples/backup-encrypted.yaml` | Encrypted backup |
-
-### Documentation
-
-See [docs/BACKUP_AND_RESTORE.md](docs/BACKUP_AND_RESTORE.md) for:
-- Detailed cloud provider setup instructions
-- Restore procedures
-- Point-in-time recovery examples
-- Troubleshooting guide
-
-## Auto-Scaling with KEDA
-
-The operator integrates with [KEDA](https://keda.sh/) (Kubernetes Event-Driven Autoscaling) to provide automatic scaling of read replicas based on metrics like CPU utilization or PostgreSQL connection count.
-
-### Installing KEDA
-
-KEDA is required for auto-scaling features. Install it using Helm:
-
-```bash
-# Add the KEDA Helm repository
-helm repo add kedacore https://kedacore.github.io/charts
-helm repo update
-
-# Install KEDA
-helm install keda kedacore/keda \
-  --namespace keda \
-  --create-namespace
-```
-
-### Auto-Scaling Configuration
-
-Enable auto-scaling by adding a `scaling` section to your PostgresCluster:
-
-```yaml
-apiVersion: postgres-operator.smoketurner.com/v1alpha1
-kind: PostgresCluster
-metadata:
-  name: my-postgres
-spec:
-  version: "16"
-  replicas: 3
-  storage:
-    size: 10Gi
-  tls:
-    issuerRef:
-      name: selfsigned-issuer
-      kind: ClusterIssuer
-  scaling:
-    minReplicas: 3       # Minimum replicas during scale-down
-    maxReplicas: 10      # Maximum replicas during scale-up
-    metrics:
-      cpu:
-        targetUtilization: 70  # Scale up when CPU > 70%
-```
-
-### Scaling Options
-
-| Field | Type | Description | Default |
-|-------|------|-------------|---------|
-| `scaling.minReplicas` | integer | Minimum replica count | spec.replicas |
-| `scaling.maxReplicas` | integer | Maximum replica count | spec.replicas |
-| `scaling.metrics.cpu.targetUtilization` | integer | Target CPU percentage (1-100) | - |
-| `scaling.metrics.connections.threshold` | integer | Connection count trigger | - |
-| `scaling.replicationLagThreshold` | string | Max replication lag (e.g., "10MB") | - |
-
-### CPU-Based Scaling (Production)
-
-Scale read replicas based on CPU utilization:
-
-```yaml
-spec:
-  replicas: 3
-  scaling:
-    minReplicas: 3
-    maxReplicas: 10
-    metrics:
-      cpu:
-        targetUtilization: 70  # Add replicas when CPU > 70%
-```
-
-### Connection-Based Scaling
-
-Scale based on active PostgreSQL connections:
-
-```yaml
-spec:
-  replicas: 3
-  scaling:
-    minReplicas: 3
-    maxReplicas: 10
-    metrics:
-      connections:
-        threshold: 100  # Scale when connections exceed 100
-```
-
-### Combined Metrics
-
-Use multiple metrics together (scales on whichever triggers first):
-
-```yaml
-spec:
-  replicas: 3
-  scaling:
-    minReplicas: 3
-    maxReplicas: 10
-    replicationLagThreshold: "50MB"  # Don't scale if lag > 50MB
-    metrics:
-      cpu:
-        targetUtilization: 70
-      connections:
-        threshold: 100
-```
-
-### Sample Configurations
-
-| File | Description |
-|------|-------------|
-| `config/samples/scaling-prod-cpu.yaml` | Production CPU-based scaling |
-| `config/samples/scaling-prod-connections.yaml` | Connection-based scaling |
-| `config/samples/scaling-prod-combined.yaml` | Combined metrics scaling |
-
-## Connecting to PostgreSQL
-
-### Primary (Read-Write)
-
-```bash
-# Get the primary service
-kubectl get svc my-postgres-primary
-
-# Connect via psql
+# Primary (read-write)
 kubectl run psql --rm -it --image=postgres:16 -- \
   psql -h my-postgres-primary -U postgres
-```
 
-### Replicas (Read-Only)
-
-```bash
-# Connect to read replicas
-kubectl run psql --rm -it --image=postgres:16 -- \
-  psql -h my-postgres-repl -U postgres
-```
-
-### Credentials
-
-Credentials are stored in a Kubernetes Secret:
-
-```bash
 # Get credentials
 kubectl get secret my-postgres-credentials -o jsonpath='{.data.password}' | base64 -d
 ```
 
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Kubernetes Cluster                        │
-│                                                              │
-│  ┌──────────────────┐    ┌─────────────────────────────┐   │
-│  │ postgres-operator│    │     PostgresCluster CR       │   │
-│  │                  │◄───│                              │   │
-│  │  - Reconciler    │    │  spec:                       │   │
-│  │  - State Machine │    │    version: "16"             │   │
-│  │  - Leader Election│   │    replicas: 3               │   │
-│  └────────┬─────────┘    └─────────────────────────────┘   │
-│           │                                                  │
-│           │ creates/manages                                  │
-│           ▼                                                  │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │                   StatefulSet                        │   │
-│  │  ┌─────────┐  ┌─────────┐  ┌─────────┐             │   │
-│  │  │ Pod-0   │  │ Pod-1   │  │ Pod-2   │             │   │
-│  │  │(Primary)│  │(Replica)│  │(Replica)│             │   │
-│  │  │         │  │         │  │         │             │   │
-│  │  │ Patroni │  │ Patroni │  │ Patroni │             │   │
-│  │  │ Postgres│  │ Postgres│  │ Postgres│             │   │
-│  │  └────┬────┘  └────┬────┘  └────┬────┘             │   │
-│  │       │            │            │                   │   │
-│  │  ┌────▼────┐  ┌────▼────┐  ┌────▼────┐             │   │
-│  │  │  PVC-0  │  │  PVC-1  │  │  PVC-2  │             │   │
-│  │  └─────────┘  └─────────┘  └─────────┘             │   │
-│  └─────────────────────────────────────────────────────┘   │
-│                                                              │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
-│  │ svc/primary  │  │ svc/replicas │  │ svc/headless │      │
-│  │ (read-write) │  │ (read-only)  │  │ (internal)   │      │
-│  └──────────────┘  └──────────────┘  └──────────────┘      │
-└─────────────────────────────────────────────────────────────┘
-```
-
-## Cluster Lifecycle States
-
-| Phase | Description |
-|-------|-------------|
-| Pending | Initial state before resources are created |
-| Creating | Resources are being created, waiting for pods |
-| Running | All replicas ready, cluster is healthy |
-| Updating | Configuration change in progress |
-| Scaling | Replica count change in progress |
-| Degraded | Some replicas unavailable |
-| Recovering | Automatic recovery in progress |
-| Failed | Cluster needs manual intervention |
-| Deleting | Cluster is being deleted |
-
-## Development
-
-### Build from Source
+## Uninstallation
 
 ```bash
-# Build the operator
-make build
+# Remove the operator
+make undeploy
 
-# Run locally (uses current kubeconfig)
-make run
-
-# Run tests
-make test
-
-# Run lints
-make lint
+# Remove CRD and RBAC
+make uninstall
 ```
 
-### Project Structure
+## Documentation
 
-```
-├── src/
-│   ├── main.rs              # Entry point, leader election
-│   ├── lib.rs               # Controller setup
-│   ├── controller/
-│   │   ├── reconciler.rs    # Main reconciliation loop
-│   │   ├── state_machine.rs # Cluster lifecycle FSM
-│   │   ├── status.rs        # Status management
-│   │   └── error.rs         # Error types
-│   ├── crd/
-│   │   └── postgres_cluster.rs  # CRD types
-│   ├── resources/
-│   │   ├── patroni.rs       # StatefulSet, ConfigMap, RBAC
-│   │   ├── service.rs       # Services
-│   │   ├── secret.rs        # Credentials
-│   │   └── pdb.rs           # PodDisruptionBudget
-│   └── health.rs            # Health/metrics server
-├── config/
-│   ├── crd/                 # CustomResourceDefinition
-│   ├── rbac/                # RBAC resources
-│   ├── deploy/              # Operator deployment
-│   └── samples/             # Example PostgresClusters
-└── tests/
-    ├── unit/                # Unit tests
-    └── integration/         # Integration tests
-```
+For detailed documentation, see the [docs/](docs/) directory:
 
-### Makefile Targets
+- **[API Reference](docs/api-reference.md)** - Complete CRD field reference
+- **[Architecture](docs/architecture.md)** - Design decisions, state machine, HA patterns
+- **[Backup & Restore](docs/backup-restore.md)** - Cloud backup configuration, PITR, restore procedures
+- **[Development](docs/development.md)** - Building, testing, contributing
+- **[Operations](docs/operations.md)** - Day-2 operations, scaling, troubleshooting, maintenance
 
-```bash
-make build              # Build the operator
-make docker-build       # Build Docker image
-make docker-push        # Push Docker image
-make run                # Run locally
-make test               # Run unit tests
-make test-integration   # Run integration tests
-make install            # Install CRD and RBAC
-make deploy             # Deploy operator
-make undeploy           # Remove operator
-make deploy-sample      # Deploy sample cluster
-make clean              # Clean build artifacts
-```
+Sample configurations are available in [`config/samples/`](config/samples/).
 
-## Monitoring
+## Support
 
-### Prometheus Metrics
-
-The operator exposes metrics at `:8080/metrics`:
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `postgres_operator_reconciliations` | Counter | Total reconciliations |
-| `postgres_operator_reconciliation_errors` | Counter | Failed reconciliations |
-| `postgres_operator_reconcile_duration_seconds` | Histogram | Reconciliation duration |
-
-### Health Endpoints
-
-| Endpoint | Description |
-|----------|-------------|
-| `/healthz` | Liveness probe |
-| `/readyz` | Readiness probe |
-| `/metrics` | Prometheus metrics |
-
-## Security
-
-### Pod Security Standards
-
-The operator runs with the `restricted` Pod Security Standard:
-- Non-root user (UID 1000)
-- Read-only root filesystem
-- No privilege escalation
-- All capabilities dropped
-
-### Network Policies
-
-Sample NetworkPolicies are provided in `config/samples/networkpolicy-postgresql.yaml` to:
-- Restrict PostgreSQL access to labeled client pods
-- Allow Patroni cluster communication
-- Allow Prometheus metrics scraping
-
-### RBAC
-
-The operator uses least-privilege RBAC:
-- Cluster-scoped: CRD management, node reading
-- Namespace-scoped: Pod, Service, ConfigMap, Secret management
-
-## Troubleshooting
-
-### Cluster Stuck in Creating
-
-```bash
-# Check pod status
-kubectl get pods -l postgres-operator.smoketurner.com/cluster=my-postgres
-
-# Check PVC status (storage class issues)
-kubectl get pvc -l postgres-operator.smoketurner.com/cluster=my-postgres
-
-# Check operator logs
-kubectl logs -n postgres-operator-system deploy/postgres-operator
-```
-
-### Failover Not Working
-
-```bash
-# Check Patroni status
-kubectl exec my-postgres-0 -- patronictl list
-
-# Check endpoints (leader election)
-kubectl get endpoints my-postgres
-```
-
-### Connection Refused
-
-```bash
-# Verify service exists
-kubectl get svc my-postgres-primary
-
-# Check if pods are ready
-kubectl get pods -l postgres-operator.smoketurner.com/cluster=my-postgres
-
-# Test connectivity
-kubectl run test --rm -it --image=busybox -- nc -zv my-postgres-primary 5432
-```
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make changes with tests
-4. Run `make lint` and `make test`
-5. Submit a pull request
+This project is maintained on a **best-effort basis**. For questions, bug reports, or feature requests, please [open an issue on GitHub](https://github.com/smoketurner/k8s-postgres-operator/issues).
 
 ## License
 
