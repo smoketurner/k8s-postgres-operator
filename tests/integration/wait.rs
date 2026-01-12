@@ -104,6 +104,15 @@ pub fn pgbouncer_ready(expected: i32) -> impl Condition<PostgresCluster> {
     }
 }
 
+/// Condition that checks if replication lag is populated in status
+pub fn has_replication_lag() -> impl Condition<PostgresCluster> {
+    |obj: Option<&PostgresCluster>| {
+        obj.and_then(|cluster| cluster.status.as_ref())
+            .map(|status| !status.replication_lag.is_empty())
+            .unwrap_or(false)
+    }
+}
+
 /// Condition that checks if current_version matches expected
 pub fn has_current_version(expected: &str) -> impl Condition<PostgresCluster> {
     let version = expected.to_string();

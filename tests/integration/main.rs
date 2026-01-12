@@ -36,6 +36,7 @@ mod wait;
 mod connectivity_tests;
 mod database_tests;
 mod functional_tests;
+mod scaling_tests;
 mod tls_tests;
 
 // Re-export common test utilities
