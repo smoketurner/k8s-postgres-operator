@@ -13,7 +13,7 @@ pub use context::Context;
 pub use database_reconciler::{
     DATABASE_FINALIZER, DatabaseContext, DatabaseError, database_error_policy, reconcile_database,
 };
-pub use error::{BackoffConfig, Error, ErrorContext, Result};
+pub use error::{BackoffConfig, Error, Result};
 pub use reconciler::{FINALIZER, error_policy, reconcile};
 pub use replication_lag::{ReplicationLagCollector, ReplicationLagStatus, collect_replication_lag};
 pub use state_machine::{ClusterEvent, ClusterStateMachine, TransitionContext, TransitionResult};

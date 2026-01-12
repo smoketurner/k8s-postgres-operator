@@ -739,24 +739,6 @@ pub fn is_restore_configured(cluster: &PostgresCluster) -> bool {
     cluster.spec.restore.is_some()
 }
 
-/// Get restore information for status update
-pub fn get_restore_info(cluster: &PostgresCluster) -> Option<(String, String, Option<String>)> {
-    let restore = cluster.spec.restore.as_ref()?;
-
-    let (source_type, source_prefix) = match &restore.source {
-        RestoreSource::S3 { prefix, .. } => ("S3".to_string(), prefix.clone()),
-        RestoreSource::Gcs { prefix, .. } => ("GCS".to_string(), prefix.clone()),
-        RestoreSource::Azure { prefix, .. } => ("Azure".to_string(), prefix.clone()),
-    };
-
-    let recovery_target_time = restore.recovery_target.as_ref().and_then(|t| match t {
-        RecoveryTarget::Time(time) => Some(time.clone()),
-        _ => None,
-    });
-
-    Some((source_type, source_prefix, recovery_target_time))
-}
-
 /// Generate backup-related volumes for the StatefulSet.
 ///
 /// This creates volumes for:
@@ -852,26 +834,6 @@ pub fn generate_backup_volume_mounts(cluster: &PostgresCluster) -> Vec<VolumeMou
 /// Check if backup is configured for a cluster.
 pub fn is_backup_enabled(cluster: &PostgresCluster) -> bool {
     cluster.spec.backup.is_some()
-}
-
-/// Get the backup credentials secret name, if backup is configured.
-pub fn get_backup_credentials_secret(cluster: &PostgresCluster) -> Option<String> {
-    cluster
-        .spec
-        .backup
-        .as_ref()
-        .map(|b| b.credentials_secret_name().to_string())
-}
-
-/// Get the encryption key secret name if encryption is configured.
-/// Returns Some(secret_name) if backup has encryption configured, None otherwise.
-pub fn get_encryption_key_secret(cluster: &PostgresCluster) -> Option<String> {
-    cluster
-        .spec
-        .backup
-        .as_ref()
-        .and_then(|b| b.encryption.as_ref())
-        .map(|e| e.key_secret.clone())
 }
 
 #[cfg(test)]

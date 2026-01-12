@@ -143,31 +143,3 @@ impl BackoffConfig {
         }
     }
 }
-
-/// Context for tracking error state during reconciliation
-#[derive(Clone, Debug, Default)]
-pub struct ErrorContext {
-    /// Number of consecutive errors
-    pub consecutive_errors: u32,
-    /// Last error message
-    pub last_error: Option<String>,
-}
-
-impl ErrorContext {
-    /// Record an error
-    pub fn record_error(&mut self, error: &Error) {
-        self.consecutive_errors += 1;
-        self.last_error = Some(error.to_string());
-    }
-
-    /// Reset error tracking (called on successful reconciliation)
-    pub fn reset(&mut self) {
-        self.consecutive_errors = 0;
-        self.last_error = None;
-    }
-
-    /// Check if we've exceeded max retries
-    pub fn exceeded_max_retries(&self, max_retries: u32) -> bool {
-        self.consecutive_errors >= max_retries
-    }
-}
