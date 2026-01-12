@@ -71,7 +71,7 @@ make uninstall          # Uninstall CRD and RBAC from the cluster
 # Deployment
 make deploy             # Deploy the operator to the cluster
 make undeploy           # Undeploy the operator from the cluster
-make deploy-sample      # Deploy a sample PostgresCluster (standalone)
+make deploy-sample      # Deploy a sample PostgresCluster (automatic failover)
 make delete-sample      # Delete the sample PostgresCluster
 
 # Cleanup
@@ -84,10 +84,12 @@ make clean-all          # Uninstall from cluster and clean build artifacts
 ### Entry Point (`src/main.rs`)
 Initializes logging, creates Kubernetes client, builds shared Context, and runs the Controller watching PostgresCluster CRD and owned resources (StatefulSet, Services, ConfigMaps, Secrets, PodDisruptionBudgets).
 
-### CRD (`src/crd/postgres_cluster.rs`)
+### CRDs (`src/crd/`)
+
+#### PostgresCluster (`postgres_cluster.rs`)
 `PostgresCluster` custom resource with:
-- **Spec**: `version`, `replicas`, `storage`, `resources`, `postgresql_params`, `labels`, `backup`, `pgbouncer`, `tls`, `metrics`, `service`, `restore`
-- **Status**: `phase`, `readyReplicas`, `primaryPod`, `replicaPods`, `conditions`, retry tracking, `observed_generation`
+- **Spec**: `version`, `replicas`, `storage`, `resources`, `postgresql_params`, `labels`, `backup`, `pgbouncer`, `tls`, `metrics`, `service`, `restore`, `scaling`, `networkPolicy`
+- **Status**: `phase`, `readyReplicas`, `primaryPod`, `replicaPods`, `conditions`, `observedGeneration`, `backup`, `restoredFrom`, `replicationLag`, `connectionInfo`
 
 API version: `postgres-operator.smoketurner.com/v1alpha1`
 
@@ -96,12 +98,30 @@ Key design decisions:
 - **Backup encryption required**: When backups are configured, encryption must be specified
 - **User labels support**: `spec.labels` allows cost allocation labels that are merged with standard labels
 
+#### PostgresDatabase (`postgres_database.rs`)
+`PostgresDatabase` custom resource for declarative database and role provisioning:
+- **Spec**: `clusterRef`, `database`, `roles`, `grants`, `extensions`
+- **Status**: `phase`, `conditions`, `provisioned`, `secretName`
+
+API version: `postgres-operator.smoketurner.com/v1alpha1`
+
+Features:
+- Create databases within a PostgresCluster
+- Provision roles with specified privileges (LOGIN, CREATEDB, etc.)
+- Generate Kubernetes secrets with credentials and connection strings
+- Apply grants to control table/schema access
+- Enable PostgreSQL extensions
+
 ### Controller (`src/controller/`)
-- `reconciler.rs`: Main reconciliation loop - handles finalizers, spec change detection, resource application, state transitions
+- `reconciler.rs`: Main PostgresCluster reconciliation loop - handles finalizers, spec change detection, resource application, state transitions
+- `database_reconciler.rs`: PostgresDatabase reconciliation - database/role provisioning via SQL execution, secret generation
 - `state_machine.rs`: Formal FSM with states (Pending, Creating, Running, Updating, Scaling, Degraded, Recovering, Failed, Deleting) and guarded transitions
 - `context.rs`: Shared context with Kubernetes client and event recorder
-- `status.rs`: Condition management (Ready, Progressing, Degraded, ConfigurationValid, ReplicasReady)
+- `status.rs`: Condition management (Ready, Progressing, Degraded, ConfigurationValid, ReplicasReady, ResourceResizeInProgress)
 - `error.rs`: Custom errors with exponential backoff configuration
+- `validation.rs`: Spec validation logic
+- `replication_lag.rs`: Replication lag monitoring via Patroni REST API
+- `backup_status.rs`: Backup status collection from WAL-G
 
 ### Resources (`src/resources/`)
 Each module generates Kubernetes resources:
@@ -113,6 +133,17 @@ Each module generates Kubernetes resources:
 - `backup.rs`: WAL-G backup configuration (encryption required)
 - `certificate.rs`: cert-manager Certificate CR for TLS
 - `common.rs`: Standard labels, owner references, user label merging
+- `scaled_object.rs`: KEDA ScaledObject for auto-scaling (CPU/connection metrics)
+- `network_policy.rs`: NetworkPolicy generation for cluster access control
+- `sql.rs`: SQL execution via pod exec for database provisioning
+
+### Webhooks (`src/webhooks/`)
+ValidatingAdmissionWebhook for policy enforcement:
+- `server.rs`: HTTP server handling admission review requests
+- `policies/backup.rs`: Enforces encryption requirement when backups are configured
+- `policies/tls.rs`: Requires cert-manager issuer reference when TLS enabled
+- `policies/immutability.rs`: Prevents changing immutable fields (storage size, version downgrades)
+- `policies/production.rs`: Production-specific requirements for namespaces containing "prod"
 
 ### Key Patterns
 - **Finalizer pattern** for graceful deletion

@@ -280,7 +280,35 @@ Operator status conditions for PostgresCluster:
 - Degraded: Running but with reduced capacity
 - ConfigurationValid: Spec passes validation
 - ReplicasReady: All replicas synchronized with primary
+- ResourceResizeInProgress: In-place resize in progress (K8s 1.35+)
+- PodGenerationSynced: All pods applied current spec (K8s 1.35+)
 - Use standard condition format (type, status, reason, message, lastTransitionTime)
+
+Additional CRDs in this operator:
+- PostgresDatabase: Self-service database/role provisioning
+  - Creates databases within PostgresCluster
+  - Provisions roles with credentials
+  - Generates Kubernetes secrets for applications
+  - Separate reconciler at `src/controller/database_reconciler.rs`
+
+ValidatingAdmissionWebhooks (`src/webhooks/`):
+- Enforce backup encryption requirements
+- Validate TLS configuration (cert-manager issuer required)
+- Block immutable field changes (storage shrink, version downgrade)
+- Apply production-specific rules for "prod" namespaces
+- Server implementation at `src/webhooks/server.rs`
+
+KEDA auto-scaling integration (`src/resources/scaled_object.rs`):
+- Generates KEDA ScaledObjects when scaling spec enabled
+- Supports CPU-based and connection-based triggers
+- Automatic scale-down stabilization
+- Only creates ScaledObjects for clusters with >= 2 replicas
+
+Network policies (`src/resources/network_policy.rs`):
+- Configurable via `spec.networkPolicy`
+- Controls ingress by namespace, pod selector, CIDR
+- Automatically allows operator namespace access
+- Allows DNS egress for service discovery
 
 PostgreSQL HA considerations:
 - Minimum 3 replicas for automatic failover (quorum-based)

@@ -142,7 +142,45 @@ This is a Kubernetes operator for PostgreSQL using:
 - kube-rs 2.x in Rust
 - Target Kubernetes version: 1.35+
 
-Key CRD: `PostgresCluster` at `postgres-operator.smoketurner.com/v1alpha1`
+Key CRDs at `postgres-operator.smoketurner.com/v1alpha1`:
+- `PostgresCluster`: Manages PostgreSQL clusters with HA
+- `PostgresDatabase`: Self-service database/role provisioning within clusters
+
+### Security Enforcement via Webhooks
+
+The operator includes ValidatingAdmissionWebhooks (`src/webhooks/`) for policy enforcement:
+- **Backup encryption**: Blocks clusters with backups but no encryption configured
+- **TLS requirements**: Requires cert-manager issuer reference when TLS enabled
+- **Immutability**: Prevents dangerous changes (storage shrink, version downgrade)
+- **Production rules**: Enforces stricter requirements in "prod" namespaces
+
+These webhooks enable governance at deploy time rather than runtime discovery.
+
+### Self-Service Database Provisioning
+
+The `PostgresDatabase` CRD (`src/crd/postgres_database.rs`) enables developers to:
+- Create databases without cluster admin access
+- Provision roles with appropriate privileges
+- Receive credentials via generated Kubernetes secrets
+- Enable extensions they need
+
+This supports the "5-minute database" onboarding goal while maintaining guardrails.
+
+### Auto-Scaling with KEDA
+
+The operator generates KEDA ScaledObjects (`src/resources/scaled_object.rs`) for:
+- CPU-based scaling of read replicas
+- Connection count-based scaling
+- Automatic scale-down stabilization
+
+Requires KEDA to be installed cluster-wide. Supports fleet-wide capacity management.
+
+### Network Policies
+
+Network policies can be configured via `spec.networkPolicy`:
+- Enabled per-cluster or as a platform default
+- Restrict access by namespace, pod selector, or CIDR
+- Automatically allows operator namespace access
 
 When evaluating changes, consider impact on:
 - The 50-200 clusters you manage

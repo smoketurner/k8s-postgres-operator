@@ -81,6 +81,29 @@ Error handling for Kubernetes operators:
 - Update CRD status conditions on validation errors
 - Emit Kubernetes events for significant errors
 
+Multi-controller pattern in this project:
+- `src/controller/reconciler.rs`: PostgresCluster reconciliation
+- `src/controller/database_reconciler.rs`: PostgresDatabase reconciliation
+  - Executes SQL via pod exec for database/role provisioning
+  - Generates secrets with connection information
+  - Uses separate controller for lifecycle management
+- Both run concurrently in main.rs with shared Context
+
+Webhook server implementation (`src/webhooks/`):
+- HTTP server handling AdmissionReview requests
+- Policy modules for validation rules:
+  - `policies/backup.rs`: Backup encryption enforcement
+  - `policies/tls.rs`: TLS configuration validation
+  - `policies/immutability.rs`: Immutable field protection
+  - `policies/production.rs`: Production namespace rules
+- Returns AdmissionResponse with allowed/denied + reason
+
+SQL execution pattern (`src/resources/sql.rs`):
+- Executes psql commands via pod exec API
+- Used by database_reconciler for provisioning
+- Error handling for SQL failures vs connection failures
+- Transaction management for atomic operations
+
 Async programming:
 - tokio/async-std ecosystem
 - Future trait understanding

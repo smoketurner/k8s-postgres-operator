@@ -227,8 +227,61 @@ kubectl create secret generic backup-encryption-key \
 PITR uses WAL archiving (when backup is configured):
 
 ```bash
-# Check last backup
-kubectl get pgc my-cluster -o jsonpath='{.status.lastBackup}'
+# Check last backup status
+kubectl get pgc my-cluster -o jsonpath='{.status.backup}' | jq .
+```
+
+### Restore from Backup
+
+To restore a cluster from backup or perform point-in-time recovery, use the `restore` spec:
+
+**Restore to a specific point in time:**
+
+```yaml
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: restored-cluster
+spec:
+  version: "16"
+  replicas: 3
+  storage:
+    size: 100Gi
+  restore:
+    source:
+      type: S3
+      bucket: my-postgres-backups
+      region: us-east-1
+      credentialsSecret: aws-backup-credentials
+      encryptionKeySecret: backup-encryption-key
+    target:
+      time: "2024-01-15T10:30:00Z"
+```
+
+**Restore from a specific backup:**
+
+```yaml
+spec:
+  restore:
+    source:
+      type: S3
+      bucket: my-postgres-backups
+      region: us-east-1
+      credentialsSecret: aws-backup-credentials
+      encryptionKeySecret: backup-encryption-key
+    target:
+      backupName: base_000000010000000000000005
+      immediate: true
+```
+
+Monitor restore progress:
+
+```bash
+# Check restore status
+kubectl get pgc restored-cluster -o jsonpath='{.status.restoredFrom}' | jq .
+
+# View cluster conditions
+kubectl get pgc restored-cluster -o jsonpath='{.status.conditions}' | jq '.[] | select(.type=="Ready")'
 ```
 
 ### Disaster Recovery
@@ -236,8 +289,9 @@ kubectl get pgc my-cluster -o jsonpath='{.status.lastBackup}'
 For complete cluster loss:
 
 1. Ensure backup destination is accessible
-2. Create new cluster with same name
-3. Operator restores from latest backup (when backup restore is implemented)
+2. Create new cluster with `spec.restore` pointing to backups
+3. Operator restores from specified backup and applies PITR if configured
+4. Once restored, the `status.restoredFrom` field shows source information
 
 ## Monitoring
 
@@ -560,10 +614,191 @@ The operator creates a Certificate resource that cert-manager uses to provision 
 
 ### Network Policies
 
-Apply the sample network policy:
+Network policies can be configured directly in the cluster spec:
+
+```yaml
+spec:
+  networkPolicy:
+    enabled: true
+    allowFromNamespaces:
+      - app-namespace
+      - monitoring
+    allowExternalCidrs:
+      - 10.0.0.0/8
+```
+
+Or apply the sample network policy:
 
 ```bash
 kubectl apply -f config/samples/networkpolicy-postgresql.yaml
 ```
 
 This restricts PostgreSQL access to pods with specific labels.
+
+## Auto-Scaling with KEDA
+
+The operator supports auto-scaling read replicas using [KEDA](https://keda.sh/). This allows scaling based on CPU utilization or PostgreSQL connection count.
+
+### Prerequisites
+
+Install KEDA in your cluster:
+
+```bash
+helm repo add kedacore https://kedacore.github.io/charts
+helm install keda kedacore/keda --namespace keda --create-namespace
+```
+
+### CPU-Based Scaling
+
+Scale replicas based on CPU utilization:
+
+```yaml
+spec:
+  replicas: 3  # Initial/minimum replicas
+  scaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    cpuTargetUtilization: 70
+    scaleDownStabilization: 600  # Wait 10 min before scaling down
+```
+
+### Connection-Based Scaling
+
+Scale based on PostgreSQL connection count:
+
+```yaml
+spec:
+  scaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 15
+    connectionThreshold: 100  # Scale when connections exceed 100 per replica
+    pollingInterval: 15       # Check every 15 seconds
+```
+
+### Monitoring Scaling
+
+```bash
+# Check ScaledObject status
+kubectl get scaledobject -l postgres-operator.smoketurner.com/cluster=my-cluster
+
+# View scaling events
+kubectl describe scaledobject my-cluster-scaledobject
+
+# Check HPA (created by KEDA)
+kubectl get hpa -l postgres-operator.smoketurner.com/cluster=my-cluster
+```
+
+### Replication Lag Awareness
+
+The operator tracks replication lag in the cluster status:
+
+```bash
+# Check replication lag
+kubectl get pgc my-cluster -o jsonpath='{.status.replicationLag}' | jq .
+
+# Check if any replicas are lagging
+kubectl get pgc my-cluster -o jsonpath='{.status.replicasLagging}'
+```
+
+Replicas exceeding the lag threshold are automatically excluded from the reader service routing.
+
+## Database and Role Provisioning
+
+The `PostgresDatabase` CRD enables declarative database and role management within a cluster.
+
+### Creating a Database with Roles
+
+```yaml
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
+kind: PostgresDatabase
+metadata:
+  name: myapp-db
+spec:
+  clusterRef:
+    name: my-cluster
+  database:
+    name: myapp
+    owner: myapp_owner
+  roles:
+    - name: myapp_owner
+      privileges: [LOGIN, CREATEDB]
+      secretName: myapp-owner-credentials
+    - name: myapp_readonly
+      privileges: [LOGIN]
+      secretName: myapp-readonly-credentials
+  grants:
+    - role: myapp_readonly
+      database: myapp
+      privileges: [SELECT]
+      onTables: ALL
+  extensions:
+    - pg_stat_statements
+    - uuid-ossp
+```
+
+```bash
+kubectl apply -f myapp-db.yaml
+```
+
+### Monitor Provisioning
+
+```bash
+# Check database status
+kubectl get pgdb myapp-db
+
+# View conditions
+kubectl get pgdb myapp-db -o jsonpath='{.status.conditions}' | jq .
+
+# Verify secret was created
+kubectl get secret myapp-owner-credentials -o yaml
+```
+
+### Using Generated Credentials
+
+The operator creates secrets containing connection information:
+
+```bash
+# Get connection URI
+kubectl get secret myapp-owner-credentials -o jsonpath='{.data.uri}' | base64 -d
+
+# Use in application deployment
+env:
+  - name: DATABASE_URL
+    valueFrom:
+      secretKeyRef:
+        name: myapp-owner-credentials
+        key: uri
+```
+
+### Deleting a Database
+
+```bash
+kubectl delete pgdb myapp-db
+```
+
+**Note**: Deleting the PostgresDatabase resource removes the Kubernetes objects but does NOT drop the database or roles from PostgreSQL. This prevents accidental data loss. To fully remove the database, manually connect and run `DROP DATABASE`.
+
+## Connection Information
+
+The cluster status includes connection information for applications:
+
+```bash
+# View all connection endpoints
+kubectl get pgc my-cluster -o jsonpath='{.status.connectionInfo}' | jq .
+```
+
+Example output:
+
+```json
+{
+  "primary": "my-cluster-primary.default.svc:5432",
+  "replicas": "my-cluster-repl.default.svc:5432",
+  "pooler": "my-cluster-pooler.default.svc:6432",
+  "credentialsSecret": "my-cluster-credentials",
+  "database": "postgres"
+}
+```
+
+Use these endpoints in your application configuration for automatic service discovery.

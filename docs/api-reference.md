@@ -1,6 +1,8 @@
 # API Reference
 
-This document provides a complete reference for the PostgresCluster custom resource.
+This document provides a complete reference for the operator's custom resources:
+- [PostgresCluster](#postgrescluster) - Manages PostgreSQL clusters with high availability
+- [PostgresDatabase](#postgresdatabase) - Declarative database and role provisioning
 
 ## PostgresCluster
 
@@ -34,6 +36,9 @@ status:
 | `tls` | [TLSSpec](#tlsspec) | No | enabled=true | TLS configuration (enabled by default) |
 | `metrics` | [MetricsSpec](#metricsspec) | No | - | Metrics exporter configuration |
 | `backup` | [BackupSpec](#backupspec) | No | - | Backup configuration (encryption required) |
+| `scaling` | [ScalingSpec](#scalingspec) | No | - | KEDA auto-scaling configuration |
+| `networkPolicy` | [NetworkPolicySpec](#networkpolicyspec) | No | - | Network policy configuration |
+| `restore` | [RestoreSpec](#restorespec) | No | - | Restore from backup configuration |
 
 ### StorageSpec
 
@@ -325,6 +330,127 @@ backup:
     keySecret: backup-encryption-key
 ```
 
+### ScalingSpec
+
+KEDA-based auto-scaling configuration. Requires [KEDA](https://keda.sh/) to be installed in the cluster.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean | No | false | Enable auto-scaling |
+| `minReplicas` | integer | No | 1 | Minimum replica count |
+| `maxReplicas` | integer | No | 10 | Maximum replica count |
+| `cpuTargetUtilization` | integer | No | - | CPU utilization target (percentage) |
+| `connectionThreshold` | integer | No | - | Connection count threshold for scaling |
+| `scaleDownStabilization` | integer | No | 300 | Seconds to wait before scaling down |
+| `pollingInterval` | integer | No | 30 | Seconds between metric checks |
+| `cooldownPeriod` | integer | No | 300 | Cooldown after scaling event |
+
+**Example (CPU-based scaling):**
+
+```yaml
+scaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  cpuTargetUtilization: 70
+  scaleDownStabilization: 600
+```
+
+**Example (Connection-based scaling):**
+
+```yaml
+scaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 15
+  connectionThreshold: 100
+  pollingInterval: 15
+```
+
+### NetworkPolicySpec
+
+Network policy configuration for cluster access control.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean | No | false | Enable NetworkPolicy generation |
+| `allowFromNamespaces` | []string | No | - | Namespaces allowed to access the cluster |
+| `allowFromPodSelector` | map[string]string | No | - | Pod labels allowed to access |
+| `allowExternalCidrs` | []string | No | - | External CIDR ranges allowed |
+| `denyEgress` | boolean | No | false | Deny all egress except DNS |
+
+**Example:**
+
+```yaml
+networkPolicy:
+  enabled: true
+  allowFromNamespaces:
+    - app-namespace
+    - monitoring
+  allowExternalCidrs:
+    - 10.0.0.0/8
+```
+
+### RestoreSpec
+
+Configuration for restoring from a backup. Used for point-in-time recovery (PITR) or creating a new cluster from an existing backup.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `source` | [RestoreSource](#restoresource) | Yes | - | Backup source configuration |
+| `target` | [RestoreTarget](#restoretarget) | No | - | Recovery target (time, backup name, etc.) |
+
+### RestoreSource
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | Yes | Source type: S3, GCS, Azure |
+| `bucket` | string | S3/GCS | Bucket containing backups |
+| `region` | string | S3 | AWS region |
+| `endpoint` | string | No | Custom S3-compatible endpoint |
+| `container` | string | Azure | Azure blob container |
+| `storageAccount` | string | Azure | Azure storage account |
+| `credentialsSecret` | string | Yes | Secret with cloud credentials |
+| `encryptionKeySecret` | string | Yes | Secret with encryption key |
+| `path` | string | No | Path prefix within bucket |
+
+### RestoreTarget
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `time` | string | Point-in-time target (RFC3339 timestamp) |
+| `backupName` | string | Specific backup name to restore |
+| `timeline` | integer | PostgreSQL timeline to restore to |
+| `immediate` | boolean | Restore to end of backup (no PITR) |
+
+**Example (point-in-time recovery):**
+
+```yaml
+restore:
+  source:
+    type: S3
+    bucket: my-postgres-backups
+    region: us-east-1
+    credentialsSecret: aws-backup-credentials
+    encryptionKeySecret: backup-encryption-key
+  target:
+    time: "2024-01-15T10:30:00Z"
+```
+
+**Example (restore from specific backup):**
+
+```yaml
+restore:
+  source:
+    type: GCS
+    bucket: my-postgres-backups
+    credentialsSecret: gcs-backup-credentials
+    encryptionKeySecret: backup-encryption-key
+  target:
+    backupName: base_000000010000000000000005
+    immediate: true
+```
+
 ## Status
 
 The status subresource is read-only and managed by the operator.
@@ -338,7 +464,7 @@ The status subresource is read-only and managed by the operator.
 | `replicaPods` | []string | Names of replica pods |
 | `conditions` | [][Condition](#condition) | Kubernetes-style conditions |
 | `observedGeneration` | integer | Last observed spec generation |
-| `lastBackup` | string | Timestamp of last successful backup |
+| `backup` | [BackupStatus](#backupstatus) | Backup status information |
 | `currentVersion` | string | Running PostgreSQL version |
 | `tlsEnabled` | boolean | Whether TLS is currently enabled |
 | `pgbouncerEnabled` | boolean | Whether PgBouncer is currently enabled |
@@ -349,8 +475,13 @@ The status subresource is read-only and managed by the operator.
 | `phaseStartedAt` | string | When current phase started |
 | `previousReplicas` | integer | Previous replica count |
 | `pods` | [][PodInfo](#podinfo) | Per-pod tracking info (K8s 1.35+) |
-| `resize_status` | [][PodResourceResizeStatus](#podresourceresizestatus) | Resource resize status (K8s 1.35+) |
-| `all_pods_synced` | boolean | True when all pods have applied current spec (K8s 1.35+) |
+| `resizeStatus` | [][PodResourceResizeStatus](#podresourceresizestatus) | Resource resize status (K8s 1.35+) |
+| `allPodsSynced` | boolean | True when all pods have applied current spec (K8s 1.35+) |
+| `restoredFrom` | [RestoredFromInfo](#restoredfrominfo) | Source backup info if restored |
+| `replicationLag` | [][ReplicaLagInfo](#replicalaginfo) | Per-replica replication lag |
+| `maxReplicationLagBytes` | integer | Maximum lag across all replicas (bytes) |
+| `replicasLagging` | boolean | Whether any replica exceeds lag threshold |
+| `connectionInfo` | [ConnectionInfo](#connectioninfo) | Connection endpoints for applications |
 
 ### Phase Values
 
@@ -387,6 +518,7 @@ The status subresource is read-only and managed by the operator.
 | ConfigurationValid | Spec passes validation |
 | ReplicasReady | All replicas synchronized |
 | PodGenerationSynced | All pods have applied their spec (K8s 1.35+) |
+| ResourceResizeInProgress | In-place resource resize in progress (K8s 1.35+) |
 
 ### PodInfo
 
@@ -418,6 +550,65 @@ Per-pod resource resize status (Kubernetes 1.35+).
 | Proposed | Resize requested, waiting for kubelet |
 | InProgress | Kubelet is applying the resize |
 | Infeasible | Cannot resize (insufficient node resources) |
+
+### BackupStatus
+
+Backup status information.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `lastBackupTime` | string | Timestamp of last successful backup (RFC3339) |
+| `lastBackupSizeBytes` | integer | Size of last backup in bytes |
+| `lastBackupName` | string | Name/identifier of last backup |
+
+### RestoredFromInfo
+
+Information about the backup a cluster was restored from.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `backupName` | string | Name of the backup restored from |
+| `sourceCluster` | string | Name of the source cluster |
+| `restoreTime` | string | Time of restore completion (RFC3339) |
+| `pitrTarget` | string | Point-in-time recovery target if used |
+
+### ReplicaLagInfo
+
+Replication lag information for a single replica.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `podName` | string | Name of the replica pod |
+| `lagBytes` | integer | Replication lag in bytes |
+| `lagTime` | string | Replication lag as duration (e.g., "1.5s") |
+| `exceedsThreshold` | boolean | Whether replica exceeds configured lag threshold |
+| `lastMeasured` | string | Last measurement timestamp (RFC3339) |
+| `state` | string | Replication state (streaming, catchup, etc.) |
+
+### ConnectionInfo
+
+Connection information for applications.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `primary` | string | Primary (read-write) service endpoint |
+| `replicas` | string | Replica (read-only) service endpoint |
+| `pooler` | string | PgBouncer primary pooler endpoint (if enabled) |
+| `poolerReplicas` | string | PgBouncer replica pooler endpoint (if enabled) |
+| `credentialsSecret` | string | Name of Secret containing credentials |
+| `database` | string | Default database name |
+
+**Example connection info in status:**
+
+```yaml
+status:
+  connectionInfo:
+    primary: my-cluster-primary.default.svc:5432
+    replicas: my-cluster-repl.default.svc:5432
+    pooler: my-cluster-pooler.default.svc:6432
+    credentialsSecret: my-cluster-credentials
+    database: postgres
+```
 
 ## Full Example
 
@@ -565,3 +756,123 @@ Patroni manages these labels on pods:
 |-------|-------------|
 | `application` | "spilo" |
 | `spilo-role` | "master" or "replica" |
+
+---
+
+## PostgresDatabase
+
+The `PostgresDatabase` resource enables declarative database and role provisioning within a PostgresCluster.
+
+```yaml
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
+kind: PostgresDatabase
+metadata:
+  name: my-app-db
+spec:
+  clusterRef:
+    name: my-cluster
+  database:
+    name: myapp
+    owner: myapp_owner
+  roles:
+    - name: myapp_owner
+      privileges: [LOGIN, CREATEDB]
+      secretName: myapp-owner-credentials
+    - name: myapp_readonly
+      privileges: [LOGIN]
+      secretName: myapp-readonly-credentials
+  grants:
+    - role: myapp_readonly
+      database: myapp
+      privileges: [SELECT]
+      onTables: ALL
+  extensions:
+    - pg_stat_statements
+    - uuid-ossp
+```
+
+### PostgresDatabaseSpec
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `clusterRef` | [ClusterRef](#clusterref) | Yes | Reference to the parent PostgresCluster |
+| `database` | [DatabaseSpec](#databasespec) | Yes | Database to create |
+| `roles` | [][RoleSpec](#rolespec) | No | Roles to create with credentials |
+| `grants` | [][GrantSpec](#grantspec) | No | Permission grants to apply |
+| `extensions` | []string | No | PostgreSQL extensions to enable |
+
+### ClusterRef
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | Yes | Name of the PostgresCluster |
+| `namespace` | string | No | Namespace (defaults to same namespace) |
+
+### DatabaseSpec
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | Yes | - | Database name |
+| `owner` | string | Yes | - | Owner role for the database |
+| `encoding` | string | No | UTF8 | Database encoding |
+| `locale` | string | No | - | Database locale |
+| `connectionLimit` | integer | No | -1 | Connection limit (-1 = unlimited) |
+
+### RoleSpec
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | Yes | Role name |
+| `privileges` | []string | No | Role privileges (LOGIN, CREATEDB, CREATEROLE, SUPERUSER) |
+| `secretName` | string | No | Secret name for generated credentials |
+| `connectionLimit` | integer | No | Connection limit for this role |
+| `validUntil` | string | No | Password expiration (RFC3339) |
+
+### GrantSpec
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `role` | string | Yes | Role to grant privileges to |
+| `database` | string | Yes | Target database |
+| `privileges` | []string | Yes | Privileges to grant (SELECT, INSERT, UPDATE, DELETE, ALL) |
+| `onTables` | string | No | Tables to grant on (ALL or specific table) |
+| `onSchema` | string | No | Schema for grants (default: public) |
+
+### PostgresDatabaseStatus
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `phase` | string | Current phase (Pending, Creating, Ready, Failed) |
+| `conditions` | []Condition | Kubernetes-style conditions |
+| `provisioned` | boolean | Whether database is provisioned |
+| `secretName` | string | Name of generated credentials secret |
+
+### Generated Secrets
+
+For each role with `secretName` specified, the operator creates a Secret containing:
+
+| Key | Description |
+|-----|-------------|
+| `username` | Role name |
+| `password` | Generated password |
+| `host` | Primary service hostname |
+| `port` | PostgreSQL port (5432) |
+| `database` | Database name |
+| `uri` | Full connection URI |
+
+**Example generated secret:**
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: myapp-owner-credentials
+type: Opaque
+stringData:
+  username: myapp_owner
+  password: <generated>
+  host: my-cluster-primary.default.svc
+  port: "5432"
+  database: myapp
+  uri: postgresql://myapp_owner:<password>@my-cluster-primary.default.svc:5432/myapp
+```
