@@ -183,9 +183,10 @@ async fn resolve_service_to_pod(
     // For this operator, services select pods in the StatefulSet with the same name pattern
 
     // First, try to find pods with the cluster label that match the service
-    // The service name pattern is: {cluster}-primary, {cluster}-repl, {cluster}-pooler
+    // The service name pattern is: {cluster}-primary, {cluster}-repl, {cluster}-pooler, {cluster}-pooler-repl
     let cluster_name = service_name
-        .strip_suffix("-primary")
+        .strip_suffix("-pooler-repl")
+        .or_else(|| service_name.strip_suffix("-primary"))
         .or_else(|| service_name.strip_suffix("-repl"))
         .or_else(|| service_name.strip_suffix("-pooler"))
         .unwrap_or(service_name);
@@ -193,7 +194,13 @@ async fn resolve_service_to_pod(
     let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
 
     // For primary service, look for the pod with spilo-role=master label
-    let label_selector = if service_name.ends_with("-primary") {
+    let label_selector = if service_name.ends_with("-pooler-repl") {
+        // Replica PgBouncer pooler
+        format!(
+            "postgres-operator.smoketurner.com/cluster={},app.kubernetes.io/component=pgbouncer,postgres-operator.smoketurner.com/pooler-type=replica",
+            cluster_name
+        )
+    } else if service_name.ends_with("-primary") {
         format!(
             "postgres-operator.smoketurner.com/cluster={},spilo-role=master",
             cluster_name
@@ -204,8 +211,9 @@ async fn resolve_service_to_pod(
             cluster_name
         )
     } else if service_name.ends_with("-pooler") {
+        // Primary PgBouncer pooler (doesn't have pooler-type label)
         format!(
-            "postgres-operator.smoketurner.com/cluster={},app.kubernetes.io/component=pgbouncer",
+            "postgres-operator.smoketurner.com/cluster={},app.kubernetes.io/component=pgbouncer,!postgres-operator.smoketurner.com/pooler-type",
             cluster_name
         )
     } else {

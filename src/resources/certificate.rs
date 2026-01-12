@@ -193,6 +193,181 @@ pub fn generate_certificate(cluster: &PostgresCluster) -> Option<Certificate> {
     })
 }
 
+/// Generate a cert-manager Certificate resource for the PgBouncer primary pooler
+///
+/// Returns None if TLS is disabled, no issuerRef is configured, or PgBouncer is not enabled.
+pub fn generate_pgbouncer_certificate(cluster: &PostgresCluster) -> Option<Certificate> {
+    let tls = &cluster.spec.tls;
+
+    // Only generate if TLS is enabled and issuerRef is configured
+    if !tls.enabled {
+        return None;
+    }
+
+    let issuer_ref = tls.issuer_ref.as_ref()?;
+
+    // Only generate if PgBouncer is enabled
+    let pgbouncer = cluster.spec.pgbouncer.as_ref()?;
+    if !pgbouncer.enabled {
+        return None;
+    }
+
+    let cluster_name = cluster.metadata.name.as_ref()?;
+    let namespace = cluster.metadata.namespace.as_ref()?;
+
+    let pooler_name = format!("{}-pooler", cluster_name);
+    let secret_name = format!("{}-tls", pooler_name);
+
+    // Build DNS names for the PgBouncer pooler certificate
+    let dns_names = vec![
+        pooler_name.clone(),
+        format!("{}.{}", pooler_name, namespace),
+        format!("{}.{}.svc", pooler_name, namespace),
+        format!("{}.{}.svc.cluster.local", pooler_name, namespace),
+    ];
+
+    // Build labels for the secret
+    let mut labels = standard_labels(cluster_name);
+    labels.insert(
+        "app.kubernetes.io/component".to_string(),
+        "pgbouncer-tls".to_string(),
+    );
+
+    let cert_issuer_ref = CertIssuerRef {
+        name: issuer_ref.name.clone(),
+        kind: issuer_ref.kind.to_string(),
+        group: issuer_ref.group.clone(),
+    };
+
+    let spec = CertificateSpec {
+        secret_name,
+        issuer_ref: cert_issuer_ref,
+        dns_names,
+        duration: tls.duration.clone(),
+        renew_before: tls.renew_before.clone(),
+        secret_template: Some(SecretTemplate {
+            labels: labels.clone(),
+            annotations: BTreeMap::new(),
+        }),
+        private_key: Some(PrivateKeySpec {
+            algorithm: Some("RSA".to_string()),
+            size: Some(4096),
+            encoding: Some("PKCS8".to_string()),
+            rotation_policy: Some("Always".to_string()),
+        }),
+        usages: vec![
+            "server auth".to_string(),
+            "digital signature".to_string(),
+            "key encipherment".to_string(),
+        ],
+    };
+
+    Some(Certificate {
+        api_version: "cert-manager.io/v1".to_string(),
+        kind: "Certificate".to_string(),
+        metadata: ObjectMeta {
+            name: Some(format!("{}-pooler-tls", cluster_name)),
+            namespace: Some(namespace.clone()),
+            labels: Some(labels),
+            owner_references: Some(vec![owner_reference(cluster)]),
+            annotations: Some(BTreeMap::from([(
+                "postgres-operator.smoketurner.com/managed-by".to_string(),
+                FIELD_MANAGER.to_string(),
+            )])),
+            ..Default::default()
+        },
+        spec,
+    })
+}
+
+/// Generate a cert-manager Certificate resource for the PgBouncer replica pooler
+///
+/// Returns None if TLS is disabled, no issuerRef is configured, PgBouncer is not enabled,
+/// or replica pooler is not enabled.
+pub fn generate_pgbouncer_replica_certificate(cluster: &PostgresCluster) -> Option<Certificate> {
+    let tls = &cluster.spec.tls;
+
+    // Only generate if TLS is enabled and issuerRef is configured
+    if !tls.enabled {
+        return None;
+    }
+
+    let issuer_ref = tls.issuer_ref.as_ref()?;
+
+    // Only generate if PgBouncer and replica pooler are enabled
+    let pgbouncer = cluster.spec.pgbouncer.as_ref()?;
+    if !pgbouncer.enabled || !pgbouncer.enable_replica_pooler {
+        return None;
+    }
+
+    let cluster_name = cluster.metadata.name.as_ref()?;
+    let namespace = cluster.metadata.namespace.as_ref()?;
+
+    let pooler_name = format!("{}-pooler-repl", cluster_name);
+    let secret_name = format!("{}-tls", pooler_name);
+
+    // Build DNS names for the PgBouncer replica pooler certificate
+    let dns_names = vec![
+        pooler_name.clone(),
+        format!("{}.{}", pooler_name, namespace),
+        format!("{}.{}.svc", pooler_name, namespace),
+        format!("{}.{}.svc.cluster.local", pooler_name, namespace),
+    ];
+
+    // Build labels for the secret
+    let mut labels = standard_labels(cluster_name);
+    labels.insert(
+        "app.kubernetes.io/component".to_string(),
+        "pgbouncer-replica-tls".to_string(),
+    );
+
+    let cert_issuer_ref = CertIssuerRef {
+        name: issuer_ref.name.clone(),
+        kind: issuer_ref.kind.to_string(),
+        group: issuer_ref.group.clone(),
+    };
+
+    let spec = CertificateSpec {
+        secret_name,
+        issuer_ref: cert_issuer_ref,
+        dns_names,
+        duration: tls.duration.clone(),
+        renew_before: tls.renew_before.clone(),
+        secret_template: Some(SecretTemplate {
+            labels: labels.clone(),
+            annotations: BTreeMap::new(),
+        }),
+        private_key: Some(PrivateKeySpec {
+            algorithm: Some("RSA".to_string()),
+            size: Some(4096),
+            encoding: Some("PKCS8".to_string()),
+            rotation_policy: Some("Always".to_string()),
+        }),
+        usages: vec![
+            "server auth".to_string(),
+            "digital signature".to_string(),
+            "key encipherment".to_string(),
+        ],
+    };
+
+    Some(Certificate {
+        api_version: "cert-manager.io/v1".to_string(),
+        kind: "Certificate".to_string(),
+        metadata: ObjectMeta {
+            name: Some(format!("{}-pooler-repl-tls", cluster_name)),
+            namespace: Some(namespace.clone()),
+            labels: Some(labels),
+            owner_references: Some(vec![owner_reference(cluster)]),
+            annotations: Some(BTreeMap::from([(
+                "postgres-operator.smoketurner.com/managed-by".to_string(),
+                FIELD_MANAGER.to_string(),
+            )])),
+            ..Default::default()
+        },
+        spec,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

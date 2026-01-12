@@ -857,6 +857,16 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
     if pgbouncer::is_pgbouncer_enabled(cluster) {
         info!("PgBouncer is enabled for cluster {}", name);
 
+        // Apply PgBouncer TLS certificate if TLS is enabled
+        // This must be done before the deployment so the secret is ready
+        if let Some(cert) = certificate::generate_pgbouncer_certificate(cluster) {
+            apply_certificate(ctx, ns, &cert).await?;
+            debug!(
+                "Applied cert-manager Certificate for PgBouncer pooler {}",
+                name
+            );
+        }
+
         // Apply PgBouncer ConfigMap
         let pgbouncer_config = pgbouncer::generate_pgbouncer_configmap(cluster);
         apply_resource(ctx, ns, &pgbouncer_config).await?;
@@ -883,6 +893,15 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
         // Apply replica pooler if enabled
         if pgbouncer::is_replica_pooler_enabled(cluster) {
             info!("Replica PgBouncer pooler is enabled for cluster {}", name);
+
+            // Apply replica PgBouncer TLS certificate if TLS is enabled
+            if let Some(cert) = certificate::generate_pgbouncer_replica_certificate(cluster) {
+                apply_certificate(ctx, ns, &cert).await?;
+                debug!(
+                    "Applied cert-manager Certificate for PgBouncer replica pooler {}",
+                    name
+                );
+            }
 
             let pgbouncer_replica_config = pgbouncer::generate_pgbouncer_replica_configmap(cluster);
             apply_resource(ctx, ns, &pgbouncer_replica_config).await?;

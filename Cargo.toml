@@ -1,6 +1,6 @@
 [package]
 name = "postgres-operator"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.92"
 description = "A Kubernetes operator for managing PostgreSQL clusters"
@@ -56,7 +56,7 @@ tracing-subscriber = { version = "=0.3.22", default-features = false, features =
 
 # HTTP server for health endpoints and metrics
 axum = { version = "=0.8.8", default-features = false, features = ["http1", "tokio", "json"] }
-axum-server = { version = "=0.7.3", default-features = false, features = ["tls-rustls-no-provider"] }
+axum-server = { version = "=0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
 prometheus-client = { version = "=0.24.0", default-features = false }
 rustls-pemfile = { version = "=2.2.0", default-features = false, features = ["std"] }
 
@@ -81,7 +81,9 @@ hostname = { version = "=0.4.2", default-features = false }
 
 [dev-dependencies]
 tokio-test = { version = "=0.4.5", default-features = false }
-tokio-postgres = { version = "=0.7.13", default-features = false, features = ["runtime"] }
+tokio-postgres = { version = "=0.7.15", default-features = false, features = ["runtime"] }
+tokio-postgres-rustls = { version = "=0.13.0", default-features = false }
+rustls-pki-types = { version = "=1.13.2", default-features = false, features = ["std"] }
 uuid = { version = "=1.19.0", default-features = false, features = ["v4"] }
 serde_yaml = { version = "=0.9.34", default-features = false }
 proptest = { version = "=1.9.0", default-features = false, features = ["std"] }

@@ -35,6 +35,7 @@ mod wait;
 // Test modules
 mod connectivity_tests;
 mod functional_tests;
+mod tls_tests;
 
 // Re-export common test utilities
 pub use assertions::*;
