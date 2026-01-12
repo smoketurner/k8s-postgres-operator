@@ -99,7 +99,6 @@ mod tests {
                 endpoint: None,
                 credentials_secret: "aws-creds".to_string(),
                 path: None,
-                disable_sse: false,
                 force_path_style: false,
             },
             encryption: Some(EncryptionSpec {

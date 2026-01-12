@@ -490,15 +490,23 @@ mod tls_statefulset_tests {
     use super::*;
 
     #[test]
-    fn test_tls_disabled_no_volumes() {
+    fn test_tls_disabled_no_tls_volume() {
         let cluster = create_test_cluster("my-cluster", "default", 1);
         let sts = patroni::generate_patroni_statefulset(&cluster, false);
 
         let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
-        let volumes = pod_spec.volumes.as_ref();
+        let volumes = pod_spec.volumes.as_ref().unwrap();
 
-        // Without TLS, should have no volumes (or empty)
-        assert!(volumes.is_none() || volumes.unwrap().is_empty());
+        // Without TLS, should have only the tmp volume (no tls-certs volume)
+        assert!(
+            !volumes.iter().any(|v| v.name == "tls-certs"),
+            "TLS volume should not exist when TLS is disabled"
+        );
+        // Should have the tmp volume for Spilo
+        assert!(
+            volumes.iter().any(|v| v.name == "tmp"),
+            "tmp volume should exist"
+        );
     }
 
     #[test]

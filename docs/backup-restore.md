@@ -40,7 +40,7 @@ The operator integrates with [WAL-G](https://github.com/wal-g/wal-g) through the
                                               ▼
                     ┌───────────────────────────────────────────┐
                     │          Cloud Storage                    │
-                    │  (S3 / GCS / Azure Blob)                  │
+                    │  (S3 / S3-compatible storage)             │
                     │                                           │
                     │  /{namespace}/{cluster-name}/             │
                     │  ├── basebackups/                         │
@@ -83,12 +83,12 @@ spec:
       count: 7           # Keep 7 most recent base backups
       maxAge: "30d"      # Also delete backups older than 30 days
 
-    # Required: Where to store backups
+    # Required: Where to store backups (S3 or S3-compatible storage)
     destination:
-      type: S3           # S3, GCS, or Azure
-      bucket: my-backups
-      region: us-east-1
-      credentialsSecret: aws-credentials
+      S3:
+        bucket: my-backups
+        region: us-east-1
+        credentialsSecret: aws-credentials
 
     # Required: Encryption for backups at rest
     encryption:
@@ -182,103 +182,16 @@ retention:
      retention:
        count: 7
      destination:
-       type: S3
-       bucket: my-postgres-backups
-       region: us-east-1
-       credentialsSecret: aws-backup-credentials
+       S3:
+         bucket: my-postgres-backups
+         region: us-east-1
+         credentialsSecret: aws-backup-credentials
      encryption:
        method: aes256
        keySecret: backup-encryption-key
    ```
 
-### Google Cloud Storage
-
-1. **Create a GCS bucket:**
-   ```bash
-   gsutil mb gs://my-postgres-backups
-   ```
-
-2. **Create service account:**
-   ```bash
-   gcloud iam service-accounts create postgres-backup
-
-   gcloud projects add-iam-policy-binding PROJECT_ID \
-     --member="serviceAccount:postgres-backup@PROJECT_ID.iam.gserviceaccount.com" \
-     --role="roles/storage.objectAdmin"
-
-   gcloud iam service-accounts keys create key.json \
-     --iam-account=postgres-backup@PROJECT_ID.iam.gserviceaccount.com
-   ```
-
-3. **Create Kubernetes secret:**
-   ```bash
-   kubectl create secret generic gcs-backup-credentials \
-     --from-file=GOOGLE_APPLICATION_CREDENTIALS=./key.json
-   ```
-
-4. **Create encryption key secret:**
-   ```bash
-   kubectl create secret generic backup-encryption-key \
-     --from-literal=WALG_LIBSODIUM_KEY=$(openssl rand -hex 32)
-   ```
-
-5. **Configure backup:**
-   ```yaml
-   backup:
-     schedule: "0 2 * * *"
-     retention:
-       count: 7
-     destination:
-       type: GCS
-       bucket: my-postgres-backups
-       credentialsSecret: gcs-backup-credentials
-     encryption:
-       method: aes256
-       keySecret: backup-encryption-key
-   ```
-
-### Azure Blob Storage
-
-1. **Create storage account and container:**
-   ```bash
-   az storage account create --name mypostgresbackups --resource-group mygroup
-   az storage container create --name backups --account-name mypostgresbackups
-   ```
-
-2. **Get storage key:**
-   ```bash
-   az storage account keys list --account-name mypostgresbackups
-   ```
-
-3. **Create Kubernetes secret:**
-   ```bash
-   kubectl create secret generic azure-backup-credentials \
-     --from-literal=AZURE_STORAGE_ACCESS_KEY=<storage-key>
-   ```
-
-4. **Create encryption key secret:**
-   ```bash
-   kubectl create secret generic backup-encryption-key \
-     --from-literal=WALG_LIBSODIUM_KEY=$(openssl rand -hex 32)
-   ```
-
-5. **Configure backup:**
-   ```yaml
-   backup:
-     schedule: "0 2 * * *"
-     retention:
-       count: 7
-     destination:
-       type: Azure
-       container: backups
-       storageAccount: mypostgresbackups
-       credentialsSecret: azure-backup-credentials
-     encryption:
-       method: aes256
-       keySecret: backup-encryption-key
-   ```
-
-### S3-Compatible Storage (MinIO, Ceph, etc.)
+### S3-Compatible Storage (MinIO, Ceph, DigitalOcean Spaces, etc.)
 
 ```yaml
 backup:
@@ -286,13 +199,12 @@ backup:
   retention:
     count: 7
   destination:
-    type: S3
-    bucket: postgres-backups
-    region: us-east-1  # Required but can be any value
-    endpoint: "http://minio.minio-system.svc:9000"
-    credentialsSecret: minio-credentials
-    forcePathStyle: true   # Required for most S3-compatible storage
-    disableSse: true       # Disable AWS SSE
+    S3:
+      bucket: postgres-backups
+      region: us-east-1  # Required but can be any value
+      endpoint: "http://minio.minio-system.svc:9000"
+      credentialsSecret: minio-credentials
+      forcePathStyle: true   # Required for most S3-compatible storage
   encryption:
     method: aes256
     keySecret: backup-encryption-key

@@ -270,17 +270,18 @@ kubectl create secret generic backup-encryption-key \
 
 ### BackupDestination
 
+Supports S3 and S3-compatible storage (e.g., MinIO, DigitalOcean Spaces).
+
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `type` | string | Yes | Destination type: S3, GCS, Azure |
-| `bucket` | string | S3/GCS | Bucket name |
-| `region` | string | S3 | AWS region |
-| `endpoint` | string | No | Custom S3-compatible endpoint |
-| `container` | string | Azure | Azure blob container name |
-| `storageAccount` | string | Azure | Azure storage account name |
-| `credentialsSecret` | string | Yes | Secret with cloud credentials |
+| `bucket` | string | Yes | S3 bucket name |
+| `region` | string | Yes | AWS region (e.g., "us-east-1") |
+| `endpoint` | string | No | Custom S3-compatible endpoint URL |
+| `credentialsSecret` | string | Yes | Secret with AWS credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY) |
+| `path` | string | No | Custom path prefix within bucket (default: namespace/cluster-name) |
+| `forcePathStyle` | boolean | No | Force path-style URLs (required for some S3-compatible storage) |
 
-**Example (S3):**
+**Example (AWS S3):**
 
 ```yaml
 backup:
@@ -288,43 +289,29 @@ backup:
   retention:
     count: 7
   destination:
-    type: S3
-    bucket: my-postgres-backups
-    region: us-east-1
-    credentialsSecret: aws-backup-credentials
+    S3:
+      bucket: my-postgres-backups
+      region: us-east-1
+      credentialsSecret: aws-backup-credentials
   encryption:
     method: aes256
     keySecret: backup-encryption-key
 ```
 
-**Example (GCS):**
+**Example (MinIO / S3-compatible):**
 
 ```yaml
 backup:
   schedule: "0 2 * * *"
   retention:
-    maxAge: "30d"
+    count: 7
   destination:
-    type: GCS
-    bucket: my-postgres-backups
-    credentialsSecret: gcs-backup-credentials
-  encryption:
-    method: aes256
-    keySecret: backup-encryption-key
-```
-
-**Example (Azure):**
-
-```yaml
-backup:
-  schedule: "0 2 * * *"
-  retention:
-    count: 14
-  destination:
-    type: Azure
-    container: postgres-backups
-    storageAccount: mystorageaccount
-    credentialsSecret: azure-backup-credentials
+    S3:
+      bucket: postgres-backups
+      region: us-east-1
+      endpoint: "https://minio.example.com:9000"
+      credentialsSecret: minio-credentials
+      forcePathStyle: true
   encryption:
     method: aes256
     keySecret: backup-encryption-key
@@ -402,17 +389,14 @@ Configuration for restoring from a backup. Used for point-in-time recovery (PITR
 
 ### RestoreSource
 
+Supports restoring from S3 and S3-compatible storage.
+
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `type` | string | Yes | Source type: S3, GCS, Azure |
-| `bucket` | string | S3/GCS | Bucket containing backups |
-| `region` | string | S3 | AWS region |
+| `prefix` | string | Yes | Full S3 prefix path (e.g., "s3://bucket/path/to/backup") |
+| `region` | string | Yes | AWS region |
 | `endpoint` | string | No | Custom S3-compatible endpoint |
-| `container` | string | Azure | Azure blob container |
-| `storageAccount` | string | Azure | Azure storage account |
 | `credentialsSecret` | string | Yes | Secret with cloud credentials |
-| `encryptionKeySecret` | string | Yes | Secret with encryption key |
-| `path` | string | No | Path prefix within bucket |
 
 ### RestoreTarget
 
@@ -421,19 +405,17 @@ Configuration for restoring from a backup. Used for point-in-time recovery (PITR
 | `time` | string | Point-in-time target (RFC3339 timestamp) |
 | `backupName` | string | Specific backup name to restore |
 | `timeline` | integer | PostgreSQL timeline to restore to |
-| `immediate` | boolean | Restore to end of backup (no PITR) |
 
 **Example (point-in-time recovery):**
 
 ```yaml
 restore:
   source:
-    type: S3
-    bucket: my-postgres-backups
-    region: us-east-1
-    credentialsSecret: aws-backup-credentials
-    encryptionKeySecret: backup-encryption-key
-  target:
+    s3:
+      prefix: s3://my-postgres-backups/prod/source-cluster
+      region: us-east-1
+      credentialsSecret: aws-backup-credentials
+  recoveryTarget:
     time: "2024-01-15T10:30:00Z"
 ```
 
@@ -442,13 +424,12 @@ restore:
 ```yaml
 restore:
   source:
-    type: GCS
-    bucket: my-postgres-backups
-    credentialsSecret: gcs-backup-credentials
-    encryptionKeySecret: backup-encryption-key
-  target:
-    backupName: base_000000010000000000000005
-    immediate: true
+    s3:
+      prefix: s3://my-postgres-backups/prod/source-cluster
+      region: us-east-1
+      credentialsSecret: aws-backup-credentials
+  recoveryTarget:
+    backup: base_000000010000000000000005
 ```
 
 ## Status
@@ -715,10 +696,8 @@ The CRD includes CEL validation rules:
 5. **Backup encryption**: Required if backup is configured
 6. **TLS issuerRef**: Required if TLS is enabled (default)
 7. **S3 destination**: Requires bucket, region, credentialsSecret
-8. **GCS destination**: Requires bucket, credentialsSecret
-9. **Azure destination**: Requires container, storageAccount, credentialsSecret
-10. **NodePort**: Only valid when service type is NodePort
-11. **LoadBalancer ranges**: Only valid when service type is LoadBalancer
+8. **NodePort**: Only valid when service type is NodePort
+9. **LoadBalancer ranges**: Only valid when service type is LoadBalancer
 
 ## Labels and Annotations
 

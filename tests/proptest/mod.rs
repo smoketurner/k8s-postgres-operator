@@ -1506,7 +1506,6 @@ mod webhook_policy_tests {
                 endpoint: None,
                 credentials_secret: "aws-creds".to_string(),
                 path: None,
-                disable_sse: false,
                 force_path_style: false,
             },
             encryption: if has_encryption {

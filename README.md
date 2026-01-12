@@ -10,7 +10,7 @@ A Kubernetes operator for managing PostgreSQL clusters with high availability us
 - **In-Place Resource Resizing**: CPU/memory changes without pod restarts (Kubernetes 1.35+)
 - **Connection Pooling**: Optional PgBouncer sidecar for connection pooling
 - **TLS by Default**: Encrypted connections with automatic cert-manager integration
-- **Cloud Backups**: Continuous WAL archiving and scheduled base backups to S3, GCS, or Azure with point-in-time recovery (PITR)
+- **Cloud Backups**: Continuous WAL archiving and scheduled base backups to S3 or S3-compatible storage with point-in-time recovery (PITR)
 - **Metrics**: Prometheus-compatible metrics endpoint
 - **Zero-Downtime Updates**: Rolling updates with PodDisruptionBudgets
 

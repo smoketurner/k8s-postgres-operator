@@ -1006,7 +1006,8 @@ pub fn is_replica_pooler_enabled(cluster: &PostgresCluster) -> bool {
 ///
 /// PgBouncer is stateless so we always use NotRequired (in-place resize).
 ///
-/// TODO(k8s-openapi-upgrade): Remove this function when k8s-openapi supports v1_35.
+/// TODO(k8s-openapi-upgrade): Remove this function when upgrading to k8s-openapi 0.27+ with v1_35.
+/// See Cargo.toml for upgrade blockers and full migration plan.
 /// Instead, add resizePolicy directly in generate_pgbouncer_deployment() using:
 /// ```ignore
 /// use k8s_openapi::api::core::v1::ContainerResizePolicy;

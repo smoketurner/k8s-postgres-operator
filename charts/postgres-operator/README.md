@@ -162,16 +162,12 @@ Once the operator is installed, you can create PostgresCluster resources. Below 
 | `schedule` | Cron schedule for base backups (e.g., "0 2 * * *") |
 | `retention.count` | Number of backups to retain |
 | `retention.maxAge` | Maximum backup age (e.g., "30d") |
-| `destination.type` | Storage type: S3, GCS, or Azure |
-| `destination.bucket` | Bucket name (S3/GCS) |
-| `destination.region` | AWS region (S3) |
-| `destination.container` | Container name (Azure) |
-| `destination.storageAccount` | Storage account (Azure) |
-| `destination.credentialsSecret` | Secret with cloud credentials |
-| `destination.path` | Path prefix within bucket |
-| `destination.endpoint` | Custom S3-compatible endpoint |
-| `destination.forcePathStyle` | Force path-style URLs for S3 |
-| `destination.disableSse` | Disable S3 server-side encryption |
+| `destination.S3.bucket` | S3 bucket name |
+| `destination.S3.region` | AWS region |
+| `destination.S3.credentialsSecret` | Secret with AWS credentials |
+| `destination.S3.path` | Path prefix within bucket |
+| `destination.S3.endpoint` | Custom S3-compatible endpoint |
+| `destination.S3.forcePathStyle` | Force path-style URLs (for MinIO, etc.) |
 | `walArchiving.enabled` | Enable WAL archiving (default: true) |
 | `walArchiving.restoreTimeout` | WAL restore timeout in seconds |
 | `encryption.method` | Encryption method: aes256 or pgp (default: aes256) |
@@ -193,11 +189,6 @@ Bootstrap a new cluster from an existing backup:
 | `source.s3.region` | AWS region |
 | `source.s3.credentialsSecret` | Secret with AWS credentials |
 | `source.s3.endpoint` | Custom S3 endpoint |
-| `source.gcs.prefix` | GCS backup path |
-| `source.gcs.credentialsSecret` | Secret with GCS credentials |
-| `source.azure.prefix` | Azure backup path |
-| `source.azure.storageAccount` | Azure storage account |
-| `source.azure.credentialsSecret` | Secret with Azure credentials |
 | `recoveryTarget.time` | Point-in-time recovery timestamp |
 | `recoveryTarget.backup` | Restore to specific backup name |
 | `recoveryTarget.timeline` | Restore to specific timeline |

@@ -1,14 +1,14 @@
 //! Backup configuration for PostgreSQL clusters
 //!
 //! This module generates backup-related configuration for Spilo/WAL-G:
-//! - Environment variables for cloud storage credentials (S3, GCS, Azure)
+//! - Environment variables for S3/S3-compatible storage credentials
 //! - WAL-G configuration for continuous archiving
 //! - Backup scheduling via Spilo's built-in cron
 //!
 //! # Architecture
 //!
 //! Spilo (the container image) includes WAL-G and handles:
-//! - Continuous WAL archiving to cloud storage
+//! - Continuous WAL archiving to S3-compatible storage
 //! - Scheduled base backups via cron
 //! - Automatic backup retention management
 //!
@@ -17,23 +17,12 @@
 //!
 //! # Cloud Provider Configuration
 //!
-//! ## AWS S3
+//! ## AWS S3 / S3-Compatible Storage
 //! Environment variables:
 //! - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` - credentials
 //! - `AWS_REGION` - bucket region
 //! - `WALE_S3_PREFIX` / `WALG_S3_PREFIX` - backup path
-//! - `AWS_ENDPOINT` - custom endpoint (for S3-compatible storage)
-//!
-//! ## Google Cloud Storage
-//! Environment variables:
-//! - `GOOGLE_APPLICATION_CREDENTIALS` - path to service account JSON
-//! - `WALE_GS_PREFIX` / `WALG_GS_PREFIX` - backup path
-//!
-//! ## Azure Blob Storage
-//! Environment variables:
-//! - `AZURE_STORAGE_ACCOUNT` - storage account name
-//! - `AZURE_STORAGE_ACCESS_KEY` or `AZURE_STORAGE_SAS_TOKEN` - credentials
-//! - `WALG_AZ_PREFIX` - backup path
+//! - `AWS_ENDPOINT` - custom endpoint (for S3-compatible storage like MinIO)
 //!
 //! # References
 //! - WAL-G: https://github.com/wal-g/wal-g
@@ -47,10 +36,6 @@ use crate::crd::{
     BackupDestination, EncryptionMethod, PostgresCluster, RecoveryTarget, RestoreSource,
 };
 
-/// GCS credentials mount path inside the container
-const GCS_CREDENTIALS_PATH: &str = "/var/secrets/google";
-/// GCS credentials filename
-const GCS_CREDENTIALS_FILE: &str = "credentials.json";
 /// Encryption key mount path
 const ENCRYPTION_KEY_PATH: &str = "/var/secrets/backup-encryption";
 
@@ -209,7 +194,6 @@ pub fn generate_backup_env_vars(cluster: &PostgresCluster) -> Vec<EnvVar> {
             endpoint,
             credentials_secret,
             path,
-            disable_sse,
             force_path_style,
         } => {
             let prefix = backup.destination.wal_g_prefix(cluster_name, namespace);
@@ -264,15 +248,6 @@ pub fn generate_backup_env_vars(cluster: &PostgresCluster) -> Vec<EnvVar> {
                             .unwrap_or("localhost"),
                         endpoint_url.split(':').nth(2).unwrap_or("9000")
                     )),
-                    ..Default::default()
-                });
-            }
-
-            // Server-side encryption
-            if *disable_sse {
-                env_vars.push(EnvVar {
-                    name: "WALG_DISABLE_S3_SSE".to_string(),
-                    value: Some("true".to_string()),
                     ..Default::default()
                 });
             }
@@ -334,159 +309,6 @@ pub fn generate_backup_env_vars(cluster: &PostgresCluster) -> Vec<EnvVar> {
                 ..Default::default()
             });
         }
-        BackupDestination::GCS {
-            bucket,
-            credentials_secret: _,
-            path,
-        } => {
-            let prefix = backup.destination.wal_g_prefix(cluster_name, namespace);
-
-            // WAL-G GCS prefix
-            env_vars.push(EnvVar {
-                name: "WALG_GS_PREFIX".to_string(),
-                value: Some(prefix.clone()),
-                ..Default::default()
-            });
-
-            // WAL-E compatibility
-            env_vars.push(EnvVar {
-                name: "WALE_GS_PREFIX".to_string(),
-                value: Some(prefix),
-                ..Default::default()
-            });
-            env_vars.push(EnvVar {
-                name: "WAL_GS_BUCKET".to_string(),
-                value: Some(bucket.clone()),
-                ..Default::default()
-            });
-
-            // GCS credentials path (mounted as volume)
-            env_vars.push(EnvVar {
-                name: "GOOGLE_APPLICATION_CREDENTIALS".to_string(),
-                value: Some(format!("{}/{}", GCS_CREDENTIALS_PATH, GCS_CREDENTIALS_FILE)),
-                ..Default::default()
-            });
-
-            if let Some(p) = path {
-                env_vars.push(EnvVar {
-                    name: "BACKUP_PATH".to_string(),
-                    value: Some(p.clone()),
-                    ..Default::default()
-                });
-            }
-        }
-        BackupDestination::Azure {
-            container,
-            storage_account,
-            credentials_secret,
-            path,
-            environment,
-        } => {
-            let prefix = backup.destination.wal_g_prefix(cluster_name, namespace);
-
-            // WAL-G Azure prefix
-            env_vars.push(EnvVar {
-                name: "WALG_AZ_PREFIX".to_string(),
-                value: Some(prefix),
-                ..Default::default()
-            });
-
-            // Azure storage account
-            env_vars.push(EnvVar {
-                name: "AZURE_STORAGE_ACCOUNT".to_string(),
-                value: Some(storage_account.clone()),
-                ..Default::default()
-            });
-
-            // Azure environment (optional)
-            if let Some(env) = environment {
-                env_vars.push(EnvVar {
-                    name: "AZURE_ENVIRONMENT_NAME".to_string(),
-                    value: Some(env.clone()),
-                    ..Default::default()
-                });
-            }
-
-            // Store container for reference
-            env_vars.push(EnvVar {
-                name: "AZURE_CONTAINER".to_string(),
-                value: Some(container.clone()),
-                ..Default::default()
-            });
-
-            if let Some(p) = path {
-                env_vars.push(EnvVar {
-                    name: "BACKUP_PATH".to_string(),
-                    value: Some(p.clone()),
-                    ..Default::default()
-                });
-            }
-
-            // Azure credentials from secret
-            // Try access key first
-            env_vars.push(EnvVar {
-                name: "AZURE_STORAGE_ACCESS_KEY".to_string(),
-                value_from: Some(EnvVarSource {
-                    secret_key_ref: Some(SecretKeySelector {
-                        name: credentials_secret.clone(),
-                        key: "AZURE_STORAGE_ACCESS_KEY".to_string(),
-                        optional: Some(true),
-                    }),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            });
-            // Or SAS token
-            env_vars.push(EnvVar {
-                name: "AZURE_STORAGE_SAS_TOKEN".to_string(),
-                value_from: Some(EnvVarSource {
-                    secret_key_ref: Some(SecretKeySelector {
-                        name: credentials_secret.clone(),
-                        key: "AZURE_STORAGE_SAS_TOKEN".to_string(),
-                        optional: Some(true),
-                    }),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            });
-            // Or service principal credentials
-            env_vars.push(EnvVar {
-                name: "AZURE_CLIENT_ID".to_string(),
-                value_from: Some(EnvVarSource {
-                    secret_key_ref: Some(SecretKeySelector {
-                        name: credentials_secret.clone(),
-                        key: "AZURE_CLIENT_ID".to_string(),
-                        optional: Some(true),
-                    }),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            });
-            env_vars.push(EnvVar {
-                name: "AZURE_CLIENT_SECRET".to_string(),
-                value_from: Some(EnvVarSource {
-                    secret_key_ref: Some(SecretKeySelector {
-                        name: credentials_secret.clone(),
-                        key: "AZURE_CLIENT_SECRET".to_string(),
-                        optional: Some(true),
-                    }),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            });
-            env_vars.push(EnvVar {
-                name: "AZURE_TENANT_ID".to_string(),
-                value_from: Some(EnvVarSource {
-                    secret_key_ref: Some(SecretKeySelector {
-                        name: credentials_secret.clone(),
-                        key: "AZURE_TENANT_ID".to_string(),
-                        optional: Some(true),
-                    }),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            });
-        }
     }
 
     // Encryption configuration
@@ -494,10 +316,25 @@ pub fn generate_backup_env_vars(cluster: &PostgresCluster) -> Vec<EnvVar> {
     if let Some(ref encryption) = backup.encryption {
         match encryption.method {
             EncryptionMethod::Aes256 => {
-                // libsodium key path
+                // libsodium key from secret (base64 encoded)
+                // Using WALG_LIBSODIUM_KEY with secretKeyRef instead of KEY_PATH
+                // because KEY_PATH doesn't work correctly in WAL-G v3.x
                 env_vars.push(EnvVar {
-                    name: "WALG_LIBSODIUM_KEY_PATH".to_string(),
-                    value: Some(format!("{}/encryption-key", ENCRYPTION_KEY_PATH)),
+                    name: "WALG_LIBSODIUM_KEY".to_string(),
+                    value_from: Some(EnvVarSource {
+                        secret_key_ref: Some(SecretKeySelector {
+                            name: encryption.key_secret.clone(),
+                            key: "encryption-key".to_string(),
+                            optional: Some(false),
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                });
+                // Tell WAL-G the key is base64 encoded
+                env_vars.push(EnvVar {
+                    name: "WALG_LIBSODIUM_KEY_TRANSFORM".to_string(),
+                    value: Some("base64".to_string()),
                     ..Default::default()
                 });
             }
@@ -595,57 +432,6 @@ pub fn generate_restore_env_vars(cluster: &PostgresCluster) -> Vec<EnvVar> {
                 ..Default::default()
             });
         }
-        RestoreSource::Gcs {
-            prefix,
-            credentials_secret,
-        } => {
-            env_vars.push(EnvVar {
-                name: "CLONE_WALG_GS_PREFIX".to_string(),
-                value: Some(prefix.clone()),
-                ..Default::default()
-            });
-
-            // GCS credentials path (mounted as volume)
-            env_vars.push(EnvVar {
-                name: "CLONE_GOOGLE_APPLICATION_CREDENTIALS".to_string(),
-                value: Some(format!("{}/{}", GCS_CREDENTIALS_PATH, GCS_CREDENTIALS_FILE)),
-                ..Default::default()
-            });
-
-            // Note: The actual volume must be mounted separately
-            // We use the same credentials volume as for backups
-            let _ = credentials_secret; // Used for volume mount
-        }
-        RestoreSource::Azure {
-            prefix,
-            storage_account,
-            credentials_secret,
-        } => {
-            env_vars.push(EnvVar {
-                name: "CLONE_WALG_AZ_PREFIX".to_string(),
-                value: Some(prefix.clone()),
-                ..Default::default()
-            });
-            env_vars.push(EnvVar {
-                name: "CLONE_AZURE_STORAGE_ACCOUNT".to_string(),
-                value: Some(storage_account.clone()),
-                ..Default::default()
-            });
-
-            // Azure credentials from secret (try access key first)
-            env_vars.push(EnvVar {
-                name: "CLONE_AZURE_STORAGE_ACCESS_KEY".to_string(),
-                value_from: Some(EnvVarSource {
-                    secret_key_ref: Some(SecretKeySelector {
-                        name: credentials_secret.clone(),
-                        key: "AZURE_STORAGE_ACCESS_KEY".to_string(),
-                        optional: Some(true),
-                    }),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            });
-        }
     }
 
     // Recovery target configuration
@@ -681,57 +467,18 @@ pub fn generate_restore_env_vars(cluster: &PostgresCluster) -> Vec<EnvVar> {
 
 /// Generate restore-related volumes for the StatefulSet.
 ///
-/// Creates volumes needed for restore operations (e.g., GCS credentials).
-pub fn generate_restore_volumes(cluster: &PostgresCluster) -> Vec<Volume> {
-    let Some(ref restore) = cluster.spec.restore else {
-        return Vec::new();
-    };
-
-    let mut volumes = Vec::new();
-
-    // GCS credentials volume for restore
-    if let RestoreSource::Gcs {
-        credentials_secret, ..
-    } = &restore.source
-    {
-        volumes.push(Volume {
-            name: "restore-gcs-credentials".to_string(),
-            secret: Some(SecretVolumeSource {
-                secret_name: Some(credentials_secret.clone()),
-                items: Some(vec![KeyToPath {
-                    key: "GOOGLE_APPLICATION_CREDENTIALS".to_string(),
-                    path: GCS_CREDENTIALS_FILE.to_string(),
-                    mode: Some(0o400),
-                }]),
-                default_mode: Some(0o400),
-                optional: Some(false),
-            }),
-            ..Default::default()
-        });
-    }
-
-    volumes
+/// S3 doesn't require additional volumes - credentials are passed via environment variables.
+pub fn generate_restore_volumes(_cluster: &PostgresCluster) -> Vec<Volume> {
+    // S3 restore uses environment variables for credentials, no volumes needed
+    Vec::new()
 }
 
 /// Generate restore-related volume mounts for the container.
-pub fn generate_restore_volume_mounts(cluster: &PostgresCluster) -> Vec<VolumeMount> {
-    let Some(ref restore) = cluster.spec.restore else {
-        return Vec::new();
-    };
-
-    let mut mounts = Vec::new();
-
-    // GCS credentials mount for restore
-    if matches!(restore.source, RestoreSource::Gcs { .. }) {
-        mounts.push(VolumeMount {
-            name: "restore-gcs-credentials".to_string(),
-            mount_path: GCS_CREDENTIALS_PATH.to_string(),
-            read_only: Some(true),
-            ..Default::default()
-        });
-    }
-
-    mounts
+///
+/// S3 doesn't require additional volume mounts - credentials are passed via environment variables.
+pub fn generate_restore_volume_mounts(_cluster: &PostgresCluster) -> Vec<VolumeMount> {
+    // S3 restore uses environment variables for credentials, no mounts needed
+    Vec::new()
 }
 
 /// Check if restore is configured for a cluster.
@@ -741,9 +488,8 @@ pub fn is_restore_configured(cluster: &PostgresCluster) -> bool {
 
 /// Generate backup-related volumes for the StatefulSet.
 ///
-/// This creates volumes for:
-/// - GCS credentials (service account JSON file)
-/// - Encryption keys
+/// This creates volumes for encryption keys (PGP only - AES256/libsodium uses env vars).
+/// S3 credentials are passed via environment variables, no volumes needed.
 pub fn generate_backup_volumes(cluster: &PostgresCluster) -> Vec<Volume> {
     let Some(ref backup) = cluster.spec.backup else {
         return Vec::new();
@@ -751,42 +497,17 @@ pub fn generate_backup_volumes(cluster: &PostgresCluster) -> Vec<Volume> {
 
     let mut volumes = Vec::new();
 
-    // GCS credentials volume
-    if let BackupDestination::GCS {
-        credentials_secret, ..
-    } = &backup.destination
+    // Encryption key volume - only needed for PGP (AES256/libsodium uses env var)
+    if let Some(ref encryption) = backup.encryption
+        && matches!(encryption.method, EncryptionMethod::Pgp)
     {
-        volumes.push(Volume {
-            name: "gcs-credentials".to_string(),
-            secret: Some(SecretVolumeSource {
-                secret_name: Some(credentials_secret.clone()),
-                items: Some(vec![KeyToPath {
-                    key: "GOOGLE_APPLICATION_CREDENTIALS".to_string(),
-                    path: GCS_CREDENTIALS_FILE.to_string(),
-                    mode: Some(0o400),
-                }]),
-                default_mode: Some(0o400),
-                optional: Some(false),
-            }),
-            ..Default::default()
-        });
-    }
-
-    // Encryption key volume
-    // Presence of encryption section means encryption is enabled
-    if let Some(ref encryption) = backup.encryption {
-        let key_name = match encryption.method {
-            EncryptionMethod::Aes256 => "encryption-key",
-            EncryptionMethod::Pgp => "pgp-key",
-        };
-
         volumes.push(Volume {
             name: "backup-encryption-key".to_string(),
             secret: Some(SecretVolumeSource {
                 secret_name: Some(encryption.key_secret.clone()),
                 items: Some(vec![KeyToPath {
-                    key: key_name.to_string(),
-                    path: key_name.to_string(),
+                    key: "pgp-key".to_string(),
+                    path: "pgp-key".to_string(),
                     mode: Some(0o400),
                 }]),
                 default_mode: Some(0o400),
@@ -800,6 +521,9 @@ pub fn generate_backup_volumes(cluster: &PostgresCluster) -> Vec<Volume> {
 }
 
 /// Generate backup-related volume mounts for the container.
+///
+/// S3 credentials are passed via environment variables, no mounts needed.
+/// Only PGP encryption requires a volume mount for the key file.
 pub fn generate_backup_volume_mounts(cluster: &PostgresCluster) -> Vec<VolumeMount> {
     let Some(ref backup) = cluster.spec.backup else {
         return Vec::new();
@@ -807,19 +531,10 @@ pub fn generate_backup_volume_mounts(cluster: &PostgresCluster) -> Vec<VolumeMou
 
     let mut mounts = Vec::new();
 
-    // GCS credentials mount
-    if matches!(backup.destination, BackupDestination::GCS { .. }) {
-        mounts.push(VolumeMount {
-            name: "gcs-credentials".to_string(),
-            mount_path: GCS_CREDENTIALS_PATH.to_string(),
-            read_only: Some(true),
-            ..Default::default()
-        });
-    }
-
-    // Encryption key mount
-    // Presence of encryption section means encryption is enabled
-    if backup.encryption.is_some() {
+    // Encryption key mount - only needed for PGP (AES256/libsodium uses env var)
+    if let Some(ref encryption) = backup.encryption
+        && matches!(encryption.method, EncryptionMethod::Pgp)
+    {
         mounts.push(VolumeMount {
             name: "backup-encryption-key".to_string(),
             mount_path: ENCRYPTION_KEY_PATH.to_string(),
@@ -840,9 +555,8 @@ pub fn is_backup_enabled(cluster: &PostgresCluster) -> bool {
 mod tests {
     use super::*;
     use crate::crd::{
-        BackupDestination, BackupSpec, CompressionMethod, EncryptionMethod, EncryptionSpec,
-        PostgresCluster, PostgresClusterSpec, PostgresVersion, RetentionPolicy, StorageSpec,
-        TLSSpec,
+        BackupDestination, BackupSpec, EncryptionMethod, EncryptionSpec, PostgresCluster,
+        PostgresClusterSpec, PostgresVersion, RetentionPolicy, StorageSpec, TLSSpec,
     };
     use kube::core::ObjectMeta;
 
@@ -897,7 +611,6 @@ mod tests {
                 endpoint: None,
                 credentials_secret: "aws-creds".to_string(),
                 path: None,
-                disable_sse: false,
                 force_path_style: false,
             },
             wal_archiving: None,
@@ -932,115 +645,6 @@ mod tests {
     }
 
     #[test]
-    fn test_gcs_backup_env_vars() {
-        let backup = BackupSpec {
-            schedule: "0 3 * * *".to_string(),
-            retention: RetentionPolicy {
-                count: Some(5),
-                max_age: None,
-            },
-            destination: BackupDestination::GCS {
-                bucket: "gcs-bucket".to_string(),
-                credentials_secret: "gcs-creds".to_string(),
-                path: Some("backups/prod".to_string()),
-            },
-            wal_archiving: None,
-            encryption: None,
-            compression: Some(CompressionMethod::Zstd),
-            backup_from_replica: false,
-            upload_concurrency: Some(8),
-            download_concurrency: None,
-            enable_delta_backups: false,
-            delta_max_steps: None,
-        };
-
-        let cluster = create_test_cluster(Some(backup));
-        let env_vars = generate_backup_env_vars(&cluster);
-
-        assert!(env_vars.iter().any(|e| e.name == "WALG_GS_PREFIX"));
-        assert!(
-            env_vars
-                .iter()
-                .any(|e| e.name == "GOOGLE_APPLICATION_CREDENTIALS")
-        );
-
-        // Check custom path
-        let prefix_var = env_vars
-            .iter()
-            .find(|e| e.name == "WALG_GS_PREFIX")
-            .expect("WALG_GS_PREFIX env var should be present for GCS backup");
-        assert_eq!(
-            prefix_var.value.as_deref(),
-            Some("gs://gcs-bucket/backups/prod")
-        );
-
-        // Check compression
-        let compression_var = env_vars
-            .iter()
-            .find(|e| e.name == "WALG_COMPRESSION_METHOD")
-            .expect("WALG_COMPRESSION_METHOD env var should be present when compression is set");
-        assert_eq!(compression_var.value.as_deref(), Some("zstd"));
-
-        // Check concurrency
-        let upload_var = env_vars
-            .iter()
-            .find(|e| e.name == "WALG_UPLOAD_CONCURRENCY")
-            .expect(
-                "WALG_UPLOAD_CONCURRENCY env var should be present when upload_concurrency is set",
-            );
-        assert_eq!(upload_var.value.as_deref(), Some("8"));
-    }
-
-    #[test]
-    fn test_azure_backup_env_vars() {
-        let backup = BackupSpec {
-            schedule: "0 4 * * *".to_string(),
-            retention: RetentionPolicy {
-                count: Some(10),
-                max_age: None,
-            },
-            destination: BackupDestination::Azure {
-                container: "backups".to_string(),
-                storage_account: "myaccount".to_string(),
-                credentials_secret: "azure-creds".to_string(),
-                path: None,
-                environment: Some("AzurePublicCloud".to_string()),
-            },
-            wal_archiving: None,
-            encryption: None,
-            compression: None,
-            backup_from_replica: true,
-            upload_concurrency: None,
-            download_concurrency: None,
-            enable_delta_backups: true,
-            delta_max_steps: Some(5),
-        };
-
-        let cluster = create_test_cluster(Some(backup));
-        let env_vars = generate_backup_env_vars(&cluster);
-
-        assert!(env_vars.iter().any(|e| e.name == "WALG_AZ_PREFIX"));
-        assert!(env_vars.iter().any(|e| e.name == "AZURE_STORAGE_ACCOUNT"));
-        assert!(env_vars.iter().any(|e| e.name == "AZURE_ENVIRONMENT_NAME"));
-
-        // Check backup from replica
-        assert!(
-            env_vars
-                .iter()
-                .any(|e| e.name == "WALG_BACKUP_FROM_REPLICA")
-        );
-
-        // Check delta backups
-        let delta_var = env_vars
-            .iter()
-            .find(|e| e.name == "WALG_DELTA_MAX_STEPS")
-            .expect(
-                "WALG_DELTA_MAX_STEPS env var should be present when delta backups are enabled",
-            );
-        assert_eq!(delta_var.value.as_deref(), Some("5"));
-    }
-
-    #[test]
     fn test_encryption_env_vars() {
         let backup = BackupSpec {
             schedule: "0 2 * * *".to_string(),
@@ -1054,7 +658,6 @@ mod tests {
                 endpoint: None,
                 credentials_secret: "aws-creds".to_string(),
                 path: None,
-                disable_sse: false,
                 force_path_style: false,
             },
             wal_archiving: None,
@@ -1073,42 +676,30 @@ mod tests {
         let cluster = create_test_cluster(Some(backup));
         let env_vars = generate_backup_env_vars(&cluster);
 
-        assert!(env_vars.iter().any(|e| e.name == "WALG_LIBSODIUM_KEY_PATH"));
-    }
+        // AES256 encryption uses WALG_LIBSODIUM_KEY env var (not KEY_PATH) with base64 transform
+        let key_var = env_vars
+            .iter()
+            .find(|e| e.name == "WALG_LIBSODIUM_KEY")
+            .expect("WALG_LIBSODIUM_KEY should be present");
+        assert!(
+            key_var.value_from.is_some(),
+            "WALG_LIBSODIUM_KEY should use secretKeyRef"
+        );
+        let secret_ref = key_var
+            .value_from
+            .as_ref()
+            .unwrap()
+            .secret_key_ref
+            .as_ref()
+            .expect("Should have secretKeyRef");
+        assert_eq!(secret_ref.name, "encryption-key-secret");
+        assert_eq!(secret_ref.key, "encryption-key");
 
-    #[test]
-    fn test_gcs_volumes() {
-        let backup = BackupSpec {
-            schedule: "0 2 * * *".to_string(),
-            retention: RetentionPolicy {
-                count: Some(7),
-                max_age: None,
-            },
-            destination: BackupDestination::GCS {
-                bucket: "gcs-bucket".to_string(),
-                credentials_secret: "gcs-creds".to_string(),
-                path: None,
-            },
-            wal_archiving: None,
-            encryption: None,
-            compression: None,
-            backup_from_replica: false,
-            upload_concurrency: None,
-            download_concurrency: None,
-            enable_delta_backups: false,
-            delta_max_steps: None,
-        };
-
-        let cluster = create_test_cluster(Some(backup));
-        let volumes = generate_backup_volumes(&cluster);
-        let mounts = generate_backup_volume_mounts(&cluster);
-
-        assert_eq!(volumes.len(), 1);
-        assert_eq!(volumes[0].name, "gcs-credentials");
-
-        assert_eq!(mounts.len(), 1);
-        assert_eq!(mounts[0].name, "gcs-credentials");
-        assert_eq!(mounts[0].mount_path, GCS_CREDENTIALS_PATH);
+        let transform_var = env_vars
+            .iter()
+            .find(|e| e.name == "WALG_LIBSODIUM_KEY_TRANSFORM")
+            .expect("WALG_LIBSODIUM_KEY_TRANSFORM should be present");
+        assert_eq!(transform_var.value.as_deref(), Some("base64"));
     }
 
     #[test]
@@ -1119,7 +710,6 @@ mod tests {
             endpoint: None,
             credentials_secret: "creds".to_string(),
             path: None,
-            disable_sse: false,
             force_path_style: false,
         };
         assert_eq!(
@@ -1133,7 +723,6 @@ mod tests {
             endpoint: None,
             credentials_secret: "creds".to_string(),
             path: Some("custom/path".to_string()),
-            disable_sse: false,
             force_path_style: false,
         };
         assert_eq!(
@@ -1159,7 +748,6 @@ mod tests {
                 endpoint: None,
                 credentials_secret: "creds".to_string(),
                 path: None,
-                disable_sse: false,
                 force_path_style: false,
             },
             wal_archiving: None,
@@ -1212,7 +800,6 @@ mod tests {
                 endpoint: None,
                 credentials_secret: "creds".to_string(),
                 path: None,
-                disable_sse: false,
                 force_path_style: false,
             },
             wal_archiving: None,

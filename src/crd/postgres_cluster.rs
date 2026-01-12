@@ -220,24 +220,6 @@ pub enum RestoreSource {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         endpoint: Option<String>,
     },
-    /// Restore from a Google Cloud Storage backup
-    #[serde(rename = "gcs")]
-    Gcs {
-        /// Full GCS prefix path (e.g., "gs://bucket/path/to/backup")
-        prefix: String,
-        /// Secret containing GCS credentials (GOOGLE_APPLICATION_CREDENTIALS)
-        credentials_secret: String,
-    },
-    /// Restore from an Azure Blob Storage backup
-    #[serde(rename = "azure")]
-    Azure {
-        /// Full Azure prefix path (e.g., "azure://container/path/to/backup")
-        prefix: String,
-        /// Azure storage account name
-        storage_account: String,
-        /// Secret containing Azure credentials
-        credentials_secret: String,
-    },
 }
 
 /// Recovery target for point-in-time recovery (PITR).
@@ -458,7 +440,7 @@ pub struct ResourceList {
 /// Backup configuration for continuous archiving and point-in-time recovery (PITR).
 ///
 /// This integrates with WAL-G (default) or WAL-E for:
-/// - Continuous WAL archiving to cloud storage (S3, GCS, Azure)
+/// - Continuous WAL archiving to S3-compatible cloud storage
 /// - Scheduled base backups (full physical backups)
 /// - Point-in-time recovery from any moment between backups
 ///
@@ -486,7 +468,7 @@ pub struct BackupSpec {
     /// Retention policy for backups
     pub retention: RetentionPolicy,
 
-    /// Backup destination (S3, GCS, or Azure)
+    /// Backup destination (S3 or S3-compatible storage)
     pub destination: BackupDestination,
 
     /// WAL archiving configuration.
@@ -565,12 +547,6 @@ impl BackupSpec {
             BackupDestination::S3 {
                 credentials_secret, ..
             } => credentials_secret,
-            BackupDestination::GCS {
-                credentials_secret, ..
-            } => credentials_secret,
-            BackupDestination::Azure {
-                credentials_secret, ..
-            } => credentials_secret,
         }
     }
 }
@@ -609,7 +585,8 @@ pub struct EncryptionSpec {
     pub method: EncryptionMethod,
 
     /// Secret containing encryption key (REQUIRED).
-    /// For AES: expects a key named 'encryption-key' with the raw key bytes.
+    /// For AES: expects a key named 'encryption-key' with base64-encoded 32-byte key.
+    ///          Generate with: `openssl rand -base64 32`
     /// For PGP: expects a key named 'pgp-key' with the PGP public key.
     pub key_secret: String,
 }
@@ -674,11 +651,11 @@ pub struct RetentionPolicy {
 }
 
 /// Backup destination configuration
-#[allow(clippy::upper_case_acronyms)] // GCS is a well-known acronym for Google Cloud Storage
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum BackupDestination {
-    /// Amazon S3 backup destination
+    /// Amazon S3 backup destination (also supports S3-compatible storage like MinIO)
+    #[serde(rename = "S3")]
     S3 {
         /// S3 bucket name
         bucket: String,
@@ -690,47 +667,15 @@ pub enum BackupDestination {
         /// Secret containing AWS credentials.
         /// Expected keys: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
         /// Optional: AWS_SESSION_TOKEN for temporary credentials
+        #[serde(rename = "credentialsSecret")]
         credentials_secret: String,
         /// Path prefix within the bucket (e.g., "backups/prod-cluster")
-        /// Default: cluster name
+        /// Default: namespace/cluster-name
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
-        /// Disable server-side encryption
-        #[serde(default)]
-        disable_sse: bool,
-        /// Force path-style URLs (required for some S3-compatible storage)
-        #[serde(default)]
+        /// Force path-style URLs (required for some S3-compatible storage like MinIO)
+        #[serde(default, rename = "forcePathStyle")]
         force_path_style: bool,
-    },
-    /// Google Cloud Storage backup destination
-    GCS {
-        /// GCS bucket name
-        bucket: String,
-        /// Secret containing GCS credentials.
-        /// Expected key: GOOGLE_APPLICATION_CREDENTIALS (JSON service account key)
-        credentials_secret: String,
-        /// Path prefix within the bucket
-        /// Default: cluster name
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        path: Option<String>,
-    },
-    /// Azure Blob Storage backup destination
-    Azure {
-        /// Azure container name
-        container: String,
-        /// Azure storage account name
-        storage_account: String,
-        /// Secret containing Azure credentials.
-        /// Expected keys: AZURE_STORAGE_ACCESS_KEY or AZURE_STORAGE_SAS_TOKEN
-        /// For service principal: AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID
-        credentials_secret: String,
-        /// Path prefix within the container
-        /// Default: cluster name
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        path: Option<String>,
-        /// Azure environment name (e.g., "AzurePublicCloud", "AzureUSGovernmentCloud")
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        environment: Option<String>,
     },
 }
 
@@ -744,26 +689,6 @@ impl BackupDestination {
                     .unwrap_or_else(|| format!("{}/{}", namespace, cluster_name));
                 format!("s3://{}/{}", bucket, base_path)
             }
-            BackupDestination::GCS { bucket, path, .. } => {
-                let base_path = path
-                    .clone()
-                    .unwrap_or_else(|| format!("{}/{}", namespace, cluster_name));
-                format!("gs://{}/{}", bucket, base_path)
-            }
-            BackupDestination::Azure {
-                container,
-                storage_account,
-                path,
-                ..
-            } => {
-                let base_path = path
-                    .clone()
-                    .unwrap_or_else(|| format!("{}/{}", namespace, cluster_name));
-                // WAL-G Azure format: azure://container/path
-                // Storage account is set via environment variable
-                let _ = storage_account; // Used in env var, not in URL
-                format!("azure://{}/{}", container, base_path)
-            }
         }
     }
 
@@ -771,8 +696,6 @@ impl BackupDestination {
     pub fn destination_type(&self) -> &'static str {
         match self {
             BackupDestination::S3 { .. } => "S3",
-            BackupDestination::GCS { .. } => "GCS",
-            BackupDestination::Azure { .. } => "Azure",
         }
     }
 }
@@ -785,7 +708,7 @@ pub struct BackupStatus {
     #[serde(default)]
     pub enabled: bool,
 
-    /// Backup destination type (S3, GCS, Azure)
+    /// Backup destination type (S3)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination_type: Option<String>,
 
@@ -1367,7 +1290,7 @@ pub struct RestoredFromInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_prefix: Option<String>,
 
-    /// The backup type (S3, GCS, Azure)
+    /// The backup type (S3)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_type: Option<String>,
 

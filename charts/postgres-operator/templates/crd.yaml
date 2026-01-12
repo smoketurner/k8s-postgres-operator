@@ -151,65 +151,38 @@ spec:
                             Backups older than this are automatically deleted.
                     destination:
                       type: object
-                      description: Backup destination (S3, GCS, or Azure)
-                      x-kubernetes-validations:
-                        - rule: "self.type != 'S3' || (has(self.bucket) && has(self.region) && has(self.credentialsSecret))"
-                          message: "S3 backup requires bucket, region, and credentialsSecret"
-                        - rule: "self.type != 'GCS' || (has(self.bucket) && has(self.credentialsSecret))"
-                          message: "GCS backup requires bucket and credentialsSecret"
-                        - rule: "self.type != 'Azure' || (has(self.container) && has(self.storageAccount) && has(self.credentialsSecret))"
-                          message: "Azure backup requires container, storageAccount, and credentialsSecret"
-                      required:
-                        - type
+                      description: S3 or S3-compatible storage destination for backups
                       properties:
-                        type:
-                          type: string
-                          enum:
-                            - S3
-                            - GCS
-                            - Azure
-                        bucket:
-                          type: string
-                          description: Bucket name for S3 or GCS
-                        region:
-                          type: string
-                          description: AWS region for S3
-                        endpoint:
-                          type: string
-                          description: Custom S3-compatible endpoint URL (for MinIO, etc.)
-                        path:
-                          type: string
-                          description: |
-                            Path prefix within the bucket (e.g., "backups/prod-cluster").
-                            Default: namespace/cluster-name
-                        disableSse:
-                          type: boolean
-                          description: Disable server-side encryption (S3 only)
-                          default: false
-                        forcePathStyle:
-                          type: boolean
-                          description: |
-                            Force path-style URLs (S3 only).
-                            Required for some S3-compatible storage like MinIO.
-                          default: false
-                        container:
-                          type: string
-                          description: Azure blob container name
-                        storageAccount:
-                          type: string
-                          description: Azure storage account name
-                        environment:
-                          type: string
-                          description: |
-                            Azure environment name (e.g., "AzurePublicCloud", "AzureUSGovernmentCloud").
-                            Azure only.
-                        credentialsSecret:
-                          type: string
-                          description: |
-                            Name of secret containing cloud credentials.
-                            S3: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (optional: AWS_SESSION_TOKEN)
-                            GCS: GOOGLE_APPLICATION_CREDENTIALS (JSON service account key)
-                            Azure: AZURE_STORAGE_ACCESS_KEY or AZURE_STORAGE_SAS_TOKEN
+                        S3:
+                          type: object
+                          description: S3 or S3-compatible storage configuration
+                          required:
+                            - bucket
+                            - region
+                            - credentialsSecret
+                          properties:
+                            bucket:
+                              type: string
+                              description: S3 bucket name
+                            region:
+                              type: string
+                              description: AWS region (e.g., "us-east-1")
+                            endpoint:
+                              type: string
+                              description: Custom S3-compatible endpoint URL (for MinIO, DigitalOcean Spaces, etc.)
+                            credentialsSecret:
+                              type: string
+                              description: |
+                                Name of secret containing AWS credentials.
+                                Required keys: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+                                Optional: AWS_SESSION_TOKEN for temporary credentials
+                            path:
+                              type: string
+                              description: Path prefix within the bucket (default is namespace/cluster-name)
+                            forcePathStyle:
+                              type: boolean
+                              description: Force path-style URLs (required for most S3-compatible storage)
+                              default: false
                     walArchiving:
                       type: object
                       description: WAL archiving configuration for continuous backup
@@ -466,36 +439,6 @@ spec:
                             endpoint:
                               type: string
                               description: Custom endpoint for S3-compatible storage (e.g., MinIO)
-                        gcs:
-                          type: object
-                          description: Restore from a Google Cloud Storage backup
-                          required:
-                            - prefix
-                            - credentialsSecret
-                          properties:
-                            prefix:
-                              type: string
-                              description: Full GCS prefix path (e.g., "gs://bucket/path/to/backup")
-                            credentialsSecret:
-                              type: string
-                              description: Secret containing GCS credentials (GOOGLE_APPLICATION_CREDENTIALS)
-                        azure:
-                          type: object
-                          description: Restore from an Azure Blob Storage backup
-                          required:
-                            - prefix
-                            - storageAccount
-                            - credentialsSecret
-                          properties:
-                            prefix:
-                              type: string
-                              description: Full Azure prefix path (e.g., "azure://container/path/to/backup")
-                            storageAccount:
-                              type: string
-                              description: Azure storage account name
-                            credentialsSecret:
-                              type: string
-                              description: Secret containing Azure credentials
                     recoveryTarget:
                       type: object
                       description: |
@@ -555,7 +498,7 @@ spec:
                       description: Whether backups are currently configured and enabled
                     destinationType:
                       type: string
-                      description: Backup destination type (S3, GCS, Azure)
+                      description: Backup destination type (S3)
                     lastBackupTime:
                       type: string
                       description: Timestamp of the last successful base backup (RFC3339)
@@ -727,7 +670,7 @@ spec:
                       description: The prefix path of the backup source (e.g., "s3://bucket/path")
                     sourceType:
                       type: string
-                      description: The backup type (S3, GCS, Azure)
+                      description: The backup type (S3)
                     recoveryTargetTime:
                       type: string
                       description: The recovery target time if PITR was used

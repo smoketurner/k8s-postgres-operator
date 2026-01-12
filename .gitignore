@@ -17,3 +17,6 @@
 # Kubernetes
 kubeconfig
 *.kubeconfig
+
+# Test credentials
+config/test/*

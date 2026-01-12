@@ -68,7 +68,6 @@ fn create_valid_backup() -> BackupSpec {
             endpoint: None,
             credentials_secret: "aws-creds".to_string(),
             path: None,
-            disable_sse: false,
             force_path_style: false,
         },
         encryption: Some(EncryptionSpec {
@@ -99,7 +98,6 @@ fn create_backup_without_encryption() -> BackupSpec {
             endpoint: None,
             credentials_secret: "aws-creds".to_string(),
             path: None,
-            disable_sse: false,
             force_path_style: false,
         },
         encryption: None,
@@ -608,7 +606,6 @@ mod edge_case_tests {
                 endpoint: None,
                 credentials_secret: "aws-creds".to_string(),
                 path: None,
-                disable_sse: false,
                 force_path_style: false,
             },
             encryption: Some(EncryptionSpec {

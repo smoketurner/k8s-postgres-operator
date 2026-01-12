@@ -5,7 +5,7 @@
 # layer of security beyond cloud provider encryption.
 #
 # Prerequisites:
-# 1. Create cloud credentials secret (see backup-s3.yaml, backup-gcs.yaml, or backup-azure.yaml)
+# 1. Create cloud credentials secret (see backup-s3.yaml or backup-minio.yaml)
 # 2. Generate an encryption key (32 bytes for AES-256):
 #
 #    # Generate random 32-byte key
@@ -47,12 +47,12 @@ spec:
     retention:
       count: 7
 
-    # S3 destination (can also be GCS or Azure)
+    # S3 destination (also supports S3-compatible storage like MinIO)
     destination:
-      type: S3
-      bucket: my-encrypted-backups
-      region: us-east-1
-      credentialsSecret: aws-backup-credentials
+      S3:
+        bucket: my-encrypted-backups
+        region: us-east-1
+        credentialsSecret: aws-backup-credentials
 
     # Enable encryption
     encryption:

@@ -13,10 +13,11 @@ use k8s_openapi::api::apps::v1::{
     RollingUpdateStatefulSetStrategy, StatefulSet, StatefulSetSpec, StatefulSetUpdateStrategy,
 };
 use k8s_openapi::api::core::v1::{
-    Affinity, ConfigMap, Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction,
-    PersistentVolumeClaim, PersistentVolumeClaimSpec, PodAffinityTerm, PodAntiAffinity, PodSpec,
-    PodTemplateSpec, Probe, ResourceRequirements, SecretKeySelector, SecretVolumeSource,
-    SecurityContext, ServiceAccount, Volume, VolumeMount, WeightedPodAffinityTerm,
+    Affinity, ConfigMap, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, EnvVarSource,
+    HTTPGetAction, PersistentVolumeClaim, PersistentVolumeClaimSpec, PodAffinityTerm,
+    PodAntiAffinity, PodSpec, PodTemplateSpec, Probe, ResourceRequirements, SecretKeySelector,
+    SecretVolumeSource, SecurityContext, ServiceAccount, Volume, VolumeMount,
+    WeightedPodAffinityTerm,
 };
 use k8s_openapi::api::rbac::v1::{Role, RoleBinding, RoleRef, Subject};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -489,14 +490,26 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster, keda_managed: boo
     ];
 
     // Volume mounts - data volume is always needed
-    let mut volume_mounts = vec![VolumeMount {
-        name: "data".to_string(),
-        mount_path: "/var/lib/postgresql/data".to_string(),
+    let mut volume_mounts = vec![
+        VolumeMount {
+            name: "data".to_string(),
+            mount_path: "/var/lib/postgresql/data".to_string(),
+            ..Default::default()
+        },
+        // Spilo needs a writable tmp directory for WAL-G
+        VolumeMount {
+            name: "tmp".to_string(),
+            mount_path: "/var/lib/tmp".to_string(),
+            ..Default::default()
+        },
+    ];
+
+    // Volumes - tmp volume is always needed for Spilo
+    let mut volumes: Vec<Volume> = vec![Volume {
+        name: "tmp".to_string(),
+        empty_dir: Some(EmptyDirVolumeSource::default()),
         ..Default::default()
     }];
-
-    // Volumes
-    let mut volumes: Vec<Volume> = vec![];
 
     // TLS configuration (cert-manager integration)
     // When TLS is enabled, mount the cert-manager generated secret
@@ -548,7 +561,7 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster, keda_managed: boo
         // Add backup environment variables
         env_vars.extend(backup::generate_backup_env_vars(cluster));
 
-        // Add backup volumes (e.g., GCS credentials, encryption keys)
+        // Add backup volumes (e.g., encryption keys for PGP)
         volumes.extend(backup::generate_backup_volumes(cluster));
 
         // Add backup volume mounts
@@ -562,7 +575,7 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster, keda_managed: boo
         // Add restore environment variables
         env_vars.extend(backup::generate_restore_env_vars(cluster));
 
-        // Add restore volumes (e.g., GCS credentials)
+        // Add restore volumes
         volumes.extend(backup::generate_restore_volumes(cluster));
 
         // Add restore volume mounts
@@ -816,7 +829,8 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster, keda_managed: boo
 /// This allows in-place pod resource updates without container restarts (default)
 /// or with restarts if restart_on_resize is true.
 ///
-/// TODO(k8s-openapi-upgrade): Remove this function when k8s-openapi supports v1_35.
+/// TODO(k8s-openapi-upgrade): Remove this function when upgrading to k8s-openapi 0.27+ with v1_35.
+/// See Cargo.toml for upgrade blockers and full migration plan.
 /// Instead, add resizePolicy directly in generate_patroni_statefulset() using:
 /// ```ignore
 /// use k8s_openapi::api::core::v1::ContainerResizePolicy;

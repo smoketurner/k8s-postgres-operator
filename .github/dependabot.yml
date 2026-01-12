@@ -11,12 +11,16 @@ updates:
         patterns:
           - "*"
         exclude-patterns:
-          - "kube*"
-          - "k8s-openapi"
-      kube-rs:
+          - kube
+          - k8s-openapi
+          - schemars
+          - kube-leader-election
+      kube:
         patterns:
-          - "kube*"
-          - "k8s-openapi"
+          - kube
+          - k8s-openapi
+          - schemars
+          - kube-leader-election
 
   - package-ecosystem: "github-actions"
     directory: "/"

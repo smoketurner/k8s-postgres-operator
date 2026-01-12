@@ -49,12 +49,12 @@ spec:
 
     # AWS S3 destination
     destination:
-      type: S3
-      bucket: my-postgres-backups
-      region: us-east-1
-      credentialsSecret: aws-backup-credentials
-      # Optional: custom path prefix (default: namespace/cluster-name)
-      # path: backups/production
+      S3:
+        bucket: my-postgres-backups
+        region: us-east-1
+        credentialsSecret: aws-backup-credentials
+        # Optional: custom path prefix (default: namespace/cluster-name)
+        # path: backups/production
 
     # Compression method: lz4 (fast), zstd (balanced), lzma (max compression)
     compression: zstd

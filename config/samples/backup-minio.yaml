@@ -45,15 +45,13 @@ spec:
 
     # S3-compatible storage with custom endpoint
     destination:
-      type: S3
-      bucket: postgres-backups
-      region: us-east-1  # Required but ignored for MinIO
-      endpoint: "http://minio.minio-system.svc.cluster.local:9000"
-      credentialsSecret: minio-backup-credentials
-      # Force path-style URLs (required for MinIO)
-      forcePathStyle: true
-      # Disable AWS SSE (MinIO has its own encryption)
-      disableSse: true
+      S3:
+        bucket: postgres-backups
+        region: us-east-1  # Required but ignored for MinIO
+        endpoint: "http://minio.minio-system.svc.cluster.local:9000"
+        credentialsSecret: minio-backup-credentials
+        # Force path-style URLs (required for MinIO)
+        forcePathStyle: true
 
     compression: lz4
 

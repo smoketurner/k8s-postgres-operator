@@ -205,7 +205,7 @@ The operator leverages Kubernetes 1.35+ features for enhanced functionality:
 
 ### WAL-G Backup Integration
 - Configured via `spec.backup` in PostgresCluster CRD
-- Supports S3, GCS, Azure Blob storage backends
+- Supports S3 and S3-compatible storage backends (AWS S3, MinIO, DigitalOcean Spaces, etc.)
 - **Encryption required**: Must specify `encryption.keySecret` when backups are configured
 - Environment variables injected into Spilo container for WAL-G configuration
 - See `docs/backup-restore.md` for detailed configuration

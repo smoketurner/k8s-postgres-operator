@@ -13,27 +13,37 @@ license = "MIT"
 #
 # TODO(k8s-openapi-upgrade): Upgrade to k8s-openapi 0.27.0 with v1_35 when ecosystem is ready.
 #
-# Blockers as of 2026-01-11:
-# 1. kube-rs: Main branch has k8s-openapi 0.27.0 support, but no release yet (still 2.0.1)
-# 2. kube-leader-election: Uses k8s_openapi::chrono which was replaced with jiff in 0.27.0
-#    - No PR or issue exists to update kube-leader-election for jiff
-#    - See: https://github.com/hendrikmaus/kube-leader-election/issues
+# Status as of 2026-01-12:
+# - kube 3.0.0 released with k8s-openapi 0.27.0 support
+# - kube 3.0.0 replaced chrono with jiff for timestamps
 #
-# When all blockers are resolved:
-# 1. Update to: k8s-openapi = { version = "=0.27.x", features = ["v1_35"] }
-# 2. In src/resources/patroni.rs:
+# Remaining blocker:
+# - kube-leader-election: Uses k8s_openapi::chrono which was replaced with jiff in k8s-openapi 0.27.0
+#   - No PR or issue exists to update kube-leader-election for jiff
+#   - See: https://github.com/hendrikmaus/kube-leader-election/issues
+#
+# When blocker is resolved:
+# 1. Update dependencies:
+#    - kube = { version = "=3.0.x", ... }
+#    - k8s-openapi = { version = "=0.27.x", features = ["v1_35"] }
+# 2. Handle chrono → jiff migration:
+#    - LogParams and Client::with_valid_until now use jiff timestamps
+#    - Update any code using k8s_openapi::chrono types
+# 3. Handle other kube 3.0.0 breaking changes:
+#    - ErrorResponse merged into Status (use is_forbidden(), etc. instead of pattern matching)
+#    - predicate_filter() now requires PredicateConfig parameter
+#    - Subresource write methods (replace_status) accept &K: Serialize instead of Vec<u8>
+# 4. In src/resources/patroni.rs:
 #    - Remove add_resize_policy_to_statefulset() function
 #    - Use native ContainerResizePolicy type directly in generate_patroni_statefulset()
-# 3. In src/resources/pgbouncer.rs:
+# 5. In src/resources/pgbouncer.rs:
 #    - Remove add_resize_policy_to_deployment() function
 #    - Use native ContainerResizePolicy type directly in generate_pgbouncer_deployment()
-# 4. In src/controller/reconciler.rs:
+# 6. In src/controller/reconciler.rs:
 #    - Simplify get_pod_resize_status() to use native pod.status.resize field
 #    - Use native container.allocatedResources field
-# 5. Run `cargo check` to verify everything compiles
-# 6. Track progress at:
-#    - kube-rs: https://github.com/kube-rs/kube/releases
-#    - k8s-openapi: https://github.com/Arnavion/k8s-openapi/releases
+# 7. Run `cargo check` to verify everything compiles
+# 8. Track progress at:
 #    - kube-leader-election: https://github.com/hendrikmaus/kube-leader-election/releases
 kube = { version = "=2.0.1", default-features = false, features = ["runtime", "derive", "client", "rustls-tls", "ws"] }
 k8s-openapi = { version = "=0.26.1", default-features = false, features = ["v1_34"] }
