@@ -615,3 +615,216 @@ pub const CONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Maximum connection retries
 pub const MAX_CONNECT_RETRIES: u32 = 15;
+
+// =============================================================================
+// SQL Verification Helpers for PostgresDatabase Tests
+// =============================================================================
+
+/// Verify that a database exists in PostgreSQL
+pub async fn verify_database_exists(
+    credentials: &PostgresCredentials,
+    host: &str,
+    port: u16,
+    database_name: &str,
+) -> Result<bool, PostgresError> {
+    let config = format!(
+        "host={} port={} user={} password={} dbname={} connect_timeout=10",
+        host, port, credentials.username, credentials.password, credentials.database
+    );
+
+    let (client, connection) = tokio_postgres::connect(&config, NoTls).await?;
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            tracing::trace!(error = %e, "PostgreSQL connection closed");
+        }
+    });
+
+    let row = client
+        .query_opt(
+            "SELECT 1 FROM pg_database WHERE datname = $1",
+            &[&database_name],
+        )
+        .await
+        .map_err(|e| PostgresError::Query(e.to_string()))?;
+
+    Ok(row.is_some())
+}
+
+/// Verify that a role exists in PostgreSQL
+pub async fn verify_role_exists(
+    credentials: &PostgresCredentials,
+    host: &str,
+    port: u16,
+    role_name: &str,
+) -> Result<bool, PostgresError> {
+    let config = format!(
+        "host={} port={} user={} password={} dbname={} connect_timeout=10",
+        host, port, credentials.username, credentials.password, credentials.database
+    );
+
+    let (client, connection) = tokio_postgres::connect(&config, NoTls).await?;
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            tracing::trace!(error = %e, "PostgreSQL connection closed");
+        }
+    });
+
+    let row = client
+        .query_opt("SELECT 1 FROM pg_roles WHERE rolname = $1", &[&role_name])
+        .await
+        .map_err(|e| PostgresError::Query(e.to_string()))?;
+
+    Ok(row.is_some())
+}
+
+/// Query installed extensions in a database
+///
+/// Returns a list of extension names (excluding plpgsql which is always installed).
+pub async fn query_extensions(
+    credentials: &PostgresCredentials,
+    host: &str,
+    port: u16,
+) -> Result<Vec<String>, PostgresError> {
+    let config = format!(
+        "host={} port={} user={} password={} dbname={} connect_timeout=10",
+        host, port, credentials.username, credentials.password, credentials.database
+    );
+
+    let (client, connection) = tokio_postgres::connect(&config, NoTls).await?;
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            tracing::trace!(error = %e, "PostgreSQL connection closed");
+        }
+    });
+
+    let rows = client
+        .query(
+            "SELECT extname FROM pg_extension WHERE extname NOT IN ('plpgsql')",
+            &[],
+        )
+        .await
+        .map_err(|e| PostgresError::Query(e.to_string()))?;
+
+    Ok(rows.iter().map(|r| r.get("extname")).collect())
+}
+
+/// Verify that a role has USAGE privilege on a schema
+pub async fn verify_schema_usage(
+    credentials: &PostgresCredentials,
+    host: &str,
+    port: u16,
+    role_name: &str,
+    schema_name: &str,
+) -> Result<bool, PostgresError> {
+    let config = format!(
+        "host={} port={} user={} password={} dbname={} connect_timeout=10",
+        host, port, credentials.username, credentials.password, credentials.database
+    );
+
+    let (client, connection) = tokio_postgres::connect(&config, NoTls).await?;
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            tracing::trace!(error = %e, "PostgreSQL connection closed");
+        }
+    });
+
+    let row = client
+        .query_one(
+            "SELECT has_schema_privilege($1, $2, 'USAGE')",
+            &[&role_name, &schema_name],
+        )
+        .await
+        .map_err(|e| PostgresError::Query(e.to_string()))?;
+
+    Ok(row.get(0))
+}
+
+/// Fetch credentials from a PostgresDatabase role secret
+///
+/// PostgresDatabase secrets have a different format than cluster credentials:
+/// - username: role name
+/// - password: generated password
+/// - host: service hostname
+/// - port: PostgreSQL port
+/// - database: database name
+/// - connection-string: full connection URL
+/// - jdbc-url: JDBC connection string
+pub async fn fetch_role_credentials(
+    client: &Client,
+    namespace: &str,
+    secret_name: &str,
+) -> Result<PostgresCredentials, PostgresError> {
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), namespace);
+
+    let secret = secrets.get(secret_name).await.map_err(|e| match &e {
+        kube::Error::Api(api_err) if api_err.code == 404 => {
+            PostgresError::SecretNotFound(secret_name.to_string())
+        }
+        _ => PostgresError::Kube(e),
+    })?;
+
+    let data = secret
+        .data
+        .as_ref()
+        .ok_or_else(|| PostgresError::SecretMissingKey("no data in secret".into()))?;
+
+    let username = data
+        .get("username")
+        .ok_or_else(|| PostgresError::SecretMissingKey("username".into()))?;
+    let password = data
+        .get("password")
+        .ok_or_else(|| PostgresError::SecretMissingKey("password".into()))?;
+    let database = data
+        .get("database")
+        .ok_or_else(|| PostgresError::SecretMissingKey("database".into()))?;
+
+    Ok(PostgresCredentials {
+        username: String::from_utf8(username.0.clone()).map_err(|_| PostgresError::InvalidUtf8)?,
+        password: String::from_utf8(password.0.clone()).map_err(|_| PostgresError::InvalidUtf8)?,
+        database: String::from_utf8(database.0.clone()).map_err(|_| PostgresError::InvalidUtf8)?,
+    })
+}
+
+/// Decode a single value from secret data
+pub fn decode_secret_value(
+    data: &std::collections::BTreeMap<String, k8s_openapi::ByteString>,
+    key: &str,
+) -> Option<String> {
+    data.get(key)
+        .and_then(|v| String::from_utf8(v.0.clone()).ok())
+}
+
+/// Execute a query and return the first column of the first row
+pub async fn query_single_value<T>(
+    credentials: &PostgresCredentials,
+    host: &str,
+    port: u16,
+    sql: &str,
+) -> Result<Option<T>, PostgresError>
+where
+    T: for<'a> tokio_postgres::types::FromSql<'a>,
+{
+    let config = format!(
+        "host={} port={} user={} password={} dbname={} connect_timeout=10",
+        host, port, credentials.username, credentials.password, credentials.database
+    );
+
+    let (client, connection) = tokio_postgres::connect(&config, NoTls).await?;
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            tracing::trace!(error = %e, "PostgreSQL connection closed");
+        }
+    });
+
+    let row = client
+        .query_opt(sql, &[])
+        .await
+        .map_err(|e| PostgresError::Query(e.to_string()))?;
+
+    Ok(row.map(|r| r.get(0)))
+}

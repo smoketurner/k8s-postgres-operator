@@ -1,4 +1,4 @@
-//! Test fixtures and builders for PostgresCluster resources
+//! Test fixtures and builders for PostgresCluster and PostgresDatabase resources
 //!
 //! All PostgreSQL clusters use Patroni for consistent management.
 //! The replica count determines the cluster topology:
@@ -8,10 +8,11 @@
 
 use kube::core::ObjectMeta;
 use postgres_operator::crd::{
-    ConnectionScalingMetric, CpuScalingMetric, ExternalTrafficPolicy, IssuerKind, IssuerRef,
-    MetricsSpec, PgBouncerSpec, PostgresCluster, PostgresClusterSpec, PostgresVersion,
-    ResourceList, ResourceRequirements, ScalingMetrics, ScalingSpec, ServiceSpec, ServiceType,
-    StorageSpec, TLSSpec,
+    ClusterRef, ConnectionScalingMetric, CpuScalingMetric, DatabaseSpec, ExternalTrafficPolicy,
+    GrantSpec, IssuerKind, IssuerRef, MetricsSpec, PgBouncerSpec, PostgresCluster,
+    PostgresClusterSpec, PostgresDatabase, PostgresDatabaseSpec, PostgresVersion, ResourceList,
+    ResourceRequirements, RolePrivilege, RoleSpec, ScalingMetrics, ScalingSpec, ServiceSpec,
+    ServiceType, StorageSpec, TLSSpec, TablePrivilege,
 };
 use std::collections::BTreeMap;
 
@@ -457,6 +458,222 @@ impl PostgresClusterBuilder {
                 restore: None,
                 scaling: self.scaling,
                 network_policy: self.network_policy,
+            },
+            status: None,
+        }
+    }
+}
+
+// =============================================================================
+// PostgresDatabase Builder
+// =============================================================================
+
+/// Builder for PostgresDatabase test fixtures
+///
+/// Creates PostgresDatabase resources for integration testing.
+/// Provides a fluent API to configure databases, roles, grants, and extensions.
+pub struct PostgresDatabaseBuilder {
+    name: String,
+    namespace: String,
+    cluster_ref: String,
+    cluster_namespace: Option<String>,
+    database_name: String,
+    owner: String,
+    encoding: Option<String>,
+    locale: Option<String>,
+    connection_limit: Option<i32>,
+    roles: Vec<RoleSpec>,
+    grants: Vec<GrantSpec>,
+    extensions: Vec<String>,
+}
+
+impl PostgresDatabaseBuilder {
+    /// Create a new builder with required fields
+    ///
+    /// # Arguments
+    /// * `name` - Name of the PostgresDatabase resource
+    /// * `namespace` - Namespace for the resource
+    /// * `cluster_ref` - Name of the parent PostgresCluster
+    pub fn new(name: &str, namespace: &str, cluster_ref: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            namespace: namespace.to_string(),
+            cluster_ref: cluster_ref.to_string(),
+            cluster_namespace: None,
+            database_name: name.to_string(), // Default to resource name
+            owner: format!("{}_owner", name),
+            encoding: None,
+            locale: None,
+            connection_limit: None,
+            roles: Vec::new(),
+            grants: Vec::new(),
+            extensions: Vec::new(),
+        }
+    }
+
+    /// Set the database name (defaults to resource name)
+    pub fn with_database_name(mut self, name: &str) -> Self {
+        self.database_name = name.to_string();
+        self
+    }
+
+    /// Set the database owner
+    pub fn with_owner(mut self, owner: &str) -> Self {
+        self.owner = owner.to_string();
+        self
+    }
+
+    /// Set the cluster namespace for cross-namespace references
+    pub fn with_cluster_namespace(mut self, namespace: &str) -> Self {
+        self.cluster_namespace = Some(namespace.to_string());
+        self
+    }
+
+    /// Set database encoding
+    pub fn with_encoding(mut self, encoding: &str) -> Self {
+        self.encoding = Some(encoding.to_string());
+        self
+    }
+
+    /// Set database locale
+    pub fn with_locale(mut self, locale: &str) -> Self {
+        self.locale = Some(locale.to_string());
+        self
+    }
+
+    /// Set database connection limit
+    pub fn with_connection_limit(mut self, limit: i32) -> Self {
+        self.connection_limit = Some(limit);
+        self
+    }
+
+    /// Add a role with login capability
+    ///
+    /// This creates a role that can log in with a generated secret.
+    pub fn with_role(mut self, name: &str, secret_name: &str) -> Self {
+        self.roles.push(RoleSpec {
+            name: name.to_string(),
+            privileges: vec![],
+            secret_name: secret_name.to_string(),
+            connection_limit: None,
+            login: true,
+        });
+        self
+    }
+
+    /// Add a role with specific privileges
+    pub fn with_role_privileges(
+        mut self,
+        name: &str,
+        secret_name: &str,
+        privileges: Vec<RolePrivilege>,
+    ) -> Self {
+        self.roles.push(RoleSpec {
+            name: name.to_string(),
+            privileges,
+            secret_name: secret_name.to_string(),
+            connection_limit: None,
+            login: true,
+        });
+        self
+    }
+
+    /// Add a role with full configuration
+    pub fn with_role_full(
+        mut self,
+        name: &str,
+        secret_name: &str,
+        privileges: Vec<RolePrivilege>,
+        connection_limit: Option<i32>,
+        login: bool,
+    ) -> Self {
+        self.roles.push(RoleSpec {
+            name: name.to_string(),
+            privileges,
+            secret_name: secret_name.to_string(),
+            connection_limit,
+            login,
+        });
+        self
+    }
+
+    /// Add a grant for table privileges
+    pub fn with_grant(
+        mut self,
+        role: &str,
+        schema: &str,
+        privileges: Vec<TablePrivilege>,
+        all_tables: bool,
+    ) -> Self {
+        self.grants.push(GrantSpec {
+            role: role.to_string(),
+            schema: schema.to_string(),
+            privileges,
+            all_tables,
+            all_sequences: false,
+            all_functions: false,
+        });
+        self
+    }
+
+    /// Add a grant with full configuration
+    pub fn with_grant_full(
+        mut self,
+        role: &str,
+        schema: &str,
+        privileges: Vec<TablePrivilege>,
+        all_tables: bool,
+        all_sequences: bool,
+        all_functions: bool,
+    ) -> Self {
+        self.grants.push(GrantSpec {
+            role: role.to_string(),
+            schema: schema.to_string(),
+            privileges,
+            all_tables,
+            all_sequences,
+            all_functions,
+        });
+        self
+    }
+
+    /// Add an extension to be created in the database
+    pub fn with_extension(mut self, name: &str) -> Self {
+        self.extensions.push(name.to_string());
+        self
+    }
+
+    /// Add multiple extensions
+    pub fn with_extensions(mut self, extensions: &[&str]) -> Self {
+        for ext in extensions {
+            self.extensions.push(ext.to_string());
+        }
+        self
+    }
+
+    /// Build the PostgresDatabase resource
+    pub fn build(self) -> PostgresDatabase {
+        PostgresDatabase {
+            metadata: ObjectMeta {
+                name: Some(self.name),
+                namespace: Some(self.namespace),
+                ..Default::default()
+            },
+            spec: PostgresDatabaseSpec {
+                cluster_ref: ClusterRef {
+                    name: self.cluster_ref,
+                    namespace: self.cluster_namespace,
+                },
+                database: DatabaseSpec {
+                    name: self.database_name,
+                    owner: self.owner,
+                    encoding: self.encoding,
+                    locale: self.locale,
+                    connection_limit: self.connection_limit,
+                },
+                roles: self.roles,
+                grants: self.grants,
+                extensions: self.extensions,
             },
             status: None,
         }

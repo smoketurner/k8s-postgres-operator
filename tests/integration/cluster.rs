@@ -24,6 +24,9 @@ static SHARED_CLUSTER: OnceCell<Arc<SharedTestCluster>> = OnceCell::const_new();
 /// CRD installation tracking (should only be done once)
 static CRD_INSTALLED: OnceCell<()> = OnceCell::const_new();
 
+/// PostgresDatabase CRD installation tracking (should only be done once)
+static DATABASE_CRD_INSTALLED: OnceCell<()> = OnceCell::const_new();
+
 /// A shared test cluster for all integration tests
 ///
 /// Uses an existing Kubernetes cluster via kubeconfig.
@@ -79,6 +82,21 @@ pub async fn ensure_crd_installed(cluster: &SharedTestCluster) -> Result<(), Crd
                 ))
             })?;
             crate::install_crd(client).await
+        })
+        .await
+        .map(|_| ())
+}
+
+/// Ensure PostgresDatabase CRD is installed (idempotent - only runs once per test run)
+pub async fn ensure_database_crd_installed(cluster: &SharedTestCluster) -> Result<(), CrdError> {
+    DATABASE_CRD_INSTALLED
+        .get_or_try_init(|| async {
+            let client = cluster.new_client().await.map_err(|e| {
+                CrdError::KubeError(kube::Error::Service(
+                    std::io::Error::other(e.to_string()).into(),
+                ))
+            })?;
+            crate::install_database_crd(client).await
         })
         .await
         .map(|_| ())

@@ -85,7 +85,38 @@ pub async fn reconcile_database(
     }
 
     // Get the referenced cluster
-    let cluster = get_referenced_cluster(&db, &ctx, &namespace).await?;
+    let cluster = match get_referenced_cluster(&db, &ctx, &namespace).await {
+        Ok(cluster) => cluster,
+        Err(DatabaseError::ClusterNotFound(ns, cluster_name)) => {
+            info!(
+                name = %name,
+                cluster = %cluster_name,
+                "Waiting for cluster to exist"
+            );
+
+            // Update status to show we're waiting for cluster
+            update_status(
+                &db,
+                &ctx,
+                &namespace,
+                DatabasePhase::Pending,
+                vec![DatabaseCondition {
+                    condition_type: DatabaseConditionType::ClusterReady,
+                    status: "False".to_string(),
+                    last_transition_time: Some(chrono::Utc::now().to_rfc3339()),
+                    reason: Some("ClusterNotFound".to_string()),
+                    message: Some(format!("Cluster {}/{} not found", ns, cluster_name)),
+                }],
+                None,
+                vec![],
+            )
+            .await?;
+
+            // Requeue to check again
+            return Ok(Action::requeue(Duration::from_secs(10)));
+        }
+        Err(e) => return Err(e),
+    };
 
     // Check if cluster is ready
     let cluster_phase = cluster

@@ -43,6 +43,41 @@ impl ScopedOperator {
             shutdown_tx: Some(shutdown_tx),
         }
     }
+
+    /// Start operators for both PostgresCluster and PostgresDatabase
+    ///
+    /// This runs both the cluster controller and the database controller
+    /// concurrently. Use this for tests that need PostgresDatabase functionality.
+    pub async fn start_with_database(client: Client) -> Self {
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        tracing::info!("Starting scoped operators (cluster + database)...");
+
+        let cluster_client = client.clone();
+        let database_client = client;
+
+        let handle = tokio::spawn(async move {
+            tokio::select! {
+                _ = run_operator(cluster_client) => {
+                    tracing::debug!("Cluster operator exited normally");
+                }
+                _ = run_database_operator(database_client) => {
+                    tracing::debug!("Database operator exited normally");
+                }
+                _ = shutdown_rx => {
+                    tracing::debug!("Operators received shutdown signal");
+                }
+            }
+        });
+
+        // Give the controllers a moment to start watching
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        Self {
+            handle,
+            shutdown_tx: Some(shutdown_tx),
+        }
+    }
 }
 
 impl Drop for ScopedOperator {
@@ -103,4 +138,43 @@ async fn run_operator(client: Client) {
 /// Starts a scoped operator that will be properly cleaned up
 pub async fn ensure_operator_running(client: Client) -> ScopedOperator {
     ScopedOperator::start(client).await
+}
+
+/// Starts both cluster and database operators
+/// Use this for PostgresDatabase integration tests
+pub async fn ensure_operator_running_with_database(client: Client) -> ScopedOperator {
+    ScopedOperator::start_with_database(client).await
+}
+
+/// Run the database operator controller
+async fn run_database_operator(client: Client) {
+    use futures::StreamExt;
+    use k8s_openapi::api::core::v1::Secret;
+    use kube::Api;
+    use kube::runtime::Controller;
+    use kube::runtime::watcher::Config as WatcherConfig;
+    use postgres_operator::crd::PostgresDatabase;
+    use postgres_operator::{DatabaseContext, database_error_policy, reconcile_database};
+
+    let ctx = Arc::new(DatabaseContext::new(client.clone()));
+
+    let databases: Api<PostgresDatabase> = Api::all(client.clone());
+    let secrets: Api<Secret> = Api::all(client.clone());
+
+    let watcher_config = WatcherConfig::default().any_semantic();
+
+    Controller::new(databases, watcher_config.clone())
+        .owns(secrets, watcher_config)
+        .run(reconcile_database, database_error_policy, ctx)
+        .for_each(|result| async move {
+            match result {
+                Ok((obj, _action)) => {
+                    tracing::debug!("Reconciled database: {}", obj.name);
+                }
+                Err(e) => {
+                    tracing::error!("Database reconciliation error: {:?}", e);
+                }
+            }
+        })
+        .await;
 }

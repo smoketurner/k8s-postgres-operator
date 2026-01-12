@@ -1,8 +1,10 @@
-//! Wait condition helpers for PostgresCluster resources
+//! Wait condition helpers for PostgresCluster and PostgresDatabase resources
 
 use kube::Api;
 use kube::runtime::wait::{Condition, await_condition};
-use postgres_operator::crd::{ClusterPhase, PostgresCluster};
+use postgres_operator::crd::{
+    ClusterPhase, DatabaseConditionType, DatabasePhase, PostgresCluster, PostgresDatabase,
+};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -13,6 +15,9 @@ pub enum WaitError {
 
     #[error("Watch error: {0}")]
     Watch(#[from] kube::runtime::wait::Error),
+
+    #[error("Kubernetes API error: {0}")]
+    KubeError(#[from] kube::Error),
 
     #[error("Resource not found after wait")]
     ResourceNotFound,
@@ -262,3 +267,125 @@ where
 
     Ok(())
 }
+
+// =============================================================================
+// PostgresDatabase Wait Conditions
+// =============================================================================
+
+/// Condition that checks if PostgresDatabase is in a specific phase
+pub fn database_is_phase(expected: DatabasePhase) -> impl Condition<PostgresDatabase> {
+    move |obj: Option<&PostgresDatabase>| {
+        obj.and_then(|db| db.status.as_ref())
+            .map(|status| status.phase == expected)
+            .unwrap_or(false)
+    }
+}
+
+/// Condition that checks if PostgresDatabase is in Ready phase
+pub fn database_ready() -> impl Condition<PostgresDatabase> {
+    database_is_phase(DatabasePhase::Ready)
+}
+
+/// Condition that checks if PostgresDatabase has a specific condition with given status
+pub fn database_has_condition(
+    condition_type: DatabaseConditionType,
+    expected_status: &str,
+) -> impl Condition<PostgresDatabase> {
+    let status = expected_status.to_string();
+    move |obj: Option<&PostgresDatabase>| {
+        obj.and_then(|db| db.status.as_ref())
+            .map(|s| {
+                s.conditions
+                    .iter()
+                    .any(|c| c.condition_type == condition_type && c.status == status)
+            })
+            .unwrap_or(false)
+    }
+}
+
+/// Condition that checks if PostgresDatabase has connection info populated
+pub fn database_has_connection_info() -> impl Condition<PostgresDatabase> {
+    |obj: Option<&PostgresDatabase>| {
+        obj.and_then(|db| db.status.as_ref())
+            .and_then(|status| status.connection_info.as_ref())
+            .is_some()
+    }
+}
+
+/// Condition that checks if PostgresDatabase has credential secrets
+pub fn database_has_secrets(count: usize) -> impl Condition<PostgresDatabase> {
+    move |obj: Option<&PostgresDatabase>| {
+        obj.and_then(|db| db.status.as_ref())
+            .map(|status| status.credential_secrets.len() >= count)
+            .unwrap_or(false)
+    }
+}
+
+/// Condition that checks if observed_generation matches metadata.generation
+pub fn database_generation_observed() -> impl Condition<PostgresDatabase> {
+    |obj: Option<&PostgresDatabase>| {
+        obj.map(|db| {
+            let generation = db.metadata.generation;
+            let observed = db.status.as_ref().and_then(|s| s.observed_generation);
+            generation == observed
+        })
+        .unwrap_or(false)
+    }
+}
+
+/// Wait for a PostgresDatabase to reach a condition with timeout
+pub async fn wait_for_database<C>(
+    api: &Api<PostgresDatabase>,
+    name: &str,
+    condition: C,
+    timeout: Duration,
+) -> Result<PostgresDatabase, WaitError>
+where
+    C: Condition<PostgresDatabase>,
+{
+    let cond = await_condition(api.clone(), name, condition);
+
+    let result = tokio::time::timeout(timeout, cond)
+        .await
+        .map_err(|_| WaitError::Timeout)?
+        .map_err(WaitError::Watch)?;
+
+    result.ok_or(WaitError::ResourceNotFound)
+}
+
+/// Wait for a PostgresDatabase to be completely deleted (returns 404)
+///
+/// This polls until the resource is actually gone, not just marked for deletion.
+/// This ensures finalizers have completed.
+pub async fn wait_for_database_deletion(
+    api: &Api<PostgresDatabase>,
+    name: &str,
+    timeout: Duration,
+) -> Result<(), WaitError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let poll_interval = Duration::from_millis(500);
+
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(WaitError::Timeout);
+        }
+
+        match api.get(name).await {
+            Ok(_) => {
+                // Resource still exists, wait and retry
+                tokio::time::sleep(poll_interval).await;
+            }
+            Err(kube::Error::Api(ref ae)) if ae.code == 404 => {
+                // Resource is gone, success!
+                return Ok(());
+            }
+            Err(e) => {
+                // Unexpected error
+                return Err(WaitError::KubeError(e));
+            }
+        }
+    }
+}
+
+/// Timeout for database operations (shorter than cluster operations)
+pub const DATABASE_TIMEOUT: Duration = Duration::from_secs(60);
