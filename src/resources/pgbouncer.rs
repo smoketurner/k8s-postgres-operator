@@ -385,16 +385,18 @@ pub fn generate_pgbouncer_deployment(cluster: &PostgresCluster) -> Deployment {
             value: Some("extra_float_digits,search_path".to_string()),
             ..Default::default()
         },
-        // Always use SSL when connecting to PostgreSQL backend (pg_hba.conf requires it)
-        EnvVar {
+    ];
+
+    // Configure TLS based on cluster TLS settings
+    // - Client-side (client->PgBouncer): follows cluster TLS setting
+    // - Server-side (PgBouncer->PostgreSQL): uses 'prefer' when TLS disabled (Spilo requires SSL by default)
+    if tls.enabled && tls.issuer_ref.is_some() {
+        // Use TLS for both client and server connections
+        env_vars.push(EnvVar {
             name: "PGBOUNCER_SERVER_TLS_SSLMODE".to_string(),
             value: Some("require".to_string()),
             ..Default::default()
-        },
-    ];
-
-    // Add client TLS env vars if TLS is enabled (cert-manager integration)
-    if tls.enabled && tls.issuer_ref.is_some() {
+        });
         // cert-manager always uses tls.crt, tls.key, and ca.crt
         env_vars.push(EnvVar {
             name: "PGBOUNCER_CLIENT_TLS_SSLMODE".to_string(),
@@ -409,6 +411,20 @@ pub fn generate_pgbouncer_deployment(cluster: &PostgresCluster) -> Deployment {
         env_vars.push(EnvVar {
             name: "PGBOUNCER_CLIENT_TLS_KEY_FILE".to_string(),
             value: Some("/tls/tls.key".to_string()),
+            ..Default::default()
+        });
+    } else {
+        // Server-side: use 'prefer' because Spilo's pg_hba.conf often requires SSL
+        // This allows PgBouncer to use TLS when PostgreSQL requires it
+        env_vars.push(EnvVar {
+            name: "PGBOUNCER_SERVER_TLS_SSLMODE".to_string(),
+            value: Some("prefer".to_string()),
+            ..Default::default()
+        });
+        // Client-side: disable TLS for client connections
+        env_vars.push(EnvVar {
+            name: "PGBOUNCER_CLIENT_TLS_SSLMODE".to_string(),
+            value: Some("disable".to_string()),
             ..Default::default()
         });
     }
@@ -687,16 +703,18 @@ pub fn generate_pgbouncer_replica_deployment(cluster: &PostgresCluster) -> Deplo
             value: Some("extra_float_digits,search_path".to_string()),
             ..Default::default()
         },
-        // Always use SSL when connecting to PostgreSQL backend (pg_hba.conf requires it)
-        EnvVar {
+    ];
+
+    // Configure TLS based on cluster TLS settings
+    // - Client-side (client->PgBouncer): follows cluster TLS setting
+    // - Server-side (PgBouncer->PostgreSQL): uses 'prefer' when TLS disabled (Spilo requires SSL by default)
+    if tls.enabled && tls.issuer_ref.is_some() {
+        // Use TLS for both client and server connections
+        env_vars.push(EnvVar {
             name: "PGBOUNCER_SERVER_TLS_SSLMODE".to_string(),
             value: Some("require".to_string()),
             ..Default::default()
-        },
-    ];
-
-    // Add client TLS env vars if TLS is enabled (cert-manager integration)
-    if tls.enabled && tls.issuer_ref.is_some() {
+        });
         // cert-manager always uses tls.crt, tls.key, and ca.crt
         env_vars.push(EnvVar {
             name: "PGBOUNCER_CLIENT_TLS_SSLMODE".to_string(),
@@ -711,6 +729,20 @@ pub fn generate_pgbouncer_replica_deployment(cluster: &PostgresCluster) -> Deplo
         env_vars.push(EnvVar {
             name: "PGBOUNCER_CLIENT_TLS_KEY_FILE".to_string(),
             value: Some("/tls/tls.key".to_string()),
+            ..Default::default()
+        });
+    } else {
+        // Server-side: use 'prefer' because Spilo's pg_hba.conf often requires SSL
+        // This allows PgBouncer to use TLS when PostgreSQL requires it
+        env_vars.push(EnvVar {
+            name: "PGBOUNCER_SERVER_TLS_SSLMODE".to_string(),
+            value: Some("prefer".to_string()),
+            ..Default::default()
+        });
+        // Client-side: disable TLS for client connections
+        env_vars.push(EnvVar {
+            name: "PGBOUNCER_CLIENT_TLS_SSLMODE".to_string(),
+            value: Some("disable".to_string()),
             ..Default::default()
         });
     }

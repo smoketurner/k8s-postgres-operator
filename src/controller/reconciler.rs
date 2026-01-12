@@ -512,9 +512,36 @@ async fn check_and_update_status(
         );
     }
 
+    // Update PgBouncer ready replicas status if PgBouncer is enabled
+    if pgbouncer::is_pgbouncer_enabled(cluster) {
+        let deploy_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), ns);
+        let has_replica_pooler = pgbouncer::is_replica_pooler_enabled(cluster);
+        let pgbouncer_ready =
+            get_pgbouncer_ready_replicas(&deploy_api, &name, has_replica_pooler).await;
+
+        debug!(
+            cluster = %name,
+            pgbouncer_ready = ?pgbouncer_ready,
+            has_replica_pooler = has_replica_pooler,
+            "Updating PgBouncer status"
+        );
+
+        if let Err(e) = status_manager
+            .update_pgbouncer_status(pgbouncer_ready)
+            .await
+        {
+            // Log but don't fail the reconciliation - this is supplementary status data
+            debug!(
+                cluster = %name,
+                error = %e,
+                "Failed to update PgBouncer status (non-fatal)"
+            );
+        }
+    }
+
     // Requeue based on phase - running clusters need less frequent checks
     let requeue_duration = match current_phase {
-        ClusterPhase::Running => Duration::from_secs(60),
+        ClusterPhase::Running => Duration::from_secs(30),
         ClusterPhase::Degraded => Duration::from_secs(15),
         _ => Duration::from_secs(30),
     };
@@ -1070,6 +1097,33 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
         );
     }
 
+    // Update PgBouncer ready replicas status if PgBouncer is enabled
+    if pgbouncer::is_pgbouncer_enabled(cluster) {
+        let deploy_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), ns);
+        let has_replica_pooler = pgbouncer::is_replica_pooler_enabled(cluster);
+        let pgbouncer_ready =
+            get_pgbouncer_ready_replicas(&deploy_api, &name, has_replica_pooler).await;
+
+        debug!(
+            cluster = %name,
+            pgbouncer_ready = ?pgbouncer_ready,
+            has_replica_pooler = has_replica_pooler,
+            "Updating PgBouncer status (reconcile_cluster)"
+        );
+
+        if let Err(e) = status_manager
+            .update_pgbouncer_status(pgbouncer_ready)
+            .await
+        {
+            // Log but don't fail the reconciliation - this is supplementary status data
+            debug!(
+                cluster = %name,
+                error = %e,
+                "Failed to update PgBouncer status (non-fatal)"
+            );
+        }
+    }
+
     // Requeue interval based on current phase
     let requeue_duration = match current_phase {
         ClusterPhase::Creating | ClusterPhase::Recovering => Duration::from_secs(5),
@@ -1182,6 +1236,50 @@ async fn get_statefulset_status(api: &Api<StatefulSet>, name: &str) -> (i32, i32
         }
         Err(_) => (0, 1, None),
     }
+}
+
+/// Get PgBouncer deployment ready replicas count
+///
+/// Returns the total ready replicas across all PgBouncer deployments (primary pooler
+/// and optionally replica pooler).
+async fn get_pgbouncer_ready_replicas(
+    api: &Api<Deployment>,
+    cluster_name: &str,
+    has_replica_pooler: bool,
+) -> Option<i32> {
+    let mut total_ready = 0i32;
+
+    // Check primary pooler deployment
+    match api.get(&format!("{}-pooler", cluster_name)).await {
+        Ok(deploy) => {
+            let ready = deploy
+                .status
+                .as_ref()
+                .and_then(|s| s.ready_replicas)
+                .unwrap_or(0);
+            total_ready += ready;
+        }
+        Err(_) => return None, // Deployment doesn't exist yet
+    }
+
+    // Check replica pooler deployment if enabled
+    if has_replica_pooler {
+        match api.get(&format!("{}-pooler-repl", cluster_name)).await {
+            Ok(deploy) => {
+                let ready = deploy
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.ready_replicas)
+                    .unwrap_or(0);
+                total_ready += ready;
+            }
+            Err(_) => {
+                // Replica pooler deployment doesn't exist yet, just return primary count
+            }
+        }
+    }
+
+    Some(total_ready)
 }
 
 /// Apply a Kubernetes resource using server-side apply

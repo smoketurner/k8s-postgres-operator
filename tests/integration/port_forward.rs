@@ -209,10 +209,7 @@ async fn resolve_service_to_pod(
             cluster_name
         )
     } else {
-        format!(
-            "postgres-operator.smoketurner.com/cluster={}",
-            cluster_name
-        )
+        format!("postgres-operator.smoketurner.com/cluster={}", cluster_name)
     };
 
     tracing::debug!(label_selector = %label_selector, "Resolving service to pod");
@@ -252,10 +249,7 @@ async fn run_port_forward(
     // Bind to the local port
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", local_port)).await?;
 
-    tracing::debug!(
-        local_port = local_port,
-        "Port forward listener started"
-    );
+    tracing::debug!(local_port = local_port, "Port forward listener started");
 
     loop {
         tokio::select! {

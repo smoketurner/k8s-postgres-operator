@@ -751,6 +751,32 @@ impl<'a> StatusManager<'a> {
 
         Ok(())
     }
+
+    /// Update PgBouncer ready replicas status
+    ///
+    /// This updates the pgbouncerReadyReplicas field based on the actual
+    /// Deployment readyReplicas count.
+    pub async fn update_pgbouncer_status(&self, ready_replicas: Option<i32>) -> Result<()> {
+        let api: Api<PostgresCluster> = Api::namespaced(self.ctx.client.clone(), self.ns);
+        let name = self.cluster.name_any();
+
+        // Note: Field name must be camelCase to match the serde(rename_all = "camelCase")
+        // on PostgresClusterStatus
+        let patch = serde_json::json!({
+            "status": {
+                "pgbouncerReadyReplicas": ready_replicas
+            }
+        });
+
+        api.patch_status(
+            &name,
+            &PatchParams::apply("postgres-operator"),
+            &Patch::Merge(&patch),
+        )
+        .await?;
+
+        Ok(())
+    }
 }
 
 /// Check if the cluster spec has changed by comparing observed generation

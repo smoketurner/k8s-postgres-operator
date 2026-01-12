@@ -78,15 +78,12 @@ pub async fn fetch_credentials(
 ) -> Result<PostgresCredentials, PostgresError> {
     let secrets: Api<Secret> = Api::namespaced(client.clone(), namespace);
 
-    let secret = secrets
-        .get(secret_name)
-        .await
-        .map_err(|e| match &e {
-            kube::Error::Api(api_err) if api_err.code == 404 => {
-                PostgresError::SecretNotFound(secret_name.to_string())
-            }
-            _ => PostgresError::Kube(e),
-        })?;
+    let secret = secrets.get(secret_name).await.map_err(|e| match &e {
+        kube::Error::Api(api_err) if api_err.code == 404 => {
+            PostgresError::SecretNotFound(secret_name.to_string())
+        }
+        _ => PostgresError::Kube(e),
+    })?;
 
     PostgresCredentials::from_secret(&secret)
 }

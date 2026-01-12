@@ -143,10 +143,10 @@ impl TestNamespace {
 
         let dp = DeleteParams::default();
         for cluster in cluster_list.items {
-            if let Some(name) = cluster.metadata.name {
-                if let Err(e) = clusters.delete(&name, &dp).await {
-                    tracing::debug!("Failed to delete cluster {}: {}", name, e);
-                }
+            if let Some(name) = cluster.metadata.name
+                && let Err(e) = clusters.delete(&name, &dp).await
+            {
+                tracing::debug!("Failed to delete cluster {}: {}", name, e);
             }
         }
     }

@@ -12,18 +12,18 @@
 //!
 //! Run with: cargo test --test integration connectivity -- --ignored --test-threads=1
 
-use kube::api::PostParams;
 use kube::Api;
+use kube::api::PostParams;
 use postgres_operator::crd::{PostgresCluster, PostgresVersion};
 
 use crate::port_forward::{PortForward, PortForwardTarget};
 use crate::postgres::{
-    execute_sql, fetch_credentials, verify_connection_with_retry, CONNECT_RETRY_INTERVAL,
-    MAX_CONNECT_RETRIES, POSTGRES_READY_TIMEOUT,
+    CONNECT_RETRY_INTERVAL, MAX_CONNECT_RETRIES, POSTGRES_READY_TIMEOUT, execute_sql,
+    fetch_credentials, verify_connection_with_retry,
 };
 use crate::{
-    cluster_operational, ensure_crd_installed, ensure_operator_running, wait_for_cluster,
-    PostgresClusterBuilder, ScopedOperator, SharedTestCluster, TestNamespace,
+    PostgresClusterBuilder, ScopedOperator, SharedTestCluster, TestNamespace, cluster_operational,
+    ensure_crd_installed, ensure_operator_running, wait_for_cluster,
 };
 
 /// Test context with operator and cluster client
@@ -93,9 +93,14 @@ async fn test_standalone_connectivity() {
 
     // Wait for cluster to be operational
     tracing::info!("Waiting for cluster to become operational...");
-    wait_for_cluster(&api, "standalone", cluster_operational(1), POSTGRES_READY_TIMEOUT)
-        .await
-        .expect("cluster should become operational");
+    wait_for_cluster(
+        &api,
+        "standalone",
+        cluster_operational(1),
+        POSTGRES_READY_TIMEOUT,
+    )
+    .await
+    .expect("cluster should become operational");
 
     // Fetch credentials
     let credentials = fetch_credentials(&client, ns.name(), "standalone-credentials")
@@ -245,9 +250,14 @@ async fn test_ha_cluster_connectivity() {
 
     // Wait for all 3 replicas to be ready
     tracing::info!("Waiting for HA cluster to become operational...");
-    wait_for_cluster(&api, "ha-cluster", cluster_operational(3), POSTGRES_READY_TIMEOUT)
-        .await
-        .expect("cluster should become operational");
+    wait_for_cluster(
+        &api,
+        "ha-cluster",
+        cluster_operational(3),
+        POSTGRES_READY_TIMEOUT,
+    )
+    .await
+    .expect("cluster should become operational");
 
     // Fetch credentials
     let credentials = fetch_credentials(&client, ns.name(), "ha-cluster-credentials")
@@ -350,9 +360,14 @@ async fn test_streaming_replica_connectivity() {
 
     // Wait for both replicas to be ready
     tracing::info!("Waiting for streaming replica cluster to become operational...");
-    wait_for_cluster(&api, "streaming", cluster_operational(2), POSTGRES_READY_TIMEOUT)
-        .await
-        .expect("cluster should become operational");
+    wait_for_cluster(
+        &api,
+        "streaming",
+        cluster_operational(2),
+        POSTGRES_READY_TIMEOUT,
+    )
+    .await
+    .expect("cluster should become operational");
 
     // Fetch credentials
     let credentials = fetch_credentials(&client, ns.name(), "streaming-credentials")
@@ -462,9 +477,14 @@ async fn test_pgbouncer_connectivity() {
 
     // Wait for cluster to be operational
     tracing::info!("Waiting for PgBouncer cluster to become operational...");
-    wait_for_cluster(&api, "pgbouncer", cluster_operational(3), POSTGRES_READY_TIMEOUT)
-        .await
-        .expect("cluster should become operational");
+    wait_for_cluster(
+        &api,
+        "pgbouncer",
+        cluster_operational(3),
+        POSTGRES_READY_TIMEOUT,
+    )
+    .await
+    .expect("cluster should become operational");
 
     // Also wait for PgBouncer to be ready
     tracing::info!("Waiting for PgBouncer to be ready...");
@@ -534,7 +554,9 @@ async fn test_pgbouncer_connectivity() {
     .expect("verify pooler connection");
 
     pooler_info.assert_version(16);
-    pooler_info.assert_tls(false);
+    // Note: pg_stat_ssl shows the PgBouncer->PostgreSQL connection, not client->PgBouncer.
+    // Since Spilo requires SSL by default, the server-side connection will use TLS
+    // even when client-side TLS is disabled. We don't assert TLS status for pooler connections.
     // Connection through PgBouncer should still route to primary
     pooler_info.assert_is_primary();
 
