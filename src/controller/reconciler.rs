@@ -1063,6 +1063,11 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
                 ClusterPhase::Pending | ClusterPhase::Deleting => {
                     // These are handled elsewhere (initial state / deletion handler)
                 }
+                ClusterPhase::Superseded => {
+                    // Superseded is set by the upgrade_reconciler after cutover.
+                    // The normal reconciler should not transition to this state.
+                    // If we somehow get here, just leave the status as-is.
+                }
             }
         }
         TransitionResult::InvalidTransition { current, event } => {
@@ -1158,6 +1163,8 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
         ClusterPhase::Running => Duration::from_secs(60),
         ClusterPhase::Failed => Duration::from_secs(30),
         ClusterPhase::Pending | ClusterPhase::Deleting => Duration::from_secs(5),
+        // Superseded clusters don't need frequent reconciliation - they're frozen
+        ClusterPhase::Superseded => Duration::from_secs(300),
     };
 
     Ok(Action::requeue(requeue_duration))
@@ -1803,6 +1810,7 @@ async fn emit_state_transition_event(
         ClusterPhase::Failed => "ClusterFailed",
         ClusterPhase::Deleting => "ClusterDeleting",
         ClusterPhase::Pending => "ClusterPending",
+        ClusterPhase::Superseded => "ClusterSuperseded",
     };
 
     let note = Some(format!(

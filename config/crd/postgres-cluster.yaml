@@ -552,7 +552,7 @@ spec:
                     - Degraded
                     - Failed
                     - Recovering
-                    - Hibernating
+                    - Superseded
                     - Deleting
                 readyReplicas:
                   type: integer
@@ -713,3 +713,35 @@ spec:
                     database:
                       type: string
                       description: Default database name
+                successor:
+                  type: object
+                  description: Reference to the successor cluster that superseded this one after an upgrade
+                  properties:
+                    name:
+                      type: string
+                      description: Name of the referenced cluster
+                    namespace:
+                      type: string
+                      description: Namespace of the referenced cluster
+                    upgradeName:
+                      type: string
+                      description: Name of the PostgresUpgrade that created this relationship
+                    createdAt:
+                      type: string
+                      description: Timestamp when the relationship was created (RFC3339 format)
+                origin:
+                  type: object
+                  description: Reference to the cluster this was upgraded from
+                  properties:
+                    name:
+                      type: string
+                      description: Name of the referenced cluster
+                    namespace:
+                      type: string
+                      description: Namespace of the referenced cluster
+                    upgradeName:
+                      type: string
+                      description: Name of the PostgresUpgrade that created this relationship
+                    createdAt:
+                      type: string
+                      description: Timestamp when the relationship was created (RFC3339 format)

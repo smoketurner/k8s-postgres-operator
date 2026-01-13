@@ -39,6 +39,10 @@ spec:
         - name: Phase
           type: string
           jsonPath: .status.phase
+        - name: Successor
+          type: string
+          jsonPath: .status.successor.name
+          priority: 1
         - name: Ready
           type: integer
           jsonPath: .status.readyReplicas
@@ -119,6 +123,14 @@ spec:
                   additionalProperties:
                     type: string
                   description: Custom PostgreSQL configuration parameters
+                labels:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: |
+                    Custom labels to apply to all resources created for this cluster.
+                    Use for cost allocation, team ownership, and organizational tracking.
+                    Common labels: team, cost-center, project, environment
                 backup:
                   type: object
                   description: |
@@ -339,26 +351,45 @@ spec:
                       default: false
                 tls:
                   type: object
-                  description: TLS configuration for encrypted connections
+                  description: |
+                    TLS configuration for encrypted connections.
+                    TLS is enabled by default for security. Requires cert-manager to be installed.
                   properties:
                     enabled:
                       type: boolean
-                      description: Enable TLS for PostgreSQL connections
-                    certSecret:
+                      description: Enable TLS for PostgreSQL connections (default true)
+                      default: true
+                    issuerRef:
+                      type: object
+                      description: Reference to a cert-manager Issuer or ClusterIssuer
+                      required:
+                        - name
+                      properties:
+                        name:
+                          type: string
+                          description: Name of the Issuer or ClusterIssuer
+                        kind:
+                          type: string
+                          description: Kind of issuer (Issuer or ClusterIssuer)
+                          enum:
+                            - Issuer
+                            - ClusterIssuer
+                          default: ClusterIssuer
+                        group:
+                          type: string
+                          description: API group of the issuer (default cert-manager.io)
+                          default: cert-manager.io
+                    additionalDnsNames:
+                      type: array
+                      description: Additional DNS names to include in the certificate
+                      items:
+                        type: string
+                    duration:
                       type: string
-                      description: Name of secret containing TLS certificate and key
-                    caSecret:
+                      description: Certificate validity duration (e.g., "2160h" for 90 days)
+                    renewBefore:
                       type: string
-                      description: Name of secret containing CA certificate
-                    certificateFile:
-                      type: string
-                      description: Certificate filename in the secret
-                    privateKeyFile:
-                      type: string
-                      description: Private key filename in the secret
-                    caFile:
-                      type: string
-                      description: CA certificate filename in the secret
+                      description: Time before expiry to renew certificate (e.g., "360h" for 15 days)
                 metrics:
                   type: object
                   properties:
@@ -459,6 +490,135 @@ spec:
                         timeline:
                           type: integer
                           description: Restore to a specific timeline
+                scaling:
+                  type: object
+                  description: |
+                    Auto-scaling configuration for the cluster.
+                    Requires KEDA to be installed in the cluster.
+                  properties:
+                    minReplicas:
+                      type: integer
+                      description: |
+                        Minimum number of replicas for auto-scaling.
+                        Should be >= 1 (typically >= spec.replicas).
+                        Default: spec.replicas (no scale-down below desired)
+                      minimum: 1
+                    maxReplicas:
+                      type: integer
+                      description: Maximum number of replicas
+                      minimum: 1
+                      default: 10
+                    replicationLagThreshold:
+                      type: string
+                      description: |
+                        Replication lag threshold for reader service routing.
+                        Replicas exceeding this threshold are excluded from the reader service.
+                        Format: duration string (e.g., "30s", "1m").
+                        Default: 30s
+                      default: "30s"
+                    lagThresholdBytes:
+                      type: integer
+                      format: int64
+                      description: |
+                        Replication lag threshold in bytes (alternative to time-based threshold).
+                        If set, this takes precedence over replicationLagThreshold.
+                    estimatedThroughputMbPerSec:
+                      type: integer
+                      description: |
+                        Estimated write throughput in MB/s for converting time-based lag thresholds to bytes.
+                        Only used when lagThresholdBytes is not set.
+                        Default: 100
+                      default: 100
+                    metrics:
+                      type: object
+                      description: Scaling metrics configuration
+                      properties:
+                        cpu:
+                          type: object
+                          description: CPU-based scaling configuration
+                          properties:
+                            targetUtilization:
+                              type: integer
+                              description: Target CPU utilization percentage (0-100)
+                              minimum: 1
+                              maximum: 100
+                              default: 70
+                        connections:
+                          type: object
+                          description: Connection-based scaling configuration
+                          properties:
+                            targetPerReplica:
+                              type: integer
+                              description: Target active connections per replica
+                              minimum: 1
+                              default: 100
+                networkPolicy:
+                  type: object
+                  description: |
+                    Network policy configuration for the cluster.
+                    Controls which pods and namespaces can connect to the PostgreSQL cluster.
+                  properties:
+                    allowExternalAccess:
+                      type: boolean
+                      description: |
+                        Allow connections from RFC1918 private IP ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16).
+                        Use for development/testing environments.
+                        Default: false (secure by default)
+                      default: false
+                    allowFrom:
+                      type: array
+                      description: |
+                        List of additional sources allowed to connect to the cluster.
+                        Useful for cross-namespace access.
+                      items:
+                        type: object
+                        properties:
+                          namespaceSelector:
+                            type: object
+                            description: Selects namespaces using labels
+                            properties:
+                              matchLabels:
+                                type: object
+                                additionalProperties:
+                                  type: string
+                                description: Labels that namespaces must have to be allowed
+                              matchExpressions:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    key:
+                                      type: string
+                                    operator:
+                                      type: string
+                                      enum: [In, NotIn, Exists, DoesNotExist]
+                                    values:
+                                      type: array
+                                      items:
+                                        type: string
+                          podSelector:
+                            type: object
+                            description: Selects pods within selected namespaces
+                            properties:
+                              matchLabels:
+                                type: object
+                                additionalProperties:
+                                  type: string
+                                description: Labels that pods must have to be allowed
+                              matchExpressions:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    key:
+                                      type: string
+                                    operator:
+                                      type: string
+                                      enum: [In, NotIn, Exists, DoesNotExist]
+                                    values:
+                                      type: array
+                                      items:
+                                        type: string
             status:
               type: object
               properties:
@@ -474,6 +634,7 @@ spec:
                     - Degraded
                     - Failed
                     - Recovering
+                    - Superseded
                     - Deleting
                 readyReplicas:
                   type: integer
@@ -680,4 +841,90 @@ spec:
                     restoreCompletedAt:
                       type: string
                       description: Timestamp when the restore completed
+                replicationLag:
+                  type: array
+                  description: Replication lag information for each replica pod
+                  items:
+                    type: object
+                    properties:
+                      podName:
+                        type: string
+                        description: Name of the replica pod
+                      lagBytes:
+                        type: integer
+                        format: int64
+                        description: Replication lag in bytes
+                      lagTime:
+                        type: string
+                        description: Replication lag as duration string (e.g., "1.5s", "30ms")
+                      exceedsThreshold:
+                        type: boolean
+                        description: Whether this replica exceeds the configured lag threshold
+                      lastMeasured:
+                        type: string
+                        description: Last time the lag was measured (RFC3339 format)
+                      state:
+                        type: string
+                        description: Replication state (streaming, catchup, etc.)
+                maxReplicationLagBytes:
+                  type: integer
+                  format: int64
+                  description: Maximum replication lag across all replicas (in bytes)
+                replicasLagging:
+                  type: boolean
+                  description: Whether any replica exceeds the configured lag threshold
+                connectionInfo:
+                  type: object
+                  description: Connection information for applications to connect to this cluster
+                  properties:
+                    primary:
+                      type: string
+                      description: "Primary (read-write) service endpoint. Format: {cluster}-primary.{namespace}.svc:5432"
+                    replicas:
+                      type: string
+                      description: "Replica (read-only) service endpoint. Format: {cluster}-repl.{namespace}.svc:5432"
+                    pooler:
+                      type: string
+                      description: "PgBouncer pooler endpoint for primary connections. Format: {cluster}-pooler.{namespace}.svc:6432"
+                    poolerReplicas:
+                      type: string
+                      description: "PgBouncer pooler endpoint for replica connections. Format: {cluster}-pooler-repl.{namespace}.svc:6432"
+                    credentialsSecret:
+                      type: string
+                      description: Name of the Secret containing database credentials
+                    database:
+                      type: string
+                      description: Default database name
+                successor:
+                  type: object
+                  description: Reference to the successor cluster that superseded this one after an upgrade
+                  properties:
+                    name:
+                      type: string
+                      description: Name of the referenced cluster
+                    namespace:
+                      type: string
+                      description: Namespace of the referenced cluster
+                    upgradeName:
+                      type: string
+                      description: Name of the PostgresUpgrade that created this relationship
+                    createdAt:
+                      type: string
+                      description: Timestamp when the relationship was created (RFC3339 format)
+                origin:
+                  type: object
+                  description: Reference to the cluster this was upgraded from
+                  properties:
+                    name:
+                      type: string
+                      description: Name of the referenced cluster
+                    namespace:
+                      type: string
+                      description: Namespace of the referenced cluster
+                    upgradeName:
+                      type: string
+                      description: Name of the PostgresUpgrade that created this relationship
+                    createdAt:
+                      type: string
+                      description: Timestamp when the relationship was created (RFC3339 format)
 {{- end }}

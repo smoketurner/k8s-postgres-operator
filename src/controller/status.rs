@@ -360,6 +360,17 @@ impl<'a> StatusManager<'a> {
             max_replication_lag_bytes,
             replicas_lagging,
             connection_info: self.get_connection_info(),
+            // Preserve upgrade lineage (set by upgrade_reconciler)
+            successor: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.successor.clone()),
+            origin: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.origin.clone()),
         };
 
         self.update(status).await
@@ -442,6 +453,17 @@ impl<'a> StatusManager<'a> {
                 .as_ref()
                 .and_then(|s| s.replicas_lagging),
             connection_info: self.get_connection_info(),
+            // Preserve upgrade lineage (set by upgrade_reconciler)
+            successor: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.successor.clone()),
+            origin: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.origin.clone()),
         };
 
         self.update(status).await
@@ -535,6 +557,17 @@ impl<'a> StatusManager<'a> {
                 .as_ref()
                 .and_then(|s| s.replicas_lagging),
             connection_info: self.get_connection_info(),
+            // Preserve upgrade lineage (set by upgrade_reconciler)
+            successor: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.successor.clone()),
+            origin: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.origin.clone()),
         };
 
         self.update(status).await
@@ -597,6 +630,9 @@ impl<'a> StatusManager<'a> {
             max_replication_lag_bytes: existing_status.and_then(|s| s.max_replication_lag_bytes),
             replicas_lagging: existing_status.and_then(|s| s.replicas_lagging),
             connection_info: self.get_connection_info(),
+            // Preserve upgrade lineage (set by upgrade_reconciler)
+            successor: existing_status.and_then(|s| s.successor.clone()),
+            origin: existing_status.and_then(|s| s.origin.clone()),
         };
 
         self.update(status).await
@@ -677,6 +713,17 @@ impl<'a> StatusManager<'a> {
                 .and_then(|s| s.replicas_lagging),
             // Connection info is cleared during deletion
             connection_info: None,
+            // Preserve upgrade lineage (set by upgrade_reconciler)
+            successor: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.successor.clone()),
+            origin: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.origin.clone()),
         };
 
         self.update(status).await

@@ -1,0 +1,235 @@
+{{- if .Values.crd.install -}}
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: postgresdatabases.postgres-operator.smoketurner.com
+  labels:
+    {{- include "postgres-operator.labels" . | nindent 4 }}
+  {{- if .Values.crd.keep }}
+  annotations:
+    "helm.sh/resource-policy": keep
+  {{- end }}
+spec:
+  group: postgres-operator.smoketurner.com
+  names:
+    kind: PostgresDatabase
+    listKind: PostgresDatabaseList
+    plural: postgresdatabases
+    singular: postgresdatabase
+    shortNames:
+      - pgdb
+    categories:
+      - databases
+      - postgresql
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Cluster
+          type: string
+          jsonPath: .spec.clusterRef.name
+        - name: Database
+          type: string
+          jsonPath: .spec.database.name
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              required:
+                - clusterRef
+                - database
+              properties:
+                clusterRef:
+                  type: object
+                  description: Reference to the parent PostgresCluster
+                  required:
+                    - name
+                  properties:
+                    name:
+                      type: string
+                      description: Name of the PostgresCluster
+                    namespace:
+                      type: string
+                      description: Namespace of the PostgresCluster (defaults to same namespace)
+                database:
+                  type: object
+                  description: Database specification
+                  required:
+                    - name
+                    - owner
+                  properties:
+                    name:
+                      type: string
+                      description: Name of the database to create
+                    owner:
+                      type: string
+                      description: Owner role for the database
+                    encoding:
+                      type: string
+                      description: Encoding for the database (default UTF8)
+                    locale:
+                      type: string
+                      description: Locale for the database
+                    connectionLimit:
+                      type: integer
+                      description: Connection limit for the database (-1 for unlimited)
+                roles:
+                  type: array
+                  description: Roles to create with credentials
+                  items:
+                    type: object
+                    required:
+                      - name
+                      - secretName
+                    properties:
+                      name:
+                        type: string
+                        description: Name of the role to create
+                      privileges:
+                        type: array
+                        description: Privileges for this role
+                        items:
+                          type: string
+                          enum:
+                            - CREATEDB
+                            - CREATEROLE
+                            - SUPERUSER
+                            - LOGIN
+                            - REPLICATION
+                            - BYPASSRLS
+                      secretName:
+                        type: string
+                        description: |
+                          Name of the Secret to create with credentials.
+                          Contains: username, password, host, port, database, connection-string, jdbc-url
+                      connectionLimit:
+                        type: integer
+                        description: Connection limit for this role (-1 for unlimited)
+                      login:
+                        type: boolean
+                        description: Whether this role can log in (default true)
+                        default: true
+                grants:
+                  type: array
+                  description: Permission grants to apply
+                  items:
+                    type: object
+                    required:
+                      - role
+                    properties:
+                      role:
+                        type: string
+                        description: Role to grant privileges to
+                      schema:
+                        type: string
+                        description: Schema to grant on (default public)
+                        default: public
+                      privileges:
+                        type: array
+                        description: Table privileges to grant
+                        items:
+                          type: string
+                          enum:
+                            - SELECT
+                            - INSERT
+                            - UPDATE
+                            - DELETE
+                            - TRUNCATE
+                            - REFERENCES
+                            - TRIGGER
+                            - ALL
+                      allTables:
+                        type: boolean
+                        description: Grant on all tables in schema
+                        default: false
+                      allSequences:
+                        type: boolean
+                        description: Grant on all sequences in schema
+                        default: false
+                      allFunctions:
+                        type: boolean
+                        description: Grant on all functions in schema
+                        default: false
+                extensions:
+                  type: array
+                  description: Extensions to enable in the database
+                  items:
+                    type: string
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  description: Current phase of the database provisioning
+                  enum:
+                    - Pending
+                    - Creating
+                    - Ready
+                    - Updating
+                    - Failed
+                    - Deleting
+                conditions:
+                  type: array
+                  description: Conditions representing the current state
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                        description: Type of condition
+                        enum:
+                          - ClusterReady
+                          - DatabaseCreated
+                          - RolesCreated
+                          - GrantsApplied
+                          - SecretsCreated
+                          - Ready
+                      status:
+                        type: string
+                        description: "Status: True, False, or Unknown"
+                      lastTransitionTime:
+                        type: string
+                        description: Last time the condition transitioned
+                      reason:
+                        type: string
+                        description: Human-readable reason for the condition
+                      message:
+                        type: string
+                        description: Human-readable message
+                connectionInfo:
+                  type: object
+                  description: Connection information for the database
+                  properties:
+                    host:
+                      type: string
+                      description: Primary service hostname
+                    port:
+                      type: integer
+                      description: PostgreSQL port
+                    database:
+                      type: string
+                      description: Database name
+                credentialSecrets:
+                  type: array
+                  description: List of secrets created for role credentials
+                  items:
+                    type: string
+                observedGeneration:
+                  type: integer
+                  format: int64
+                  description: Last observed generation
+{{- end }}

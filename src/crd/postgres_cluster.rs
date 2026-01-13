@@ -79,6 +79,7 @@ impl PostgresVersion {
     printcolumn = r#"{"name":"Version", "type":"string", "jsonPath":".spec.version"}"#,
     printcolumn = r#"{"name":"Replicas", "type":"integer", "jsonPath":".spec.replicas"}"#,
     printcolumn = r#"{"name":"Phase", "type":"string", "jsonPath":".status.phase"}"#,
+    printcolumn = r#"{"name":"Successor", "type":"string", "jsonPath":".status.successor.name", "priority":1}"#,
     printcolumn = r#"{"name":"Ready", "type":"integer", "jsonPath":".status.readyReplicas"}"#,
     printcolumn = r#"{"name":"Age", "type":"date", "jsonPath":".metadata.creationTimestamp"}"#
 )]
@@ -1106,6 +1107,27 @@ pub struct LabelSelectorRequirement {
     pub values: Vec<String>,
 }
 
+/// Reference to another PostgresCluster for tracking upgrade lineage.
+/// Used for successor/origin relationships after major version upgrades.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UpgradeLineageRef {
+    /// Name of the referenced cluster
+    pub name: String,
+
+    /// Namespace of the referenced cluster (defaults to same namespace if not specified)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+
+    /// Name of the PostgresUpgrade that created this relationship
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upgrade_name: Option<String>,
+
+    /// Timestamp when the relationship was created (RFC3339 format)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+}
+
 /// Status of the PostgresCluster
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
@@ -1216,6 +1238,18 @@ pub struct PostgresClusterStatus {
     /// Includes service endpoints for primary, replicas, and pooler (if enabled).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_info: Option<ConnectionInfo>,
+
+    /// Reference to the successor cluster that superseded this one.
+    /// Set when this cluster has been upgraded and replaced by a newer version.
+    /// When set, the phase will be Superseded and modifications are blocked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub successor: Option<UpgradeLineageRef>,
+
+    /// Reference to the cluster this was upgraded from.
+    /// Set on target clusters after a successful upgrade cutover.
+    /// Provides traceability for the cluster's origin/lineage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<UpgradeLineageRef>,
 }
 
 /// Connection information for connecting to the PostgreSQL cluster
@@ -1327,6 +1361,10 @@ pub enum ClusterPhase {
     Recovering,
     /// Cluster is in a failed state
     Failed,
+    /// Cluster has been superseded by a newer version via upgrade.
+    /// The cluster is still running but services no longer route to it.
+    /// Modifications are blocked - manage the successor cluster instead.
+    Superseded,
     /// Cluster is being deleted
     Deleting,
 }
@@ -1342,6 +1380,7 @@ impl std::fmt::Display for ClusterPhase {
             ClusterPhase::Degraded => write!(f, "Degraded"),
             ClusterPhase::Recovering => write!(f, "Recovering"),
             ClusterPhase::Failed => write!(f, "Failed"),
+            ClusterPhase::Superseded => write!(f, "Superseded"),
             ClusterPhase::Deleting => write!(f, "Deleting"),
         }
     }

@@ -32,7 +32,7 @@ use crate::controller::upgrade_state_machine::{
 };
 use crate::crd::{
     ClusterPhase, CutoverMode, PostgresCluster, PostgresClusterSpec, PostgresUpgrade,
-    ReplicationStatus, SequenceSyncStatus, UpgradePhase, VerificationStatus,
+    ReplicationStatus, SequenceSyncStatus, UpgradeLineageRef, UpgradePhase, VerificationStatus,
 };
 use crate::resources::postgres_client::PostgresConnection;
 use crate::resources::replication::{
@@ -500,7 +500,9 @@ async fn execute_phase_transition(
         }
 
         (UpgradePhase::CuttingOver, UpgradePhase::HealthChecking) => {
-            // Cutover completed, now verify health
+            // Cutover completed - mark source as superseded and set origin on target
+            mark_source_superseded(upgrade, ctx, ns).await?;
+            set_target_origin(upgrade, ctx, ns).await?;
         }
 
         (UpgradePhase::HealthChecking, UpgradePhase::Completed) => {
@@ -884,6 +886,101 @@ async fn cleanup_replication(
     }
 
     info!("Cleaned up replication for upgrade {}", upgrade.name_any());
+
+    Ok(())
+}
+
+/// Mark the source cluster as Superseded and set the successor reference.
+/// Called after cutover when traffic has been switched to the target cluster.
+async fn mark_source_superseded(
+    upgrade: &PostgresUpgrade,
+    ctx: &UpgradeContext,
+    ns: &str,
+) -> UpgradeResult<()> {
+    let source_name = &upgrade.spec.source_cluster.name;
+    let source_ns = upgrade
+        .spec
+        .source_cluster
+        .namespace
+        .as_deref()
+        .unwrap_or(ns);
+    let target_name = generate_target_cluster_name(&upgrade.name_any());
+
+    let clusters_api: Api<PostgresCluster> = Api::namespaced(ctx.client.clone(), source_ns);
+
+    let successor = UpgradeLineageRef {
+        name: target_name.clone(),
+        namespace: Some(ns.to_string()),
+        upgrade_name: Some(upgrade.name_any()),
+        created_at: Some(Utc::now().to_rfc3339()),
+    };
+
+    let patch = serde_json::json!({
+        "status": {
+            "phase": ClusterPhase::Superseded,
+            "successor": successor
+        }
+    });
+
+    clusters_api
+        .patch_status(
+            source_name,
+            &PatchParams::default(),
+            &Patch::Merge(&patch),
+        )
+        .await?;
+
+    info!(
+        "Marked source cluster {}/{} as Superseded, successor: {}",
+        source_ns, source_name, target_name
+    );
+
+    Ok(())
+}
+
+/// Set the origin reference on the target cluster.
+/// Called after cutover to provide traceability for the cluster's lineage.
+async fn set_target_origin(
+    upgrade: &PostgresUpgrade,
+    ctx: &UpgradeContext,
+    ns: &str,
+) -> UpgradeResult<()> {
+    let source_name = &upgrade.spec.source_cluster.name;
+    let source_ns = upgrade
+        .spec
+        .source_cluster
+        .namespace
+        .as_deref()
+        .unwrap_or(ns);
+    let target_name = generate_target_cluster_name(&upgrade.name_any());
+
+    let clusters_api: Api<PostgresCluster> = Api::namespaced(ctx.client.clone(), ns);
+
+    let origin = UpgradeLineageRef {
+        name: source_name.clone(),
+        namespace: Some(source_ns.to_string()),
+        upgrade_name: Some(upgrade.name_any()),
+        created_at: Some(Utc::now().to_rfc3339()),
+    };
+
+    let patch = serde_json::json!({
+        "status": {
+            "origin": origin
+        }
+    });
+
+    clusters_api
+        .patch_status(
+            &target_name,
+            &PatchParams::default(),
+            &Patch::Merge(&patch),
+        )
+        .await?;
+
+    info!(
+        "Set origin on target cluster {}/{} from: {}/{}",
+        ns, target_name, source_ns, source_name
+    );
 
     Ok(())
 }
