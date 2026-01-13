@@ -1588,3 +1588,284 @@ mod resize_policy_tests {
         }
     }
 }
+
+// =============================================================================
+// Spilo Config Tests (SPILO_CONFIGURATION env var content)
+// =============================================================================
+
+mod spilo_config_tests {
+    use super::*;
+
+    /// Helper to get the spilo-config.yml content from the ConfigMap
+    fn get_spilo_config(cluster: &postgres_operator::crd::PostgresCluster) -> String {
+        let cm = patroni::generate_patroni_config(cluster);
+        let data = cm.data.as_ref().unwrap();
+        data.get("spilo-config.yml").unwrap().clone()
+    }
+
+    /// Helper to convert a YAML value to a string, handling both string and numeric types
+    fn yaml_value_to_string(value: Option<&serde_yaml::Value>) -> Option<String> {
+        value.map(|v| match v {
+            serde_yaml::Value::String(s) => s.clone(),
+            serde_yaml::Value::Number(n) => n.to_string(),
+            serde_yaml::Value::Bool(b) => b.to_string(),
+            _ => format!("{:?}", v),
+        })
+    }
+
+    #[test]
+    fn test_spilo_config_is_valid_yaml() {
+        let cluster = create_test_cluster("my-cluster", "default", 1);
+        let config = get_spilo_config(&cluster);
+
+        // Should parse as valid YAML
+        let parsed: Result<serde_yaml::Value, _> = serde_yaml::from_str(&config);
+        assert!(
+            parsed.is_ok(),
+            "Spilo config should be valid YAML: {}",
+            config
+        );
+    }
+
+    #[test]
+    fn test_spilo_config_has_bootstrap_section() {
+        let cluster = create_test_cluster("my-cluster", "default", 1);
+        let config = get_spilo_config(&cluster);
+
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&config).unwrap();
+        assert!(
+            parsed.get("bootstrap").is_some(),
+            "Should have bootstrap section"
+        );
+        assert!(
+            parsed.get("bootstrap").unwrap().get("dcs").is_some(),
+            "Should have bootstrap.dcs section"
+        );
+        assert!(
+            parsed
+                .get("bootstrap")
+                .unwrap()
+                .get("dcs")
+                .unwrap()
+                .get("postgresql")
+                .is_some(),
+            "Should have bootstrap.dcs.postgresql section"
+        );
+        assert!(
+            parsed
+                .get("bootstrap")
+                .unwrap()
+                .get("dcs")
+                .unwrap()
+                .get("postgresql")
+                .unwrap()
+                .get("parameters")
+                .is_some(),
+            "Should have bootstrap.dcs.postgresql.parameters section"
+        );
+    }
+
+    #[test]
+    fn test_spilo_config_has_postgresql_section() {
+        let cluster = create_test_cluster("my-cluster", "default", 1);
+        let config = get_spilo_config(&cluster);
+
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&config).unwrap();
+        assert!(
+            parsed.get("postgresql").is_some(),
+            "Should have postgresql section"
+        );
+        assert!(
+            parsed
+                .get("postgresql")
+                .unwrap()
+                .get("parameters")
+                .is_some(),
+            "Should have postgresql.parameters section"
+        );
+    }
+
+    #[test]
+    fn test_spilo_config_has_default_wal_level_logical() {
+        let cluster = create_test_cluster("my-cluster", "default", 1);
+        let config = get_spilo_config(&cluster);
+
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&config).unwrap();
+        let params = parsed.get("postgresql").unwrap().get("parameters").unwrap();
+
+        assert_eq!(
+            params.get("wal_level").and_then(|v| v.as_str()),
+            Some("logical"),
+            "wal_level should be logical by default"
+        );
+    }
+
+    #[test]
+    fn test_spilo_config_has_default_max_connections() {
+        let cluster = create_test_cluster("my-cluster", "default", 1);
+        let config = get_spilo_config(&cluster);
+
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&config).unwrap();
+        let params = parsed.get("postgresql").unwrap().get("parameters").unwrap();
+
+        assert_eq!(
+            yaml_value_to_string(params.get("max_connections")),
+            Some("100".to_string()),
+            "max_connections should be 100 by default"
+        );
+    }
+
+    #[test]
+    fn test_spilo_config_has_default_shared_buffers() {
+        let cluster = create_test_cluster("my-cluster", "default", 1);
+        let config = get_spilo_config(&cluster);
+
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&config).unwrap();
+        let params = parsed.get("postgresql").unwrap().get("parameters").unwrap();
+
+        assert_eq!(
+            params.get("shared_buffers").and_then(|v| v.as_str()),
+            Some("128MB"),
+            "shared_buffers should be 128MB by default"
+        );
+    }
+
+    #[test]
+    fn test_spilo_config_user_params_override_defaults() {
+        let cluster = PostgresClusterBuilder::single("my-cluster", "default")
+            .with_param("max_connections", "500")
+            .with_param("shared_buffers", "1GB")
+            .build();
+        let config = get_spilo_config(&cluster);
+
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&config).unwrap();
+        let params = parsed.get("postgresql").unwrap().get("parameters").unwrap();
+
+        assert_eq!(
+            yaml_value_to_string(params.get("max_connections")),
+            Some("500".to_string()),
+            "max_connections should be overridden to 500"
+        );
+        assert_eq!(
+            yaml_value_to_string(params.get("shared_buffers")),
+            Some("1GB".to_string()),
+            "shared_buffers should be overridden to 1GB"
+        );
+        // wal_level should still be logical (not overridden)
+        assert_eq!(
+            yaml_value_to_string(params.get("wal_level")),
+            Some("logical".to_string()),
+            "wal_level should still be logical"
+        );
+    }
+
+    #[test]
+    fn test_spilo_config_user_can_add_custom_params() {
+        let cluster = PostgresClusterBuilder::single("my-cluster", "default")
+            .with_param("work_mem", "256MB")
+            .with_param("maintenance_work_mem", "512MB")
+            .build();
+        let config = get_spilo_config(&cluster);
+
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&config).unwrap();
+        let params = parsed.get("postgresql").unwrap().get("parameters").unwrap();
+
+        assert_eq!(
+            yaml_value_to_string(params.get("work_mem")),
+            Some("256MB".to_string()),
+            "work_mem should be set"
+        );
+        assert_eq!(
+            yaml_value_to_string(params.get("maintenance_work_mem")),
+            Some("512MB".to_string()),
+            "maintenance_work_mem should be set"
+        );
+    }
+
+    #[test]
+    fn test_spilo_config_bootstrap_and_postgresql_params_match() {
+        let cluster = PostgresClusterBuilder::single("my-cluster", "default")
+            .with_param("max_connections", "200")
+            .build();
+        let config = get_spilo_config(&cluster);
+
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&config).unwrap();
+
+        let bootstrap_params = parsed
+            .get("bootstrap")
+            .unwrap()
+            .get("dcs")
+            .unwrap()
+            .get("postgresql")
+            .unwrap()
+            .get("parameters")
+            .unwrap();
+
+        let postgresql_params = parsed.get("postgresql").unwrap().get("parameters").unwrap();
+
+        // Both sections should have the same max_connections value
+        assert_eq!(
+            yaml_value_to_string(bootstrap_params.get("max_connections")),
+            Some("200".to_string()),
+            "bootstrap params should have max_connections=200"
+        );
+        assert_eq!(
+            yaml_value_to_string(postgresql_params.get("max_connections")),
+            Some("200".to_string()),
+            "postgresql params should have max_connections=200"
+        );
+    }
+
+    #[test]
+    fn test_spilo_config_all_default_params_have_correct_values() {
+        let cluster = create_test_cluster("my-cluster", "default", 1);
+        assert!(cluster.spec.postgresql_params.is_empty());
+
+        let config = get_spilo_config(&cluster);
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&config).unwrap();
+
+        let params = parsed.get("postgresql").unwrap().get("parameters").unwrap();
+
+        // Verify all default parameter values match DEFAULT_POSTGRESQL_PARAMS
+        assert_eq!(
+            yaml_value_to_string(params.get("max_connections")),
+            Some("100".to_string()),
+            "max_connections default"
+        );
+        assert_eq!(
+            yaml_value_to_string(params.get("shared_buffers")),
+            Some("128MB".to_string()),
+            "shared_buffers default"
+        );
+        assert_eq!(
+            yaml_value_to_string(params.get("wal_level")),
+            Some("logical".to_string()),
+            "wal_level default"
+        );
+        assert_eq!(
+            yaml_value_to_string(params.get("hot_standby")),
+            Some("on".to_string()),
+            "hot_standby default"
+        );
+        assert_eq!(
+            yaml_value_to_string(params.get("max_wal_senders")),
+            Some("10".to_string()),
+            "max_wal_senders default"
+        );
+        assert_eq!(
+            yaml_value_to_string(params.get("max_replication_slots")),
+            Some("10".to_string()),
+            "max_replication_slots default"
+        );
+        assert_eq!(
+            yaml_value_to_string(params.get("wal_keep_size")),
+            Some("1GB".to_string()),
+            "wal_keep_size default"
+        );
+        assert_eq!(
+            yaml_value_to_string(params.get("hot_standby_feedback")),
+            Some("on".to_string()),
+            "hot_standby_feedback default"
+        );
+    }
+}

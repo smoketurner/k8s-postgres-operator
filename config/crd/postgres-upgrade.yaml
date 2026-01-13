@@ -300,35 +300,52 @@ spec:
                       description: Name of the subscription on target
                 verification:
                   type: object
-                  description: Verification status
+                  description: Row count verification status
                   properties:
-                    passed:
-                      type: boolean
-                      description: Whether verification has passed
-                    passCount:
-                      type: integer
-                      description: Number of consecutive passes
+                    lastCheckTime:
+                      type: string
+                      description: Last verification check time (RFC3339 format)
+                      format: date-time
                     tablesVerified:
                       type: integer
                       description: Number of tables verified
+                      format: int32
+                    tablesMatched:
+                      type: integer
+                      description: Number of tables with matching row counts
+                      format: int32
+                    tablesMismatched:
+                      type: integer
+                      description: Number of tables with mismatched row counts
+                      format: int32
+                    consecutivePasses:
+                      type: integer
+                      description: Number of consecutive successful verification passes
+                      format: int32
                     mismatchedTables:
                       type: array
-                      description: Tables with row count mismatches
+                      description: Details of tables with row count mismatches
                       items:
                         type: object
                         properties:
-                          name:
+                          schema:
                             type: string
+                            description: Schema name
+                          table:
+                            type: string
+                            description: Table name
                           sourceCount:
                             type: integer
+                            description: Row count in source
                             format: int64
                           targetCount:
                             type: integer
+                            description: Row count in target
                             format: int64
-                    lastCheckTime:
-                      type: string
-                      description: Last verification check time
-                      format: date-time
+                          difference:
+                            type: integer
+                            description: Difference (source - target)
+                            format: int64
                 sequences:
                   type: object
                   description: Sequence sync status

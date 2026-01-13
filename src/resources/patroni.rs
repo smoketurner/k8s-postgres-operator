@@ -46,6 +46,46 @@ const DEFAULT_POSTGRESQL_PARAMS: &[(&str, &str)] = &[
     ("hot_standby_feedback", "on"),
 ];
 
+// =============================================================================
+// Spilo Configuration Structs (for type-safe YAML generation)
+// =============================================================================
+
+use serde::Serialize;
+
+/// Top-level Spilo configuration structure
+///
+/// This generates YAML for the SPILO_CONFIGURATION environment variable.
+/// The structure mirrors Patroni's expected configuration format.
+#[derive(Serialize)]
+struct SpiloConfig {
+    bootstrap: BootstrapConfig,
+    postgresql: PostgresqlConfig,
+}
+
+/// Bootstrap configuration for initial cluster creation
+#[derive(Serialize)]
+struct BootstrapConfig {
+    dcs: DcsConfig,
+}
+
+/// DCS (Distributed Configuration Store) settings
+#[derive(Serialize)]
+struct DcsConfig {
+    postgresql: PostgresqlDcsConfig,
+}
+
+/// PostgreSQL settings within DCS
+#[derive(Serialize)]
+struct PostgresqlDcsConfig {
+    parameters: BTreeMap<String, String>,
+}
+
+/// Runtime PostgreSQL configuration
+#[derive(Serialize)]
+struct PostgresqlConfig {
+    parameters: BTreeMap<String, String>,
+}
+
 /// Generate the Patroni configuration as a ConfigMap
 ///
 /// This ConfigMap stores the effective Patroni configuration for auditing/debugging.
@@ -79,9 +119,10 @@ pub fn generate_patroni_config(cluster: &PostgresCluster) -> ConfigMap {
 ///
 /// This is passed via SPILO_CONFIGURATION env var and merged with Spilo's
 /// auto-generated Patroni config. We use this to customize PostgreSQL parameters.
+///
+/// The configuration includes both bootstrap and runtime sections to ensure
+/// parameters like wal_level=logical are applied during initial cluster creation.
 fn generate_spilo_config(cluster: &PostgresCluster) -> String {
-    use std::fmt::Write;
-
     let mut params: BTreeMap<String, String> = BTreeMap::new();
 
     // Default parameters for HA operation
@@ -94,16 +135,20 @@ fn generate_spilo_config(cluster: &PostgresCluster) -> String {
         params.insert(key.clone(), value.clone());
     }
 
-    // Format as YAML for SPILO_CONFIGURATION
-    // Spilo expects this structure to be merged into its generated config
-    // Write directly to string buffer to avoid intermediate Vec allocation
-    let mut result = String::from("postgresql:\n  parameters:\n");
-    for (k, v) in &params {
-        let _ = writeln!(result, "    {}: {}", k, v);
-    }
-    // Remove trailing newline to match original format
-    result.pop();
-    result
+    // Build the configuration using typed structs
+    let config = SpiloConfig {
+        bootstrap: BootstrapConfig {
+            dcs: DcsConfig {
+                postgresql: PostgresqlDcsConfig {
+                    parameters: params.clone(),
+                },
+            },
+        },
+        postgresql: PostgresqlConfig { parameters: params },
+    };
+
+    // Serialize to YAML using serde_yaml for type-safe generation
+    serde_yaml::to_string(&config).unwrap_or_default()
 }
 
 /// Generate Patroni YAML configuration for ConfigMap
@@ -488,6 +533,24 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster, keda_managed: boo
         EnvVar {
             name: "SPILO_CONFIGURATION".to_string(),
             value: Some(generate_spilo_config(cluster)),
+            ..Default::default()
+        },
+        // Critical PostgreSQL parameters that must be set during bootstrap
+        // PGPARAM_* environment variables are passed directly to initdb/PostgreSQL
+        // These ensure wal_level=logical is set from cluster creation (required for upgrades)
+        EnvVar {
+            name: "PGPARAM_WAL_LEVEL".to_string(),
+            value: Some("logical".to_string()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "PGPARAM_MAX_WAL_SENDERS".to_string(),
+            value: Some("10".to_string()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "PGPARAM_MAX_REPLICATION_SLOTS".to_string(),
+            value: Some("10".to_string()),
             ..Default::default()
         },
     ];

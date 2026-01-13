@@ -22,7 +22,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, instrument, warn};
 
-use crate::resources::sql::{SqlError, escape_sql_string_pub, exec_sql, quote_identifier_pub};
+use crate::resources::sql::{
+    SqlError, apply_schema, dump_schema, escape_sql_string_pub, exec_sql, quote_identifier_pub,
+};
 
 /// Errors that can occur during replication operations
 #[derive(Error, Debug)]
@@ -67,10 +69,16 @@ pub enum SubscriptionState {
     Initializing,
     /// Initial data copy in progress
     CopyingData,
+    /// Syncing - tables are being synchronized
+    Syncing,
     /// Catching up with changes made during copy
     CatchingUp,
-    /// Subscription is actively replicating
+    /// Subscription is actively replicating (all tables synced, streaming changes)
+    Active,
+    /// Subscription is actively replicating (legacy alias for Active)
     Streaming,
+    /// Subscription is inactive (enabled but worker not running)
+    Inactive,
     /// Subscription is disabled
     Disabled,
     /// Unknown state
@@ -82,8 +90,11 @@ impl From<&str> for SubscriptionState {
         match s.to_lowercase().as_str() {
             "i" | "initializing" => SubscriptionState::Initializing,
             "d" | "copyingdata" | "copying_data" => SubscriptionState::CopyingData,
-            "s" | "catchingup" | "catching_up" => SubscriptionState::CatchingUp,
+            "syncing" => SubscriptionState::Syncing,
+            "s" | "catchingup" | "catching_up" | "catchup" => SubscriptionState::CatchingUp,
             "r" | "streaming" | "ready" => SubscriptionState::Streaming,
+            "active" => SubscriptionState::Active,
+            "inactive" => SubscriptionState::Inactive,
             "" | "disabled" => SubscriptionState::Disabled,
             other => SubscriptionState::Unknown(other.to_string()),
         }
@@ -93,7 +104,10 @@ impl From<&str> for SubscriptionState {
 impl SubscriptionState {
     /// Returns true if the subscription is actively replicating
     pub fn is_active(&self) -> bool {
-        matches!(self, SubscriptionState::Streaming)
+        matches!(
+            self,
+            SubscriptionState::Streaming | SubscriptionState::Active
+        )
     }
 
     /// Returns true if the subscription is still syncing
@@ -102,6 +116,7 @@ impl SubscriptionState {
             self,
             SubscriptionState::Initializing
                 | SubscriptionState::CopyingData
+                | SubscriptionState::Syncing
                 | SubscriptionState::CatchingUp
         )
     }
@@ -396,23 +411,33 @@ pub async fn get_subscription_state(
     cluster_name: &str,
     subscription_name: &str,
 ) -> ReplicationResult<SubscriptionState> {
-    // Query pg_stat_subscription for the subscription state
-    // The srsubstate column contains the state:
-    // 'i' = initializing, 'd' = data copy, 's' = syncing, 'r' = ready
+    // Query subscription state using pg_subscription and pg_stat_subscription
+    // - pg_subscription.subenabled: whether subscription is enabled
+    // - pg_stat_subscription.pid: worker process ID (non-null = active)
+    // - pg_subscription_rel.srsubstate: per-table sync state ('i'=init, 'd'=copy, 's'=sync, 'r'=ready)
     let sql = format!(
         r#"
-        SELECT COALESCE(
-            (SELECT srsubstate FROM pg_stat_subscription_stats
-             WHERE subname = '{}'),
-            (SELECT
-                CASE
-                    WHEN subenabled THEN 'r'
-                    ELSE ''
-                END
-             FROM pg_subscription
-             WHERE subname = '{}')
-        ) as state
+        SELECT
+            CASE
+                WHEN NOT EXISTS (SELECT 1 FROM pg_subscription WHERE subname = '{}') THEN 'not_found'
+                WHEN NOT (SELECT subenabled FROM pg_subscription WHERE subname = '{}') THEN 'disabled'
+                WHEN (SELECT pid FROM pg_stat_subscription WHERE subname = '{}' LIMIT 1) IS NULL THEN 'inactive'
+                WHEN EXISTS (
+                    SELECT 1 FROM pg_subscription_rel sr
+                    JOIN pg_subscription s ON s.oid = sr.srsubid
+                    WHERE s.subname = '{}' AND sr.srsubstate IN ('i', 'd')
+                ) THEN 'syncing'
+                WHEN EXISTS (
+                    SELECT 1 FROM pg_subscription_rel sr
+                    JOIN pg_subscription s ON s.oid = sr.srsubid
+                    WHERE s.subname = '{}' AND sr.srsubstate = 's'
+                ) THEN 'catchup'
+                ELSE 'active'
+            END as state
         "#,
+        escape_sql_string_pub(subscription_name),
+        escape_sql_string_pub(subscription_name),
+        escape_sql_string_pub(subscription_name),
         escape_sql_string_pub(subscription_name),
         escape_sql_string_pub(subscription_name)
     );
@@ -420,25 +445,16 @@ pub async fn get_subscription_state(
     let result = exec_sql(client, namespace, cluster_name, "postgres", &sql).await?;
     let state_str = result.trim();
 
-    if state_str.is_empty() {
-        // Check if subscription exists at all
-        let exists_sql = format!(
-            "SELECT 1 FROM pg_subscription WHERE subname = '{}'",
-            escape_sql_string_pub(subscription_name)
-        );
-        let exists = exec_sql(client, namespace, cluster_name, "postgres", &exists_sql).await?;
-
-        if exists.trim().is_empty() {
-            return Err(ReplicationError::SubscriptionNotFound(
-                subscription_name.to_string(),
-            ));
-        }
-
-        // Subscription exists but no state info - might be disabled
-        return Ok(SubscriptionState::Disabled);
+    match state_str {
+        "not_found" => Err(ReplicationError::SubscriptionNotFound(
+            subscription_name.to_string(),
+        )),
+        "disabled" => Ok(SubscriptionState::Disabled),
+        "inactive" => Ok(SubscriptionState::Inactive),
+        "syncing" => Ok(SubscriptionState::Syncing),
+        "catchup" => Ok(SubscriptionState::CatchingUp),
+        _ => Ok(SubscriptionState::Active),
     }
-
-    Ok(SubscriptionState::from(state_str))
 }
 
 /// Check if a subscription exists
@@ -455,6 +471,59 @@ pub async fn subscription_exists(
 
     let result = exec_sql(client, namespace, cluster_name, "postgres", &sql).await?;
     Ok(!result.trim().is_empty())
+}
+
+// =============================================================================
+// Schema Replication
+// =============================================================================
+
+/// Copy schema from source to target cluster
+///
+/// This is required before setting up logical replication because
+/// PostgreSQL logical replication only replicates DML (data), not DDL (schema).
+/// The tables, sequences, and other objects must exist on the target before
+/// the subscription can sync data.
+#[instrument(skip(client), fields(source_namespace = %source_namespace, target_namespace = %target_namespace))]
+pub async fn copy_schema(
+    client: &Client,
+    source_namespace: &str,
+    source_cluster_name: &str,
+    target_namespace: &str,
+    target_cluster_name: &str,
+    database: &str,
+) -> ReplicationResult<()> {
+    debug!(
+        source = %source_cluster_name,
+        target = %target_cluster_name,
+        database = %database,
+        "Copying schema from source to target"
+    );
+
+    // Dump schema from source
+    let schema_sql = dump_schema(client, source_namespace, source_cluster_name, database).await?;
+
+    if schema_sql.trim().is_empty() {
+        debug!("No user schema to copy (empty schema dump)");
+        return Ok(());
+    }
+
+    debug!(
+        schema_size = schema_sql.len(),
+        "Schema dump completed, applying to target"
+    );
+
+    // Apply schema to target
+    apply_schema(
+        client,
+        target_namespace,
+        target_cluster_name,
+        database,
+        &schema_sql,
+    )
+    .await?;
+
+    debug!("Schema copy completed successfully");
+    Ok(())
 }
 
 // =============================================================================

@@ -730,6 +730,7 @@ pub mod labels {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -764,5 +765,44 @@ mod tests {
     fn test_default_cutover_mode() {
         let config = CutoverConfig::default();
         assert_eq!(config.mode, CutoverMode::Manual);
+    }
+
+    #[test]
+    fn test_verification_status_serialization() {
+        let status = VerificationStatus {
+            last_check_time: Some("2024-01-01T00:00:00Z".to_string()),
+            tables_verified: 3,
+            tables_matched: 3,
+            tables_mismatched: 0,
+            consecutive_passes: 1,
+            mismatched_tables: vec![],
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        println!("Serialized JSON: {}", json);
+
+        // All fields should be present
+        assert!(json.contains("tablesVerified"));
+        assert!(json.contains("tablesMatched"));
+        assert!(json.contains("tablesMismatched"));
+        assert!(json.contains("consecutivePasses"));
+    }
+
+    #[test]
+    fn test_verification_status_with_zeros() {
+        let status = VerificationStatus {
+            last_check_time: Some("2024-01-01T00:00:00Z".to_string()),
+            tables_verified: 3,
+            tables_matched: 0,
+            tables_mismatched: 0,
+            consecutive_passes: 0,
+            mismatched_tables: vec![],
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        println!("Serialized JSON with zeros: {}", json);
+
+        // Fields with zero values should still be present
+        assert!(json.contains("\"tablesMatched\":0"));
+        assert!(json.contains("\"tablesMismatched\":0"));
+        assert!(json.contains("\"consecutivePasses\":0"));
     }
 }

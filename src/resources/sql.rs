@@ -119,6 +119,15 @@ async fn exec_psql(
         sql.to_string(),
     ];
 
+    exec_command_in_pod(pods, pod_name, command).await
+}
+
+/// Execute an arbitrary command in a pod
+async fn exec_command_in_pod(
+    pods: &Api<Pod>,
+    pod_name: &str,
+    command: Vec<String>,
+) -> SqlResult<String> {
     let attach_params = AttachParams {
         container: Some("postgres".to_string()),
         stdin: true,
@@ -170,6 +179,148 @@ async fn exec_psql(
     }
 
     Ok(stdout_output)
+}
+
+/// Dump schema from a PostgreSQL database using pg_dump
+///
+/// This exports the schema (tables, sequences, constraints, etc.) without data.
+/// The output is SQL DDL statements that can be executed on another database.
+pub(crate) async fn dump_schema(
+    client: &Client,
+    namespace: &str,
+    cluster_name: &str,
+    database: &str,
+) -> SqlResult<String> {
+    // Find the primary pod
+    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
+
+    let primary_selector = format!(
+        "postgres-operator.smoketurner.com/cluster={},spilo-role=master",
+        cluster_name
+    );
+
+    let pod_list = pods
+        .list(&kube::api::ListParams::default().labels(&primary_selector))
+        .await?;
+
+    let primary_pod = pod_list
+        .items
+        .into_iter()
+        .next()
+        .ok_or_else(|| SqlError::NoPrimaryPod {
+            cluster: cluster_name.to_string(),
+            namespace: namespace.to_string(),
+        })?;
+
+    let pod_name = primary_pod
+        .metadata
+        .name
+        .as_ref()
+        .ok_or_else(|| SqlError::ExecFailed("Pod has no name".to_string()))?;
+
+    debug!(
+        pod = %pod_name,
+        namespace = %namespace,
+        database = %database,
+        "Dumping schema from primary pod"
+    );
+
+    // Run pg_dump with --schema-only to get just the DDL
+    // Exclude pg_catalog and information_schema
+    // Use --no-owner and --no-acl to make schema portable
+    let command = vec![
+        "pg_dump".to_string(),
+        "-U".to_string(),
+        "postgres".to_string(),
+        "-d".to_string(),
+        database.to_string(),
+        "--schema-only".to_string(),
+        "--no-owner".to_string(),
+        "--no-acl".to_string(),
+        // Exclude internal schemas
+        "--exclude-schema=pg_catalog".to_string(),
+        "--exclude-schema=information_schema".to_string(),
+        // Exclude Spilo/Patroni-created schemas (already exist on target)
+        "--exclude-schema=metric_helpers".to_string(),
+        "--exclude-schema=admin".to_string(),
+    ];
+
+    exec_command_in_pod(&pods, pod_name, command).await
+}
+
+/// Apply schema DDL to a PostgreSQL database using psql
+///
+/// This executes the DDL statements from a pg_dump output on the target database.
+pub(crate) async fn apply_schema(
+    client: &Client,
+    namespace: &str,
+    cluster_name: &str,
+    database: &str,
+    schema_sql: &str,
+) -> SqlResult<()> {
+    // Find the primary pod
+    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
+
+    let primary_selector = format!(
+        "postgres-operator.smoketurner.com/cluster={},spilo-role=master",
+        cluster_name
+    );
+
+    let pod_list = pods
+        .list(&kube::api::ListParams::default().labels(&primary_selector))
+        .await?;
+
+    let primary_pod = pod_list
+        .items
+        .into_iter()
+        .next()
+        .ok_or_else(|| SqlError::NoPrimaryPod {
+            cluster: cluster_name.to_string(),
+            namespace: namespace.to_string(),
+        })?;
+
+    let pod_name = primary_pod
+        .metadata
+        .name
+        .as_ref()
+        .ok_or_else(|| SqlError::ExecFailed("Pod has no name".to_string()))?;
+
+    debug!(
+        pod = %pod_name,
+        namespace = %namespace,
+        database = %database,
+        schema_len = schema_sql.len(),
+        "Applying schema to primary pod"
+    );
+
+    // Use psql to execute the schema SQL
+    // We pass the SQL via a shell command to handle multi-statement input
+    // Don't use ON_ERROR_STOP since some objects might already exist (idempotent)
+    // Pipe stderr through grep to filter out "already exists" errors
+    let command = vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        format!(
+            "echo {} | psql -U postgres -d {} 2>&1 | grep -v 'already exists' | grep -v '^$'",
+            shell_escape(schema_sql),
+            database
+        ),
+    ];
+
+    let output = exec_command_in_pod(&pods, pod_name, command).await?;
+
+    // Check if there are any real errors (not "already exists")
+    if output.contains("ERROR:") {
+        return Err(SqlError::SqlExecutionError(output));
+    }
+
+    Ok(())
+}
+
+/// Escape a string for use in a shell command
+fn shell_escape(s: &str) -> String {
+    // Use single quotes and escape any existing single quotes
+    format!("'{}'", s.replace('\'', "'\"'\"'"))
 }
 
 /// Read all data from an async read stream

@@ -557,7 +557,10 @@ pub fn upgrade_source_ready() -> impl Condition<PostgresUpgrade> {
 }
 
 /// Condition that checks if upgrade has a specific condition type with given status
-pub fn upgrade_has_condition(type_: &str, expected_status: &str) -> impl Condition<PostgresUpgrade> {
+pub fn upgrade_has_condition(
+    type_: &str,
+    expected_status: &str,
+) -> impl Condition<PostgresUpgrade> {
     let cond_type = type_.to_string();
     let status = expected_status.to_string();
     move |obj: Option<&PostgresUpgrade>| {
@@ -631,6 +634,33 @@ pub fn upgrade_ready_for_cutover() -> impl Condition<PostgresUpgrade> {
                     status.phase,
                     UpgradePhase::ReadyForCutover | UpgradePhase::WaitingForManualCutover
                 )
+            })
+            .unwrap_or(false)
+    }
+}
+
+/// Upgrade has progressed past a specific phase
+pub fn upgrade_past_phase(target: UpgradePhase) -> impl Condition<PostgresUpgrade> {
+    move |obj: Option<&PostgresUpgrade>| {
+        obj.and_then(|upgrade| upgrade.status.as_ref())
+            .map(|status| {
+                // Define phase ordering for comparison
+                let phase_order = |p: &UpgradePhase| match p {
+                    UpgradePhase::Pending => 0,
+                    UpgradePhase::CreatingTarget => 1,
+                    UpgradePhase::ConfiguringReplication => 2,
+                    UpgradePhase::Replicating => 3,
+                    UpgradePhase::Verifying => 4,
+                    UpgradePhase::SyncingSequences => 5,
+                    UpgradePhase::ReadyForCutover => 6,
+                    UpgradePhase::WaitingForManualCutover => 7,
+                    UpgradePhase::CuttingOver => 8,
+                    UpgradePhase::HealthChecking => 9,
+                    UpgradePhase::Completed => 10,
+                    UpgradePhase::Failed => 100,
+                    UpgradePhase::RolledBack => 101,
+                };
+                phase_order(&status.phase) > phase_order(&target)
             })
             .unwrap_or(false)
     }

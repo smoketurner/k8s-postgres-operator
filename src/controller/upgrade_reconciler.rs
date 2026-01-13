@@ -414,9 +414,10 @@ async fn determine_event_for_phase(
         }
 
         UpgradePhase::CuttingOver => {
-            // Check if services have been switched
-            // This is determined by the phase transition actions
-            Ok(None)
+            // Cutover is executed during the transition INTO this phase.
+            // Once we're in CuttingOver, the services have been switched,
+            // so we immediately emit ServicesSwitched to move to HealthChecking.
+            Ok(Some(UpgradeEvent::ServicesSwitched))
         }
 
         UpgradePhase::HealthChecking => {
@@ -501,6 +502,12 @@ async fn execute_phase_monitoring(
         UpgradePhase::Verifying => {
             // Run row count verification
             let verification = run_verification(upgrade, ctx, ns).await?;
+            debug!(
+                tables_checked = verification.tables_checked,
+                tables_matched = verification.tables_matched,
+                tables_mismatched = verification.tables_mismatched,
+                "Row count verification result"
+            );
             update_verification_status(upgrade, ctx, ns, &verification).await?;
         }
 
@@ -627,6 +634,24 @@ async fn setup_replication(
     let target_name = generate_target_cluster_name(&upgrade.name_any());
     let pub_name = generate_publication_name(&upgrade.name_any());
     let sub_name = generate_subscription_name(&upgrade.name_any());
+
+    // Copy schema from source to target before setting up replication
+    // Logical replication only replicates DML (data), not DDL (schema)
+    info!(
+        "Copying schema from source {} to target {} for upgrade {}",
+        source_name,
+        target_name,
+        upgrade.name_any()
+    );
+    replication::copy_schema(
+        &ctx.client,
+        source_ns,
+        source_name,
+        ns,
+        &target_name,
+        "postgres",
+    )
+    .await?;
 
     // Create publication on source
     replication::setup_publication(&ctx.client, source_ns, source_name, &pub_name).await?;
@@ -775,7 +800,7 @@ async fn execute_cutover(
 
     api.patch_status(
         &upgrade.name_any(),
-        &PatchParams::apply("postgres-operator"),
+        &PatchParams::default(),
         &Patch::Merge(&patch),
     )
     .await?;
@@ -959,7 +984,7 @@ async fn add_finalizer(
 
     api.patch(
         &upgrade.name_any(),
-        &PatchParams::apply("postgres-operator"),
+        &PatchParams::default(),
         &Patch::Merge(&patch),
     )
     .await?;
@@ -1028,7 +1053,7 @@ async fn update_phase(
 
     api.patch_status(
         &upgrade.name_any(),
-        &PatchParams::apply("postgres-operator"),
+        &PatchParams::default(),
         &Patch::Merge(&patch),
     )
     .await?;
@@ -1077,7 +1102,7 @@ async fn update_replication_status(
 
     api.patch_status(
         &upgrade.name_any(),
-        &PatchParams::apply("postgres-operator"),
+        &PatchParams::default(),
         &Patch::Merge(&patch),
     )
     .await?;
@@ -1137,9 +1162,11 @@ async fn update_verification_status(
         }
     });
 
+    debug!(patch = %patch, "Verification status patch");
+
     api.patch_status(
         &upgrade.name_any(),
-        &PatchParams::apply("postgres-operator"),
+        &PatchParams::default(),
         &Patch::Merge(&patch),
     )
     .await?;
@@ -1179,7 +1206,7 @@ async fn update_sequence_sync_status(
 
     api.patch_status(
         &upgrade.name_any(),
-        &PatchParams::apply("postgres-operator"),
+        &PatchParams::default(),
         &Patch::Merge(&patch),
     )
     .await?;
@@ -1222,12 +1249,20 @@ async fn get_postgres_password(
                 name: cluster_name.to_string(),
             })?;
 
+    // Try PGPASSWORD first (used by psql clients), then POSTGRES_PASSWORD
     let password = secret
         .data
         .as_ref()
-        .and_then(|d| d.get("password"))
+        .and_then(|d| d.get("PGPASSWORD").or_else(|| d.get("POSTGRES_PASSWORD")))
         .map(|b| String::from_utf8_lossy(&b.0).to_string())
         .unwrap_or_default();
+
+    if password.is_empty() {
+        return Err(UpgradeError::ValidationError(format!(
+            "Password not found in secret {}-credentials",
+            cluster_name
+        )));
+    }
 
     Ok(password)
 }
