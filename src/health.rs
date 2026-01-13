@@ -25,7 +25,7 @@ use tokio::sync::RwLock;
 
 /// Labels for metrics
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub struct ReconcileLabels {
+pub(crate) struct ReconcileLabels {
     pub namespace: String,
     pub name: String,
 }
@@ -44,7 +44,7 @@ impl prometheus_client::encoding::EncodeLabelSet for ReconcileLabels {
 
 /// Labels for cluster phase metrics
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub struct PhaseLabels {
+pub(crate) struct PhaseLabels {
     pub phase: String,
 }
 
@@ -62,19 +62,19 @@ impl prometheus_client::encoding::EncodeLabelSet for PhaseLabels {
 /// Shared metrics state
 pub struct Metrics {
     /// Total reconciliations counter
-    pub reconciliations_total: Family<ReconcileLabels, Counter>,
+    pub(crate) reconciliations_total: Family<ReconcileLabels, Counter>,
     /// Failed reconciliations counter
-    pub reconciliation_errors_total: Family<ReconcileLabels, Counter>,
+    pub(crate) reconciliation_errors_total: Family<ReconcileLabels, Counter>,
     /// Reconciliation duration histogram
-    pub reconcile_duration_seconds: Family<ReconcileLabels, Histogram>,
+    pub(crate) reconcile_duration_seconds: Family<ReconcileLabels, Histogram>,
 
     // Fleet metrics
     /// Total clusters by phase
-    pub clusters_total: Family<PhaseLabels, Gauge>,
+    pub(crate) clusters_total: Family<PhaseLabels, Gauge>,
     /// Desired replicas per cluster
-    pub cluster_replicas_desired: Family<ReconcileLabels, Gauge>,
+    pub(crate) cluster_replicas_desired: Family<ReconcileLabels, Gauge>,
     /// Ready replicas per cluster
-    pub cluster_replicas_ready: Family<ReconcileLabels, Gauge>,
+    pub(crate) cluster_replicas_ready: Family<ReconcileLabels, Gauge>,
 
     /// Prometheus registry
     registry: Registry,
@@ -277,7 +277,7 @@ async fn metrics(State(state): State<Arc<HealthState>>) -> impl IntoResponse {
 }
 
 /// Create the health server router
-pub fn create_router(state: Arc<HealthState>) -> Router {
+pub(crate) fn create_router(state: Arc<HealthState>) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
@@ -298,6 +298,7 @@ pub async fn run_health_server(state: Arc<HealthState>) -> Result<(), std::io::E
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 

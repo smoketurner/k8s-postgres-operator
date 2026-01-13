@@ -3,110 +3,16 @@
 //! Tests for Patroni StatefulSet, Service, Secret, and PDB generation.
 //! All PostgreSQL clusters use Patroni for consistent management.
 
-use postgres_operator::crd::{
-    IssuerKind, IssuerRef, PgBouncerSpec, PostgresCluster, PostgresClusterSpec, PostgresVersion,
-    StorageSpec, TLSSpec,
+// Use shared test fixtures
+#[path = "../common/mod.rs"]
+mod common;
+
+use common::{
+    PostgresClusterBuilder, create_test_cluster, create_test_cluster_with_pgbouncer,
+    create_test_cluster_with_pgbouncer_replica, create_test_cluster_with_tls,
 };
+use postgres_operator::crd::{PgBouncerSpec, TLSSpec};
 use postgres_operator::resources::{patroni, pdb, pgbouncer, secret, service};
-
-/// Helper to create a test cluster
-fn create_test_cluster(name: &str, namespace: &str, replicas: i32) -> PostgresCluster {
-    PostgresCluster {
-        metadata: kube::core::ObjectMeta {
-            name: Some(name.to_string()),
-            namespace: Some(namespace.to_string()),
-            uid: Some("test-uid-12345".to_string()),
-            generation: Some(1),
-            ..Default::default()
-        },
-        spec: PostgresClusterSpec {
-            version: PostgresVersion::V16,
-            replicas,
-            storage: StorageSpec {
-                storage_class: Some("standard".to_string()),
-                size: "10Gi".to_string(),
-            },
-            resources: None,
-            postgresql_params: Default::default(),
-            labels: Default::default(),
-            backup: None,
-            pgbouncer: None,
-            // TLS disabled by default for tests (no cert-manager in test environment)
-            tls: TLSSpec {
-                enabled: false,
-                issuer_ref: None,
-                additional_dns_names: vec![],
-                duration: None,
-                renew_before: None,
-            },
-            metrics: None,
-            service: None,
-            restore: None,
-            scaling: None,
-            network_policy: None,
-        },
-        status: None,
-    }
-}
-
-/// Helper to create a test cluster with TLS enabled (cert-manager)
-fn create_test_cluster_with_tls(name: &str, namespace: &str, replicas: i32) -> PostgresCluster {
-    let mut cluster = create_test_cluster(name, namespace, replicas);
-    cluster.spec.tls = TLSSpec {
-        enabled: true,
-        issuer_ref: Some(IssuerRef {
-            name: "letsencrypt-prod".to_string(),
-            kind: IssuerKind::ClusterIssuer,
-            group: "cert-manager.io".to_string(),
-        }),
-        additional_dns_names: vec![],
-        duration: None,
-        renew_before: None,
-    };
-    cluster
-}
-
-/// Helper to create a test cluster with PgBouncer enabled
-fn create_test_cluster_with_pgbouncer(
-    name: &str,
-    namespace: &str,
-    replicas: i32,
-) -> PostgresCluster {
-    let mut cluster = create_test_cluster(name, namespace, replicas);
-    cluster.spec.pgbouncer = Some(PgBouncerSpec {
-        enabled: true,
-        replicas: 2,
-        pool_mode: "transaction".to_string(),
-        max_db_connections: 60,
-        default_pool_size: 20,
-        max_client_conn: 10000,
-        image: None,
-        resources: None,
-        enable_replica_pooler: false,
-    });
-    cluster
-}
-
-/// Helper to create a test cluster with PgBouncer and replica pooler
-fn create_test_cluster_with_pgbouncer_replica(
-    name: &str,
-    namespace: &str,
-    replicas: i32,
-) -> PostgresCluster {
-    let mut cluster = create_test_cluster(name, namespace, replicas);
-    cluster.spec.pgbouncer = Some(PgBouncerSpec {
-        enabled: true,
-        replicas: 2,
-        pool_mode: "transaction".to_string(),
-        max_db_connections: 60,
-        default_pool_size: 20,
-        max_client_conn: 10000,
-        image: None,
-        resources: None,
-        enable_replica_pooler: true,
-    });
-    cluster
-}
 
 mod patroni_statefulset_tests {
     use super::*;
@@ -883,29 +789,12 @@ mod pgbouncer_helper_tests {
 mod tls_pgbouncer_integration_tests {
     use super::*;
 
-    fn create_cluster_with_tls_and_pgbouncer(
-        name: &str,
-        namespace: &str,
-        replicas: i32,
-    ) -> PostgresCluster {
-        let mut cluster = create_test_cluster_with_pgbouncer(name, namespace, replicas);
-        cluster.spec.tls = TLSSpec {
-            enabled: true,
-            issuer_ref: Some(IssuerRef {
-                name: "letsencrypt-prod".to_string(),
-                kind: IssuerKind::ClusterIssuer,
-                group: "cert-manager.io".to_string(),
-            }),
-            additional_dns_names: vec![],
-            duration: None,
-            renew_before: None,
-        };
-        cluster
-    }
-
     #[test]
     fn test_pgbouncer_with_tls_has_tls_volume() {
-        let cluster = create_cluster_with_tls_and_pgbouncer("my-cluster", "default", 3);
+        let cluster = PostgresClusterBuilder::ha("my-cluster", "default")
+            .with_tls("letsencrypt-prod")
+            .with_pgbouncer()
+            .build();
         let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
 
         let pod_spec = deployment
@@ -928,7 +817,10 @@ mod tls_pgbouncer_integration_tests {
 
     #[test]
     fn test_pgbouncer_with_tls_has_tls_env_vars() {
-        let cluster = create_cluster_with_tls_and_pgbouncer("my-cluster", "default", 3);
+        let cluster = PostgresClusterBuilder::ha("my-cluster", "default")
+            .with_tls("letsencrypt-prod")
+            .with_pgbouncer()
+            .build();
         let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
 
         let containers = &deployment
@@ -1021,25 +913,11 @@ mod pgbouncer_pool_mode_tests {
     use super::*;
     use kube::ResourceExt;
 
-    fn create_cluster_with_pool_mode(mode: &str) -> PostgresCluster {
-        let mut cluster = create_test_cluster("my-cluster", "default", 3);
-        cluster.spec.pgbouncer = Some(PgBouncerSpec {
-            enabled: true,
-            replicas: 2,
-            pool_mode: mode.to_string(),
-            max_db_connections: 60,
-            default_pool_size: 20,
-            max_client_conn: 10000,
-            image: None,
-            resources: None,
-            enable_replica_pooler: false,
-        });
-        cluster
-    }
-
     #[test]
     fn test_session_pool_mode() {
-        let cluster = create_cluster_with_pool_mode("session");
+        let cluster = PostgresClusterBuilder::ha("my-cluster", "default")
+            .with_pgbouncer_mode("session")
+            .build();
         let cm = pgbouncer::generate_pgbouncer_configmap(&cluster);
         let data = cm.data.as_ref().unwrap();
         let ini = data.get("pgbouncer.ini").unwrap();
@@ -1048,7 +926,9 @@ mod pgbouncer_pool_mode_tests {
 
     #[test]
     fn test_transaction_pool_mode() {
-        let cluster = create_cluster_with_pool_mode("transaction");
+        let cluster = PostgresClusterBuilder::ha("my-cluster", "default")
+            .with_pgbouncer_mode("transaction")
+            .build();
         let cm = pgbouncer::generate_pgbouncer_configmap(&cluster);
         let data = cm.data.as_ref().unwrap();
         let ini = data.get("pgbouncer.ini").unwrap();
@@ -1057,7 +937,9 @@ mod pgbouncer_pool_mode_tests {
 
     #[test]
     fn test_statement_pool_mode() {
-        let cluster = create_cluster_with_pool_mode("statement");
+        let cluster = PostgresClusterBuilder::ha("my-cluster", "default")
+            .with_pgbouncer_mode("statement")
+            .build();
         let cm = pgbouncer::generate_pgbouncer_configmap(&cluster);
         let data = cm.data.as_ref().unwrap();
         let ini = data.get("pgbouncer.ini").unwrap();
@@ -1066,7 +948,9 @@ mod pgbouncer_pool_mode_tests {
 
     #[test]
     fn test_pgbouncer_configmap_has_correct_name() {
-        let cluster = create_cluster_with_pool_mode("transaction");
+        let cluster = PostgresClusterBuilder::ha("my-cluster", "default")
+            .with_pgbouncer_mode("transaction")
+            .build();
         let cm = pgbouncer::generate_pgbouncer_configmap(&cluster);
         assert_eq!(cm.name_any(), "my-cluster-pgbouncer-config");
     }
@@ -1078,32 +962,12 @@ mod pgbouncer_pool_mode_tests {
 
 mod resource_configuration_tests {
     use super::*;
-    use postgres_operator::crd::{ResourceList, ResourceRequirements};
-
-    fn create_cluster_with_resources(
-        cpu_req: &str,
-        mem_req: &str,
-        cpu_limit: &str,
-        mem_limit: &str,
-    ) -> PostgresCluster {
-        let mut cluster = create_test_cluster("my-cluster", "default", 1);
-        cluster.spec.resources = Some(ResourceRequirements {
-            requests: Some(ResourceList {
-                cpu: Some(cpu_req.to_string()),
-                memory: Some(mem_req.to_string()),
-            }),
-            limits: Some(ResourceList {
-                cpu: Some(cpu_limit.to_string()),
-                memory: Some(mem_limit.to_string()),
-            }),
-            restart_on_resize: None,
-        });
-        cluster
-    }
 
     #[test]
     fn test_low_resources() {
-        let cluster = create_cluster_with_resources("100m", "128Mi", "500m", "512Mi");
+        let cluster = PostgresClusterBuilder::single("my-cluster", "default")
+            .with_resources_full("100m", "128Mi", "500m", "512Mi")
+            .build();
         let sts = patroni::generate_patroni_statefulset(&cluster, false);
         let container = &sts
             .spec
@@ -1127,7 +991,9 @@ mod resource_configuration_tests {
 
     #[test]
     fn test_high_resources() {
-        let cluster = create_cluster_with_resources("2", "4Gi", "4", "8Gi");
+        let cluster = PostgresClusterBuilder::single("my-cluster", "default")
+            .with_resources_full("2", "4Gi", "4", "8Gi")
+            .build();
         let sts = patroni::generate_patroni_statefulset(&cluster, false);
         let container = &sts
             .spec
@@ -1171,16 +1037,11 @@ mod resource_configuration_tests {
 mod storage_class_tests {
     use super::*;
 
-    fn create_cluster_with_storage(size: &str, storage_class: Option<&str>) -> PostgresCluster {
-        let mut cluster = create_test_cluster("my-cluster", "default", 1);
-        cluster.spec.storage.size = size.to_string();
-        cluster.spec.storage.storage_class = storage_class.map(String::from);
-        cluster
-    }
-
     #[test]
     fn test_default_storage_class() {
-        let cluster = create_cluster_with_storage("10Gi", None);
+        let cluster = PostgresClusterBuilder::single("my-cluster", "default")
+            .with_storage("10Gi", None)
+            .build();
         let sts = patroni::generate_patroni_statefulset(&cluster, false);
         let vct = &sts
             .spec
@@ -1195,7 +1056,9 @@ mod storage_class_tests {
 
     #[test]
     fn test_custom_storage_class() {
-        let cluster = create_cluster_with_storage("10Gi", Some("fast-ssd"));
+        let cluster = PostgresClusterBuilder::single("my-cluster", "default")
+            .with_storage("10Gi", Some("fast-ssd"))
+            .build();
         let sts = patroni::generate_patroni_statefulset(&cluster, false);
         let vct = &sts
             .spec
@@ -1212,7 +1075,9 @@ mod storage_class_tests {
 
     #[test]
     fn test_storage_size_in_volume_claim() {
-        let cluster = create_cluster_with_storage("100Gi", None);
+        let cluster = PostgresClusterBuilder::single("my-cluster", "default")
+            .with_storage("100Gi", None)
+            .build();
         let sts = patroni::generate_patroni_statefulset(&cluster, false);
         let vct = &sts
             .spec
@@ -1241,68 +1106,31 @@ mod storage_class_tests {
 
 mod production_configuration_tests {
     use super::*;
-    use postgres_operator::crd::{MetricsSpec, ResourceList, ResourceRequirements};
+    use postgres_operator::crd::PostgresVersion;
 
-    fn create_production_cluster() -> PostgresCluster {
-        let mut cluster = create_test_cluster("production-db", "databases", 3);
-        cluster.spec.version = PostgresVersion::V16;
-        cluster.spec.storage.size = "100Gi".to_string();
-        cluster.spec.storage.storage_class = Some("fast-ssd".to_string());
+    /// Create a production-like cluster using the builder pattern.
+    /// This demonstrates how the builder simplifies complex cluster configurations.
+    fn create_production_cluster() -> postgres_operator::crd::PostgresCluster {
+        let mut cluster = PostgresClusterBuilder::ha("production-db", "databases")
+            .with_version(PostgresVersion::V16)
+            .with_storage("100Gi", Some("fast-ssd"))
+            .with_resources_full("2", "4Gi", "4", "8Gi")
+            .with_tls_full(
+                "production-issuer",
+                vec!["db.example.com".to_string()],
+                Some("2160h"),
+                Some("360h"),
+            )
+            .with_pgbouncer_custom(3, "transaction", 100, 25, 10000)
+            .with_metrics()
+            .with_param("max_connections", "500")
+            .with_param("shared_buffers", "1GB")
+            .build();
 
-        // Resources
-        cluster.spec.resources = Some(ResourceRequirements {
-            requests: Some(ResourceList {
-                cpu: Some("2".to_string()),
-                memory: Some("4Gi".to_string()),
-            }),
-            limits: Some(ResourceList {
-                cpu: Some("4".to_string()),
-                memory: Some("8Gi".to_string()),
-            }),
-            restart_on_resize: None,
-        });
-
-        // TLS (cert-manager integration)
-        cluster.spec.tls = TLSSpec {
-            enabled: true,
-            issuer_ref: Some(IssuerRef {
-                name: "production-issuer".to_string(),
-                kind: IssuerKind::ClusterIssuer,
-                group: "cert-manager.io".to_string(),
-            }),
-            additional_dns_names: vec!["db.example.com".to_string()],
-            duration: Some("2160h".to_string()),
-            renew_before: Some("360h".to_string()),
-        };
-
-        // PgBouncer
-        cluster.spec.pgbouncer = Some(PgBouncerSpec {
-            enabled: true,
-            replicas: 3,
-            pool_mode: "transaction".to_string(),
-            max_db_connections: 100,
-            default_pool_size: 25,
-            max_client_conn: 10000,
-            image: None,
-            resources: None,
-            enable_replica_pooler: true,
-        });
-
-        // Metrics
-        cluster.spec.metrics = Some(MetricsSpec {
-            enabled: true,
-            port: 9187,
-        });
-
-        // PostgreSQL params
-        cluster
-            .spec
-            .postgresql_params
-            .insert("max_connections".to_string(), "500".to_string());
-        cluster
-            .spec
-            .postgresql_params
-            .insert("shared_buffers".to_string(), "1GB".to_string());
+        // Enable replica pooler for production
+        if let Some(ref mut pgbouncer) = cluster.spec.pgbouncer {
+            pgbouncer.enable_replica_pooler = true;
+        }
 
         cluster
     }

@@ -149,7 +149,7 @@ struct PatroniMember {
 
 /// Replication lag information collected from the cluster
 #[derive(Debug, Default)]
-pub struct ReplicationLagStatus {
+pub(crate) struct ReplicationLagStatus {
     /// Per-replica lag information
     pub replicas: Vec<ReplicaLagInfo>,
 
@@ -221,7 +221,7 @@ impl LagThresholdConfig {
 }
 
 /// Collector for replication lag status
-pub struct ReplicationLagCollector {
+pub(crate) struct ReplicationLagCollector {
     client: Client,
     namespace: String,
     cluster_name: String,
@@ -519,7 +519,7 @@ fn parse_duration_to_secs(duration_str: &str) -> f64 {
 /// # Returns
 /// Replication lag status for all replicas in the cluster
 #[must_use = "This function returns the collected lag status which should be used"]
-pub async fn collect_replication_lag(
+pub(crate) async fn collect_replication_lag(
     client: Client,
     cluster: &PostgresCluster,
 ) -> Result<ReplicationLagStatus> {
@@ -528,6 +528,7 @@ pub async fn collect_replication_lag(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 

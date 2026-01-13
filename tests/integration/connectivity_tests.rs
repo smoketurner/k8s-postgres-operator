@@ -10,7 +10,7 @@
 //! 3. TLS status: ssl_is_used() returns expected value
 //! 4. Role: Primary vs replica status
 //!
-//! Run with: cargo test --test integration connectivity -- --ignored --test-threads=1
+//! Run with: cargo test --test integration connectivity -- --ignored
 
 use kube::Api;
 use kube::api::PostParams;
@@ -23,18 +23,11 @@ use crate::postgres::{
 };
 use crate::{
     PostgresClusterBuilder, ScopedOperator, SharedTestCluster, TestNamespace, cluster_operational,
-    ensure_crd_installed, ensure_operator_running, wait_for_cluster,
+    ensure_crd_installed, wait_for_cluster,
 };
 
-/// Test context with operator and cluster client
-struct TestContext {
-    client: kube::Client,
-    _operator: ScopedOperator,
-    _cluster: std::sync::Arc<SharedTestCluster>,
-}
-
-/// Setup test context - starts operator and returns client
-async fn setup() -> TestContext {
+/// Initialize tracing and ensure CRD is installed
+async fn init_test() -> std::sync::Arc<SharedTestCluster> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("info,kube=warn,postgres_operator=debug")
         .with_test_writer()
@@ -48,16 +41,7 @@ async fn setup() -> TestContext {
         .await
         .expect("Failed to install CRD");
 
-    let client = cluster.new_client().await.expect("Failed to create client");
-
-    // Start the operator for this test
-    let operator = ensure_operator_running(client.clone()).await;
-
-    TestContext {
-        client,
-        _operator: operator,
-        _cluster: cluster,
-    }
+    cluster
 }
 
 // =============================================================================
@@ -73,11 +57,12 @@ async fn setup() -> TestContext {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_standalone_connectivity() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "conn-standalone")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create cluster: 1 replica, version 16, TLS disabled
     let pg = PostgresClusterBuilder::single("standalone", ns.name())
@@ -149,11 +134,12 @@ async fn test_standalone_connectivity() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_dev_ephemeral_connectivity() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "conn-dev")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create cluster: 1 replica, version 17, minimal resources
     let pg = PostgresClusterBuilder::single("dev-ephemeral", ns.name())
@@ -229,8 +215,8 @@ async fn test_dev_ephemeral_connectivity() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_ha_cluster_connectivity() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "conn-ha")
         .await
         .expect("create ns");
@@ -338,11 +324,12 @@ async fn test_ha_cluster_connectivity() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_streaming_replica_connectivity() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "conn-repl")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create cluster: 2 replicas (primary + 1 streaming replica)
     let pg = PostgresClusterBuilder::new("streaming", ns.name())
@@ -456,8 +443,8 @@ async fn test_streaming_replica_connectivity() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_pgbouncer_connectivity() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "conn-pgb")
         .await
         .expect("create ns");

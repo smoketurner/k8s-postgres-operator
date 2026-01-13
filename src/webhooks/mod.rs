@@ -12,6 +12,11 @@ mod server;
 
 pub use policies::{ValidationContext, ValidationResult};
 pub use server::{
-    WEBHOOK_CERT_PATH, WEBHOOK_KEY_PATH, WEBHOOK_PORT, WebhookError, create_webhook_router,
-    run_webhook_server, validate_postgres_cluster,
+    WEBHOOK_CERT_PATH, WEBHOOK_KEY_PATH, WEBHOOK_PORT, WebhookError, run_webhook_server,
+};
+
+// Re-export admission review types for contract testing
+pub use server::{
+    AdmissionRequest, AdmissionResponse, AdmissionReview, AdmissionReviewResponse, AdmissionStatus,
+    GroupVersionKind, GroupVersionResource,
 };

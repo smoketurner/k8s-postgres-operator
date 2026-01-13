@@ -112,7 +112,7 @@ struct PgStatArchiver {
 }
 
 /// Backup status collector
-pub struct BackupStatusCollector {
+pub(crate) struct BackupStatusCollector {
     client: Client,
     namespace: String,
     cluster_name: String,
@@ -559,6 +559,7 @@ pub fn update_backup_status(status: &mut BackupStatus, new_status: BackupStatus)
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 

@@ -38,7 +38,7 @@ pub enum SqlError {
 }
 
 /// Result type for SQL operations
-pub type SqlResult<T> = std::result::Result<T, SqlError>;
+pub(crate) type SqlResult<T> = std::result::Result<T, SqlError>;
 
 /// Execute SQL on the primary pod of a PostgresCluster
 ///
@@ -51,7 +51,7 @@ pub type SqlResult<T> = std::result::Result<T, SqlError>;
 ///
 /// # Returns
 /// The output of the SQL command, or an error
-pub async fn exec_sql(
+pub(crate) async fn exec_sql(
     client: &Client,
     namespace: &str,
     cluster_name: &str,
@@ -182,7 +182,7 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(mut reader: R) -> SqlResul
 }
 
 /// Check if a database exists
-pub async fn database_exists(
+pub(crate) async fn database_exists(
     client: &Client,
     namespace: &str,
     cluster_name: &str,
@@ -198,7 +198,7 @@ pub async fn database_exists(
 }
 
 /// Check if a role exists
-pub async fn role_exists(
+pub(crate) async fn role_exists(
     client: &Client,
     namespace: &str,
     cluster_name: &str,
@@ -216,7 +216,7 @@ pub async fn role_exists(
 /// Ensure a database exists (idempotent - creates if not exists)
 ///
 /// Returns true if the database was created, false if it already existed.
-pub async fn ensure_database(
+pub(crate) async fn ensure_database(
     client: &Client,
     namespace: &str,
     cluster_name: &str,
@@ -248,7 +248,7 @@ pub async fn ensure_database(
 /// Create a database (not idempotent - will fail if database exists)
 ///
 /// Prefer `ensure_database` for reconciliation loops.
-pub async fn create_database(
+pub(crate) async fn create_database(
     client: &Client,
     namespace: &str,
     cluster_name: &str,
@@ -284,7 +284,7 @@ pub async fn create_database(
 ///
 /// Returns true if the role was created, false if it already existed.
 /// If the role exists, the password is updated to match.
-pub async fn ensure_role(
+pub(crate) async fn ensure_role(
     client: &Client,
     namespace: &str,
     cluster_name: &str,
@@ -318,7 +318,7 @@ pub async fn ensure_role(
 /// Create a role (not idempotent - will fail if role exists)
 ///
 /// Prefer `ensure_role` for reconciliation loops.
-pub async fn create_role(
+pub(crate) async fn create_role(
     client: &Client,
     namespace: &str,
     cluster_name: &str,
@@ -351,7 +351,7 @@ pub async fn create_role(
 }
 
 /// Update a role's password
-pub async fn update_role_password(
+pub(crate) async fn update_role_password(
     client: &Client,
     namespace: &str,
     cluster_name: &str,
@@ -369,7 +369,7 @@ pub async fn update_role_password(
 }
 
 /// Drop a role
-pub async fn drop_role(
+pub(crate) async fn drop_role(
     client: &Client,
     namespace: &str,
     cluster_name: &str,
@@ -381,7 +381,7 @@ pub async fn drop_role(
 }
 
 /// Drop a database
-pub async fn drop_database(
+pub(crate) async fn drop_database(
     client: &Client,
     namespace: &str,
     cluster_name: &str,
@@ -396,7 +396,7 @@ pub async fn drop_database(
 }
 
 /// Grant table privileges
-pub async fn grant_privileges(
+pub(crate) async fn grant_privileges(
     client: &Client,
     namespace: &str,
     cluster_name: &str,
@@ -429,7 +429,7 @@ pub async fn grant_privileges(
 }
 
 /// Create an extension
-pub async fn create_extension(
+pub(crate) async fn create_extension(
     client: &Client,
     namespace: &str,
     cluster_name: &str,
@@ -506,14 +506,15 @@ pub fn generate_password() -> String {
 
     let mut rng = rand::rng();
     (0..PASSWORD_LEN)
-        .map(|_| {
+        .filter_map(|_| {
             let idx = rng.random_range(0..CHARSET.len());
-            CHARSET[idx] as char
+            CHARSET.get(idx).map(|&c| c as char)
         })
         .collect()
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 

@@ -1,3 +1,12 @@
+// Test code is allowed to panic on failure
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::string_slice
+)]
+
 //! Property-based tests for PostgresCluster validation and resource generation
 //!
 //! These tests use proptest to generate random configurations and verify that:
@@ -20,6 +29,53 @@ use postgres_operator::crd::{
 use postgres_operator::resources::{patroni, pdb, scaled_object, secret, service};
 
 // =============================================================================
+// Helper functions to reduce spec boilerplate
+// =============================================================================
+
+/// Create a minimal valid PostgresClusterSpec with sensible defaults.
+/// Override fields as needed using struct update syntax: `..minimal_spec()`
+fn minimal_spec() -> PostgresClusterSpec {
+    PostgresClusterSpec {
+        version: PostgresVersion::V16,
+        replicas: 1,
+        storage: StorageSpec {
+            size: "10Gi".to_string(),
+            storage_class: None,
+        },
+        resources: None,
+        postgresql_params: Default::default(),
+        labels: Default::default(),
+        backup: None,
+        pgbouncer: None,
+        tls: TLSSpec::default(),
+        metrics: None,
+        service: None,
+        restore: None,
+        scaling: None,
+        network_policy: None,
+    }
+}
+
+/// Create a spec with the given replicas count
+fn spec_with_replicas(replicas: i32) -> PostgresClusterSpec {
+    PostgresClusterSpec {
+        replicas,
+        ..minimal_spec()
+    }
+}
+
+/// Create a spec with the given storage size
+fn spec_with_storage(size: String) -> PostgresClusterSpec {
+    PostgresClusterSpec {
+        storage: StorageSpec {
+            size,
+            storage_class: None,
+        },
+        ..minimal_spec()
+    }
+}
+
+// =============================================================================
 // Strategy generators for PostgreSQL cluster specs
 // =============================================================================
 
@@ -40,99 +96,133 @@ fn valid_replicas() -> impl Strategy<Value = i32> {
     1..=100i32
 }
 
-/// Generate an invalid replica count
+/// Generate an invalid replica count (shrinks toward boundary values)
 fn invalid_replicas() -> impl Strategy<Value = i32> {
     prop_oneof![
-        Just(-10),
-        Just(-1),
+        // Negative values - shrink toward -1
+        (-100..=-1i32),
+        // Zero
         Just(0),
-        Just(101),
-        Just(200),
-        Just(1000),
+        // Too large - shrink toward 101
+        (101..=1000i32),
     ]
 }
 
-/// Generate a valid storage size
+/// Generate a valid storage size (shrinks toward smaller values)
 fn valid_storage_size() -> impl Strategy<Value = String> {
     prop_oneof![
-        Just("1Gi".to_string()),
-        Just("5Gi".to_string()),
-        Just("10Gi".to_string()),
-        Just("50Gi".to_string()),
-        Just("100Gi".to_string()),
-        Just("500Gi".to_string()),
-        Just("1Ti".to_string()),
-        Just("500Mi".to_string()),
+        // Megabytes - shrink toward 100Mi
+        (100..=999u32).prop_map(|n| format!("{}Mi", n)),
+        // Gigabytes - shrink toward 1Gi
+        (1..=100u32).prop_map(|n| format!("{}Gi", n)),
+        // Terabytes - shrink toward 1Ti
+        (1..=10u32).prop_map(|n| format!("{}Ti", n)),
     ]
 }
 
-/// Generate an invalid storage size
+/// Generate an invalid storage size (shrinks toward simpler invalid cases)
 fn invalid_storage_size() -> impl Strategy<Value = String> {
     prop_oneof![
+        // Empty string
         Just("".to_string()),
-        Just("10".to_string()),
-        Just("10GB".to_string()),
-        Just("-10Gi".to_string()),
-        Just("invalid".to_string()),
-        Just("10 Gi".to_string()),
+        // Missing unit - shrink toward "1"
+        (1..=100u32).prop_map(|n| n.to_string()),
+        // Wrong unit suffix - GB instead of Gi
+        (1..=100u32).prop_map(|n| format!("{}GB", n)),
+        // Negative values
+        (1..=100u32).prop_map(|n| format!("-{}Gi", n)),
+        // Space in middle
+        (1..=100u32).prop_map(|n| format!("{} Gi", n)),
+        // Invalid text
+        "[a-z]{3,8}".prop_map(|s| s),
     ]
 }
 
-/// Generate an optional storage class
+/// Generate an optional storage class (shrinks toward None or shorter names)
 fn optional_storage_class() -> impl Strategy<Value = Option<String>> {
     prop_oneof![
-        Just(None),
-        Just(Some("standard".to_string())),
-        Just(Some("fast-ssd".to_string())),
-        Just(Some("slow-hdd".to_string())),
+        // None - simplest case
+        2 => Just(None),
+        // Generated storage class names - shrink toward shorter names
+        1 => "[a-z]{3,10}(-[a-z]{2,5})?".prop_map(Some),
     ]
 }
 
-/// Generate TLS spec (cert-manager integration)
+/// Generate an issuer kind
+fn issuer_kind() -> impl Strategy<Value = IssuerKind> {
+    prop_oneof![Just(IssuerKind::ClusterIssuer), Just(IssuerKind::Issuer)]
+}
+
+/// Generate an optional issuer reference (shrinks toward simpler issuer names)
+fn optional_issuer_ref() -> impl Strategy<Value = Option<IssuerRef>> {
+    prop_oneof![
+        // No issuer - simplest
+        2 => Just(None),
+        // Generated issuer - shrinks toward shorter name
+        1 => ("[a-z]{3,15}", issuer_kind()).prop_map(|(name, kind)| {
+            Some(IssuerRef {
+                name,
+                kind,
+                group: "cert-manager.io".to_string(),
+            })
+        }),
+    ]
+}
+
+/// Generate additional DNS names (shrinks toward empty vec or fewer/shorter names)
+fn additional_dns_names() -> impl Strategy<Value = Vec<String>> {
+    prop::collection::vec("[a-z]{2,8}\\.[a-z]{2,4}", 0..3)
+}
+
+/// Generate optional duration string (shrinks toward None or smaller durations)
+fn optional_duration() -> impl Strategy<Value = Option<String>> {
+    prop_oneof![
+        3 => Just(None),
+        1 => (1..=8760u32).prop_map(|h| Some(format!("{}h", h))),
+    ]
+}
+
+/// Generate TLS spec (cert-manager integration) with shrinkable components
 fn tls_spec() -> impl Strategy<Value = TLSSpec> {
     prop_oneof![
-        // TLS disabled
-        Just(TLSSpec {
+        // TLS disabled - simplest case, most weight
+        3 => Just(TLSSpec {
             enabled: false,
             issuer_ref: None,
             additional_dns_names: vec![],
             duration: None,
             renew_before: None,
         }),
-        // TLS enabled with ClusterIssuer
-        Just(TLSSpec {
-            enabled: true,
-            issuer_ref: Some(IssuerRef {
-                name: "letsencrypt-prod".to_string(),
-                kind: IssuerKind::ClusterIssuer,
-                group: "cert-manager.io".to_string(),
+        // TLS enabled with generated issuer - components can shrink independently
+        1 => (optional_issuer_ref(), additional_dns_names(), optional_duration(), optional_duration())
+            .prop_map(|(issuer_ref, dns_names, duration, renew_before)| TLSSpec {
+                enabled: true,
+                issuer_ref,
+                additional_dns_names: dns_names,
+                duration,
+                renew_before,
             }),
-            additional_dns_names: vec![],
-            duration: None,
-            renew_before: None,
-        }),
-        // TLS enabled with namespace Issuer
-        Just(TLSSpec {
-            enabled: true,
-            issuer_ref: Some(IssuerRef {
-                name: "my-issuer".to_string(),
-                kind: IssuerKind::Issuer,
-                group: "cert-manager.io".to_string(),
-            }),
-            additional_dns_names: vec!["extra.example.com".to_string()],
-            duration: Some("2160h".to_string()),
-            renew_before: Some("360h".to_string()),
-        }),
     ]
 }
 
-/// Generate optional PgBouncer spec
+/// Generate a pool mode
+fn pool_mode() -> impl Strategy<Value = String> {
+    prop_oneof![
+        Just("transaction".to_string()),
+        Just("session".to_string()),
+        Just("statement".to_string()),
+    ]
+}
+
+/// Generate optional PgBouncer spec with shrinkable numeric parameters
 fn optional_pgbouncer() -> impl Strategy<Value = Option<PgBouncerSpec>> {
     prop_oneof![
-        Just(None),
-        Just(Some(PgBouncerSpec {
+        // None - simplest case, highest weight
+        3 => Just(None),
+        // Disabled PgBouncer
+        1 => Just(Some(PgBouncerSpec {
             enabled: false,
-            replicas: 2,
+            replicas: 1,
             pool_mode: "transaction".to_string(),
             max_db_connections: 60,
             default_pool_size: 20,
@@ -141,57 +231,70 @@ fn optional_pgbouncer() -> impl Strategy<Value = Option<PgBouncerSpec>> {
             resources: None,
             enable_replica_pooler: false,
         })),
-        Just(Some(PgBouncerSpec {
-            enabled: true,
-            replicas: 2,
-            pool_mode: "transaction".to_string(),
-            max_db_connections: 60,
-            default_pool_size: 20,
-            max_client_conn: 10000,
-            image: None,
-            resources: None,
-            enable_replica_pooler: false,
-        })),
-        Just(Some(PgBouncerSpec {
-            enabled: true,
-            replicas: 3,
-            pool_mode: "session".to_string(),
-            max_db_connections: 100,
-            default_pool_size: 25,
-            max_client_conn: 5000,
-            image: None,
-            resources: None,
-            enable_replica_pooler: true,
-        })),
+        // Enabled PgBouncer with shrinkable parameters
+        1 => (
+            1..=5i32,           // replicas - shrink toward 1
+            pool_mode(),
+            20..=200i32,        // max_db_connections - shrink toward 20
+            5..=50i32,          // default_pool_size - shrink toward 5
+            1000..=50000i32,    // max_client_conn - shrink toward 1000
+            proptest::bool::ANY, // enable_replica_pooler
+        ).prop_map(|(replicas, pool_mode, max_db, pool_size, max_client, replica_pooler)| {
+            Some(PgBouncerSpec {
+                enabled: true,
+                replicas,
+                pool_mode,
+                max_db_connections: max_db,
+                default_pool_size: pool_size,
+                max_client_conn: max_client,
+                image: None,
+                resources: None,
+                enable_replica_pooler: replica_pooler,
+            })
+        }),
     ]
 }
 
-/// Generate optional resources
+/// Generate a CPU value string (shrinks toward smaller values)
+fn cpu_value() -> impl Strategy<Value = String> {
+    prop_oneof![
+        // Millicores - shrink toward 100m
+        (100..=4000u32).prop_map(|m| format!("{}m", m)),
+        // Whole cores - shrink toward 1
+        (1..=8u32).prop_map(|c| c.to_string()),
+    ]
+}
+
+/// Generate a memory value string (shrinks toward smaller values)
+fn memory_value() -> impl Strategy<Value = String> {
+    prop_oneof![
+        // Megabytes - shrink toward 128Mi
+        (128..=4096u32).prop_map(|m| format!("{}Mi", m)),
+        // Gigabytes - shrink toward 1Gi
+        (1..=16u32).prop_map(|g| format!("{}Gi", g)),
+    ]
+}
+
+/// Generate optional resources with shrinkable values
 fn optional_resources() -> impl Strategy<Value = Option<ResourceRequirements>> {
     prop_oneof![
-        Just(None),
-        Just(Some(ResourceRequirements {
-            requests: Some(ResourceList {
-                cpu: Some("100m".to_string()),
-                memory: Some("128Mi".to_string()),
+        // None - simplest case, highest weight
+        3 => Just(None),
+        // Generated resources with shrinkable numeric components
+        1 => (cpu_value(), memory_value(), cpu_value(), memory_value())
+            .prop_map(|(req_cpu, req_mem, lim_cpu, lim_mem)| {
+                Some(ResourceRequirements {
+                    requests: Some(ResourceList {
+                        cpu: Some(req_cpu),
+                        memory: Some(req_mem),
+                    }),
+                    limits: Some(ResourceList {
+                        cpu: Some(lim_cpu),
+                        memory: Some(lim_mem),
+                    }),
+                    restart_on_resize: None,
+                })
             }),
-            limits: Some(ResourceList {
-                cpu: Some("500m".to_string()),
-                memory: Some("512Mi".to_string()),
-            }),
-            restart_on_resize: None,
-        })),
-        Just(Some(ResourceRequirements {
-            requests: Some(ResourceList {
-                cpu: Some("2".to_string()),
-                memory: Some("4Gi".to_string()),
-            }),
-            limits: Some(ResourceList {
-                cpu: Some("4".to_string()),
-                memory: Some("8Gi".to_string()),
-            }),
-            restart_on_resize: None,
-        })),
     ]
 }
 
@@ -488,25 +591,7 @@ proptest! {
     /// Property: Invalid replica counts are always rejected
     #[test]
     fn prop_invalid_replicas_rejected(replicas in invalid_replicas()) {
-        let spec = PostgresClusterSpec {
-            version: PostgresVersion::V16,
-            replicas,
-            storage: StorageSpec {
-                size: "10Gi".to_string(),
-                storage_class: None,
-            },
-            resources: None,
-            postgresql_params: Default::default(),
-            labels: Default::default(),
-            backup: None,
-            pgbouncer: None,
-            tls: TLSSpec::default(),
-            metrics: None,
-            service: None,
-            restore: None,
-                    scaling: None,
-                    network_policy: None,
-        };
+        let spec = spec_with_replicas(replicas);
         let cluster = cluster_from_spec(spec);
         let result = validate_spec(&cluster);
         prop_assert!(result.is_err(), "Invalid replicas should be rejected: {}", cluster.spec.replicas);
@@ -515,25 +600,7 @@ proptest! {
     /// Property: Invalid storage sizes are always rejected
     #[test]
     fn prop_invalid_storage_rejected(size in invalid_storage_size()) {
-        let spec = PostgresClusterSpec {
-            version: PostgresVersion::V16,
-            replicas: 1,
-            storage: StorageSpec {
-                size,
-                storage_class: None,
-            },
-            resources: None,
-            postgresql_params: Default::default(),
-            labels: Default::default(),
-            backup: None,
-            pgbouncer: None,
-            tls: TLSSpec::default(),
-            metrics: None,
-            service: None,
-            restore: None,
-                    scaling: None,
-                    network_policy: None,
-        };
+        let spec = spec_with_storage(size);
         let cluster = cluster_from_spec(spec);
         let result = validate_spec(&cluster);
         prop_assert!(result.is_err(), "Invalid storage should be rejected: {}", cluster.spec.storage.size);
@@ -593,25 +660,7 @@ proptest! {
     /// Property: PDB min_available is always <= replicas - 1 for replicas > 1
     #[test]
     fn prop_pdb_min_available_correct(replicas in 1..=20i32) {
-        let spec = PostgresClusterSpec {
-            version: PostgresVersion::V16,
-            replicas,
-            storage: StorageSpec {
-                size: "10Gi".to_string(),
-                storage_class: None,
-            },
-            resources: None,
-            postgresql_params: Default::default(),
-            labels: Default::default(),
-            backup: None,
-            pgbouncer: None,
-            tls: TLSSpec::default(),
-            metrics: None,
-            service: None,
-            restore: None,
-                    scaling: None,
-                    network_policy: None,
-        };
+        let spec = spec_with_replicas(replicas);
         let cluster = cluster_from_spec(spec);
         let pdb_resource = pdb::generate_pdb(&cluster);
         let min_available = pdb_resource.spec.as_ref().unwrap().min_available.as_ref().unwrap();
@@ -632,25 +681,7 @@ proptest! {
     /// Property: StatefulSet replicas always matches spec
     #[test]
     fn prop_statefulset_replicas_match(replicas in 1..=50i32) {
-        let spec = PostgresClusterSpec {
-            version: PostgresVersion::V16,
-            replicas,
-            storage: StorageSpec {
-                size: "10Gi".to_string(),
-                storage_class: None,
-            },
-            resources: None,
-            postgresql_params: Default::default(),
-            labels: Default::default(),
-            backup: None,
-            pgbouncer: None,
-            tls: TLSSpec::default(),
-            metrics: None,
-            service: None,
-            restore: None,
-                    scaling: None,
-                    network_policy: None,
-        };
+        let spec = spec_with_replicas(replicas);
         let cluster = cluster_from_spec(spec);
         let sts = patroni::generate_patroni_statefulset(&cluster, false);
 
@@ -681,25 +712,7 @@ proptest! {
     /// Property: ScaledObject is NOT generated when no scaling or no headroom
     #[test]
     fn prop_no_scaledobject_without_scaling(replicas in 1..=10i32) {
-        let spec = PostgresClusterSpec {
-            version: PostgresVersion::V16,
-            replicas,
-            storage: StorageSpec {
-                size: "10Gi".to_string(),
-                storage_class: None,
-            },
-            resources: None,
-            postgresql_params: Default::default(),
-            labels: Default::default(),
-            backup: None,
-            pgbouncer: None,
-            tls: TLSSpec::default(),
-            metrics: None,
-            service: None,
-            restore: None,
-            scaling: None,
-            network_policy: None,
-        };
+        let spec = spec_with_replicas(replicas);
         let cluster = cluster_from_spec(spec);
         let obj = scaled_object::generate_scaled_object(&cluster);
 
@@ -710,21 +723,7 @@ proptest! {
     #[test]
     fn prop_no_scaledobject_without_headroom(replicas in 1..=10i32) {
         let spec = PostgresClusterSpec {
-            version: PostgresVersion::V16,
             replicas,
-            storage: StorageSpec {
-                size: "10Gi".to_string(),
-                storage_class: None,
-            },
-            resources: None,
-            postgresql_params: Default::default(),
-            labels: Default::default(),
-            backup: None,
-            pgbouncer: None,
-            tls: TLSSpec::default(),
-            metrics: None,
-            service: None,
-            restore: None,
             scaling: Some(ScalingSpec {
                 min_replicas: Some(replicas),
                 max_replicas: replicas, // No headroom
@@ -732,7 +731,7 @@ proptest! {
                 replication_lag_threshold: "30s".to_string(),
                 ..Default::default()
             }),
-            network_policy: None,
+            ..minimal_spec()
         };
         let cluster = cluster_from_spec(spec);
         let obj = scaled_object::generate_scaled_object(&cluster);
@@ -1239,29 +1238,35 @@ mod sql_security_tests {
         ]
     }
 
-    /// Generate valid PostgreSQL identifier names
+    /// Generate valid PostgreSQL identifier names (shrinks toward shorter names)
+    /// Valid identifiers: start with letter or underscore, contain only lowercase letters,
+    /// digits, underscores, and are max 63 chars
     fn valid_identifier_names() -> impl Strategy<Value = String> {
         prop_oneof![
-            Just("users".to_string()),
-            Just("my_table".to_string()),
-            Just("table123".to_string()),
-            Just("_private".to_string()),
-            Just("a".to_string()),
-            Just("abcdefghij".to_string()),
-            // Maximum length identifier
-            Just("a".repeat(63)),
+            // Simple names - shrink toward shorter
+            "[a-z][a-z0-9_]{0,10}".prop_map(|s| s),
+            // Underscore-prefixed names
+            "_[a-z][a-z0-9_]{0,8}".prop_map(|s| s),
+            // Longer names (up to max length 63)
+            "[a-z][a-z0-9_]{20,62}".prop_map(|s| s),
         ]
     }
 
-    /// Generate invalid PostgreSQL identifier names
+    /// Generate invalid PostgreSQL identifier names (shrinks toward simpler violations)
     fn invalid_identifier_names() -> impl Strategy<Value = String> {
         prop_oneof![
-            Just("".to_string()),           // Empty
-            Just("123abc".to_string()),     // Starts with number
-            Just("User".to_string()),       // Uppercase
-            Just("user-table".to_string()), // Hyphen
-            Just("user table".to_string()), // Space
-            Just("a".repeat(64)),           // Too long
+            // Empty string
+            Just("".to_string()),
+            // Starts with digit - shrink toward "0a"
+            "[0-9][a-z]{1,5}".prop_map(|s| s),
+            // Contains uppercase - shrink toward "Aa"
+            "[A-Z][a-z]{1,5}".prop_map(|s| s),
+            // Contains hyphen - shrink toward "a-a"
+            "[a-z]{1,3}-[a-z]{1,3}".prop_map(|s| s),
+            // Contains space - shrink toward "a a"
+            "[a-z]{1,3} [a-z]{1,3}".prop_map(|s| s),
+            // Too long (>63 chars) - shrink toward exactly 64 chars
+            "[a-z]{64,100}".prop_map(|s| s),
         ]
     }
 
@@ -1749,5 +1754,297 @@ mod webhook_policy_tests {
             prop_assert_eq!(result1.allowed, result2.allowed, "validate_all should be deterministic");
             prop_assert_eq!(result1.reason, result2.reason, "validate_all reason should be deterministic");
         }
+    }
+}
+
+// =============================================================================
+// Webhook Contract Property Tests
+// =============================================================================
+
+mod webhook_contract_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    /// Generate a valid UID string (shrinks toward shorter UIDs)
+    fn valid_uid() -> impl Strategy<Value = String> {
+        "[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}".prop_map(|s| s)
+    }
+
+    /// Generate an operation type
+    fn operation() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("CREATE".to_string()),
+            Just("UPDATE".to_string()),
+            Just("DELETE".to_string()),
+        ]
+    }
+
+    /// Build an AdmissionReview JSON request
+    fn build_admission_review(
+        uid: &str,
+        operation: &str,
+        cluster: &PostgresCluster,
+        old_cluster: Option<&PostgresCluster>,
+    ) -> Value {
+        let object = serde_json::to_value(cluster).expect("serialize cluster");
+        let old_object =
+            old_cluster.map(|c| serde_json::to_value(c).expect("serialize old cluster"));
+
+        let mut request = json!({
+            "uid": uid,
+            "kind": {
+                "group": "postgres-operator.smoketurner.com",
+                "version": "v1alpha1",
+                "kind": "PostgresCluster"
+            },
+            "resource": {
+                "group": "postgres-operator.smoketurner.com",
+                "version": "v1alpha1",
+                "resource": "postgresclusters"
+            },
+            "operation": operation,
+            "namespace": cluster.metadata.namespace,
+            "name": cluster.metadata.name,
+            "object": object
+        });
+
+        if let Some(old) = old_object {
+            request["oldObject"] = old;
+        }
+
+        json!({
+            "apiVersion": "admission.k8s.io/v1",
+            "kind": "AdmissionReview",
+            "request": request
+        })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(50))]
+
+        /// Property: AdmissionReview request deserializes correctly with camelCase fields
+        #[test]
+        fn prop_admission_review_deserializes(
+            uid in valid_uid(),
+            op in operation(),
+            spec in valid_spec()
+        ) {
+            use postgres_operator::webhooks::AdmissionReview;
+
+            let cluster = cluster_from_spec(spec);
+            let review_json = build_admission_review(&uid, &op, &cluster, None);
+
+            // Should deserialize without error
+            let review: Result<AdmissionReview, _> = serde_json::from_value(review_json);
+            prop_assert!(review.is_ok(), "AdmissionReview should deserialize: {:?}", review.err());
+
+            let review = review.unwrap();
+            prop_assert_eq!(review.api_version, "admission.k8s.io/v1");
+            prop_assert_eq!(review.kind, "AdmissionReview");
+            prop_assert!(review.request.is_some(), "Request should be present");
+
+            let request = review.request.unwrap();
+            prop_assert_eq!(request.uid, uid);
+            prop_assert_eq!(request.operation, op);
+        }
+
+        /// Property: AdmissionReview response serializes with correct camelCase fields
+        #[test]
+        fn prop_admission_review_response_serializes(
+            uid in valid_uid(),
+            allowed in proptest::bool::ANY,
+            message in "[a-zA-Z ]{0,50}",
+            reason in proptest::option::of("[A-Z][a-zA-Z]{3,15}")
+        ) {
+            use postgres_operator::webhooks::{AdmissionReviewResponse, AdmissionResponse, AdmissionStatus};
+
+            let response = AdmissionReviewResponse {
+                api_version: "admission.k8s.io/v1".to_string(),
+                kind: "AdmissionReview".to_string(),
+                response: AdmissionResponse {
+                    uid: uid.clone(),
+                    allowed,
+                    status: if allowed {
+                        None
+                    } else {
+                        Some(AdmissionStatus {
+                            code: 403,
+                            message: message.clone(),
+                            reason: reason.clone(),
+                        })
+                    },
+                },
+            };
+
+            // Serialize to JSON
+            let json_result = serde_json::to_value(&response);
+            prop_assert!(json_result.is_ok(), "Response should serialize");
+
+            let json = json_result.unwrap();
+
+            // Verify camelCase field names (Kubernetes requires these)
+            prop_assert_eq!(json["apiVersion"].as_str(), Some("admission.k8s.io/v1"));
+            prop_assert_eq!(json["kind"].as_str(), Some("AdmissionReview"));
+            prop_assert_eq!(json["response"]["uid"].as_str(), Some(uid.as_str()));
+            prop_assert_eq!(json["response"]["allowed"].as_bool(), Some(allowed));
+
+            // Verify status fields when denied
+            if !allowed {
+                prop_assert!(json["response"]["status"].is_object(), "Status should be present when denied");
+                prop_assert_eq!(json["response"]["status"]["code"].as_i64(), Some(403));
+                prop_assert_eq!(json["response"]["status"]["message"].as_str(), Some(message.as_str()));
+                if let Some(ref r) = reason {
+                    prop_assert_eq!(json["response"]["status"]["reason"].as_str(), Some(r.as_str()));
+                }
+            } else {
+                // Status should be absent when allowed (skip_serializing_if works)
+                prop_assert!(json["response"]["status"].is_null() || !json["response"].as_object().unwrap().contains_key("status"),
+                    "Status should be absent when allowed");
+            }
+        }
+
+        /// Property: UID is always echoed back in response
+        #[test]
+        fn prop_uid_echoed_in_response(uid in valid_uid()) {
+            use postgres_operator::webhooks::{AdmissionReviewResponse, AdmissionResponse};
+
+            let response = AdmissionReviewResponse {
+                api_version: "admission.k8s.io/v1".to_string(),
+                kind: "AdmissionReview".to_string(),
+                response: AdmissionResponse {
+                    uid: uid.clone(),
+                    allowed: true,
+                    status: None,
+                },
+            };
+
+            let json: Value = serde_json::to_value(&response).unwrap();
+            prop_assert_eq!(json["response"]["uid"].as_str(), Some(uid.as_str()), "UID must be echoed exactly");
+        }
+
+        /// Property: UPDATE operation includes oldObject for immutability checks
+        #[test]
+        fn prop_update_includes_old_object(
+            uid in valid_uid(),
+            old_spec in valid_spec(),
+            new_spec in valid_spec()
+        ) {
+            use postgres_operator::webhooks::AdmissionReview;
+
+            let old_cluster = cluster_from_spec(old_spec);
+            let new_cluster = cluster_from_spec(new_spec);
+            let review_json = build_admission_review(&uid, "UPDATE", &new_cluster, Some(&old_cluster));
+
+            let review: AdmissionReview = serde_json::from_value(review_json).unwrap();
+            let request = review.request.unwrap();
+
+            prop_assert!(request.old_object.is_some(), "UPDATE should have oldObject");
+            prop_assert!(request.object.is_some(), "UPDATE should have object");
+        }
+
+        /// Property: Response status code is always 403 when denied
+        #[test]
+        fn prop_denied_status_code_403(
+            uid in valid_uid(),
+            message in "[a-zA-Z ]{1,30}"
+        ) {
+            use postgres_operator::webhooks::{AdmissionReviewResponse, AdmissionResponse, AdmissionStatus};
+
+            let response = AdmissionReviewResponse {
+                api_version: "admission.k8s.io/v1".to_string(),
+                kind: "AdmissionReview".to_string(),
+                response: AdmissionResponse {
+                    uid,
+                    allowed: false,
+                    status: Some(AdmissionStatus {
+                        code: 403,
+                        message,
+                        reason: Some("ValidationFailed".to_string()),
+                    }),
+                },
+            };
+
+            let json: Value = serde_json::to_value(&response).unwrap();
+            prop_assert_eq!(json["response"]["status"]["code"].as_i64(), Some(403), "Denied responses should have 403 status code");
+        }
+    }
+
+    /// Verify the exact field names match Kubernetes API expectations
+    #[test]
+    fn test_response_field_names_match_kubernetes_spec() {
+        use postgres_operator::webhooks::{
+            AdmissionResponse, AdmissionReviewResponse, AdmissionStatus,
+        };
+
+        let response = AdmissionReviewResponse {
+            api_version: "admission.k8s.io/v1".to_string(),
+            kind: "AdmissionReview".to_string(),
+            response: AdmissionResponse {
+                uid: "test-uid".to_string(),
+                allowed: false,
+                status: Some(AdmissionStatus {
+                    code: 403,
+                    message: "Test message".to_string(),
+                    reason: Some("TestReason".to_string()),
+                }),
+            },
+        };
+
+        let json: Value = serde_json::to_value(&response).unwrap();
+
+        // These exact field names are required by Kubernetes
+        assert!(
+            json.get("apiVersion").is_some(),
+            "Must have apiVersion (camelCase)"
+        );
+        assert!(json.get("kind").is_some(), "Must have kind");
+        assert!(json.get("response").is_some(), "Must have response");
+
+        let resp = &json["response"];
+        assert!(resp.get("uid").is_some(), "Response must have uid");
+        assert!(resp.get("allowed").is_some(), "Response must have allowed");
+
+        // These should NOT exist (snake_case would break the API)
+        assert!(
+            json.get("api_version").is_none(),
+            "Must NOT have api_version (snake_case)"
+        );
+        assert!(
+            resp.get("status").unwrap().get("code").is_some(),
+            "Status must have code"
+        );
+        assert!(
+            resp.get("status").unwrap().get("message").is_some(),
+            "Status must have message"
+        );
+    }
+
+    /// Verify AdmissionReview request can be round-tripped
+    #[test]
+    fn test_admission_review_round_trip() {
+        use postgres_operator::webhooks::AdmissionReview;
+
+        let cluster = cluster_from_spec(minimal_spec());
+        let review_json = build_admission_review(
+            "12345678-1234-1234-1234-123456789abc",
+            "CREATE",
+            &cluster,
+            None,
+        );
+
+        // Deserialize
+        let review: AdmissionReview =
+            serde_json::from_value(review_json.clone()).expect("should deserialize");
+
+        // Verify key fields
+        assert_eq!(review.api_version, "admission.k8s.io/v1");
+        assert_eq!(review.kind, "AdmissionReview");
+
+        let request = review.request.expect("should have request");
+        assert_eq!(request.uid, "12345678-1234-1234-1234-123456789abc");
+        assert_eq!(request.operation, "CREATE");
+        assert_eq!(request.kind.group, "postgres-operator.smoketurner.com");
+        assert_eq!(request.kind.version, "v1alpha1");
+        assert_eq!(request.kind.kind, "PostgresCluster");
     }
 }

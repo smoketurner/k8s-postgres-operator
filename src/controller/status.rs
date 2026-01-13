@@ -163,7 +163,7 @@ impl ConditionBuilder {
 }
 
 /// Status manager for PostgresCluster resources
-pub struct StatusManager<'a> {
+pub(crate) struct StatusManager<'a> {
     cluster: &'a PostgresCluster,
     ctx: &'a Context,
     ns: &'a str,

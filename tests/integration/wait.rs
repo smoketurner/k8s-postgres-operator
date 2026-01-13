@@ -10,8 +10,8 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum WaitError {
-    #[error("Timeout waiting for condition")]
-    Timeout,
+    #[error("Timeout waiting for condition: {condition}")]
+    Timeout { condition: String },
 
     #[error("Watch error: {0}")]
     Watch(#[from] kube::runtime::wait::Error),
@@ -21,6 +21,15 @@ pub enum WaitError {
 
     #[error("Resource not found after wait")]
     ResourceNotFound,
+}
+
+impl WaitError {
+    /// Create a timeout error with condition context
+    pub fn timeout(condition: impl Into<String>) -> Self {
+        Self::Timeout {
+            condition: condition.into(),
+        }
+    }
 }
 
 /// Condition that checks if PostgresCluster is in a specific phase
@@ -180,6 +189,8 @@ pub fn cluster_operational(expected_replicas: i32) -> impl Condition<PostgresClu
 }
 
 /// Wait for a PostgresCluster to reach a condition with timeout
+///
+/// For better error messages, use `wait_for_cluster_named` which includes the condition name.
 pub async fn wait_for_cluster<C>(
     api: &Api<PostgresCluster>,
     name: &str,
@@ -189,11 +200,29 @@ pub async fn wait_for_cluster<C>(
 where
     C: Condition<PostgresCluster>,
 {
+    wait_for_cluster_named(api, name, condition, "condition", timeout).await
+}
+
+/// Wait for a PostgresCluster to reach a condition with timeout and named condition
+///
+/// The `condition_name` parameter is used for error messages when the timeout occurs.
+/// Example: `wait_for_cluster_named(&api, "my-cluster", is_phase(Running), "phase=Running", timeout)`
+pub async fn wait_for_cluster_named<C>(
+    api: &Api<PostgresCluster>,
+    name: &str,
+    condition: C,
+    condition_name: &str,
+    timeout: Duration,
+) -> Result<PostgresCluster, WaitError>
+where
+    C: Condition<PostgresCluster>,
+{
     let cond = await_condition(api.clone(), name, condition);
+    let cond_desc = format!("{} for cluster '{}'", condition_name, name);
 
     let result = tokio::time::timeout(timeout, cond)
         .await
-        .map_err(|_| WaitError::Timeout)?
+        .map_err(|_| WaitError::timeout(&cond_desc))?
         .map_err(WaitError::Watch)?;
 
     result.ok_or(WaitError::ResourceNotFound)
@@ -208,10 +237,11 @@ pub async fn wait_for_deletion(
     use kube::runtime::wait::conditions;
 
     let cond = await_condition(api.clone(), name, conditions::is_deleted(""));
+    let cond_desc = format!("deletion of cluster '{}'", name);
 
     tokio::time::timeout(timeout, cond)
         .await
-        .map_err(|_| WaitError::Timeout)?
+        .map_err(|_| WaitError::timeout(&cond_desc))?
         .map_err(WaitError::Watch)?;
 
     Ok(())
@@ -246,10 +276,11 @@ where
     T: serde::de::DeserializeOwned,
 {
     let cond = await_condition(api.clone(), name, exists::<T>());
+    let cond_desc = format!("existence of resource '{}'", name);
 
     let result = tokio::time::timeout(timeout, cond)
         .await
-        .map_err(|_| WaitError::Timeout)?
+        .map_err(|_| WaitError::timeout(&cond_desc))?
         .map_err(WaitError::Watch)?;
 
     result.ok_or(WaitError::ResourceNotFound)
@@ -268,10 +299,11 @@ where
     use kube::runtime::wait::conditions;
 
     let cond = await_condition(api.clone(), name, conditions::is_deleted(""));
+    let cond_desc = format!("deletion of resource '{}'", name);
 
     tokio::time::timeout(timeout, cond)
         .await
-        .map_err(|_| WaitError::Timeout)?
+        .map_err(|_| WaitError::timeout(&cond_desc))?
         .map_err(WaitError::Watch)?;
 
     Ok(())
@@ -343,6 +375,8 @@ pub fn database_generation_observed() -> impl Condition<PostgresDatabase> {
 }
 
 /// Wait for a PostgresDatabase to reach a condition with timeout
+///
+/// For better error messages, use `wait_for_database_named` which includes the condition name.
 pub async fn wait_for_database<C>(
     api: &Api<PostgresDatabase>,
     name: &str,
@@ -352,11 +386,29 @@ pub async fn wait_for_database<C>(
 where
     C: Condition<PostgresDatabase>,
 {
+    wait_for_database_named(api, name, condition, "condition", timeout).await
+}
+
+/// Wait for a PostgresDatabase to reach a condition with timeout and named condition
+///
+/// The `condition_name` parameter is used for error messages when the timeout occurs.
+/// Example: `wait_for_database_named(&api, "my-db", database_ready(), "phase=Ready", timeout)`
+pub async fn wait_for_database_named<C>(
+    api: &Api<PostgresDatabase>,
+    name: &str,
+    condition: C,
+    condition_name: &str,
+    timeout: Duration,
+) -> Result<PostgresDatabase, WaitError>
+where
+    C: Condition<PostgresDatabase>,
+{
     let cond = await_condition(api.clone(), name, condition);
+    let cond_desc = format!("{} for database '{}'", condition_name, name);
 
     let result = tokio::time::timeout(timeout, cond)
         .await
-        .map_err(|_| WaitError::Timeout)?
+        .map_err(|_| WaitError::timeout(&cond_desc))?
         .map_err(WaitError::Watch)?;
 
     result.ok_or(WaitError::ResourceNotFound)
@@ -376,7 +428,10 @@ pub async fn wait_for_database_deletion(
 
     loop {
         if tokio::time::Instant::now() >= deadline {
-            return Err(WaitError::Timeout);
+            return Err(WaitError::timeout(format!(
+                "deletion of database '{}'",
+                name
+            )));
         }
 
         match api.get(name).await {

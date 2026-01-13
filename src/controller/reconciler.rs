@@ -609,7 +609,12 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
     let tls = &cluster.spec.tls;
     if tls.enabled {
         // TLS enabled requires a cert-manager issuer reference
-        if tls.issuer_ref.is_none() {
+        if let Some(issuer) = tls.issuer_ref.as_ref() {
+            info!(
+                "TLS enabled for {} using cert-manager {} '{}'",
+                name, issuer.kind, issuer.name
+            );
+        } else {
             warn!(
                 "TLS enabled for {} but no issuerRef specified - cert-manager issuer is required",
                 name
@@ -635,12 +640,6 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
             .await;
             // Don't requeue - requires user intervention to configure issuer
             return Ok(Action::await_change());
-        } else {
-            let issuer = tls.issuer_ref.as_ref().unwrap();
-            info!(
-                "TLS enabled for {} using cert-manager {} '{}'",
-                name, issuer.kind, issuer.name
-            );
         }
         // Apply cert-manager Certificate resource
         if let Some(cert) = certificate::generate_certificate(cluster) {
@@ -1381,7 +1380,11 @@ async fn apply_keda_resource(
             .as_ref()
             .map(|t| {
                 let parts: Vec<&str> = t.api_version.split('/').collect();
-                parts.get(1).unwrap_or(&parts[0]).to_string()
+                parts
+                    .get(1)
+                    .or(parts.first())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
             })
             .unwrap_or_default(),
         kind: obj

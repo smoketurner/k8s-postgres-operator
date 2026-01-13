@@ -62,7 +62,8 @@ pub enum DatabaseError {
 pub type Result<T, E = DatabaseError> = std::result::Result<T, E>;
 
 /// Finalizer for PostgresDatabase resources
-pub const DATABASE_FINALIZER: &str = "postgresdatabase.postgres-operator.smoketurner.com/finalizer";
+pub(crate) const DATABASE_FINALIZER: &str =
+    "postgresdatabase.postgres-operator.smoketurner.com/finalizer";
 
 /// Reconcile a PostgresDatabase resource
 pub async fn reconcile_database(

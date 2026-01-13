@@ -7,7 +7,7 @@
 //! - Running Kubernetes cluster (via kind, minikube, etc.)
 //! - KEDA NOT required - tests verify resource generation, not KEDA behavior
 //!
-//! Run with: cargo test --test integration scaling_tests -- --ignored --test-threads=1
+//! Run with: cargo test --test integration scaling_tests -- --ignored
 
 use k8s_openapi::api::apps::v1::StatefulSet;
 use kube::Client;
@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use crate::{
     PostgresClusterBuilder, ScopedOperator, SharedTestCluster, TestNamespace, ensure_crd_installed,
-    ensure_operator_running, wait_for_resource,
+    wait_for_resource,
 };
 
 /// Timeout for scaling tests - resources should be created quickly
@@ -128,15 +128,8 @@ fn get_max_replicas(obj: &DynamicObject) -> Option<i64> {
 // Test Context Setup
 // =============================================================================
 
-/// Test context with operator and cluster client
-struct TestContext {
-    client: kube::Client,
-    _operator: ScopedOperator,
-    _cluster: std::sync::Arc<SharedTestCluster>,
-}
-
-/// Setup test context - starts operator and returns client
-async fn setup() -> TestContext {
+/// Initialize tracing and ensure CRD is installed
+async fn init_test() -> std::sync::Arc<SharedTestCluster> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("info,kube=warn")
         .with_test_writer()
@@ -150,16 +143,7 @@ async fn setup() -> TestContext {
         .await
         .expect("Failed to install CRD");
 
-    let client = cluster.new_client().await.expect("Failed to create client");
-
-    // Start the operator for this test
-    let operator = ensure_operator_running(client.clone()).await;
-
-    TestContext {
-        client,
-        _operator: operator,
-        _cluster: cluster,
-    }
+    cluster
 }
 
 // =============================================================================
@@ -170,11 +154,12 @@ async fn setup() -> TestContext {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_scaling_cpu_resource_created() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "scaling-cpu")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create cluster with CPU scaling (2 replicas, can scale to 5)
     // Note: CPU scaling requires resource requests to be set for KEDA to calculate utilization
@@ -218,11 +203,12 @@ async fn test_scaling_cpu_resource_created() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_scaling_disabled_no_resource() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "scaling-disabled")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create cluster with scaling disabled (maxReplicas == replicas)
     let cluster = PostgresClusterBuilder::new("test-disabled", ns.name())
@@ -257,8 +243,8 @@ async fn test_scaling_disabled_no_resource() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_scaling_connection_resource_created() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "scaling-conn")
         .await
         .expect("create ns");
@@ -300,8 +286,8 @@ async fn test_scaling_connection_resource_created() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_scaling_combined_resource_created() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "scaling-combined")
         .await
         .expect("create ns");
@@ -350,8 +336,8 @@ async fn test_scaling_combined_resource_created() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_scaling_owner_reference() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "scaling-owner")
         .await
         .expect("create ns");
@@ -395,8 +381,8 @@ async fn test_scaling_owner_reference() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_scaling_standard_labels() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "scaling-labels")
         .await
         .expect("create ns");
@@ -449,8 +435,8 @@ async fn test_scaling_standard_labels() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_scaling_hpa_behavior_best_practices() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "scaling-hpa")
         .await
         .expect("create ns");
@@ -510,8 +496,8 @@ async fn test_scaling_hpa_behavior_best_practices() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_scaling_cooldown_periods() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "scaling-cooldown")
         .await
         .expect("create ns");
@@ -566,11 +552,12 @@ async fn test_scaling_cooldown_periods() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_scaling_min_replicas_default() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "scaling-min-default")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create cluster with scaling where minReplicas defaults to base replicas (2)
     // Note: CPU scaling requires resource requests for KEDA to calculate utilization
@@ -612,8 +599,8 @@ async fn test_scaling_min_replicas_default() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_scaling_cpu_utilization_target() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "scaling-cpu-target")
         .await
         .expect("create ns");
@@ -665,8 +652,8 @@ async fn test_scaling_cpu_utilization_target() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_scaling_connection_target() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "scaling-conn-target")
         .await
         .expect("create ns");

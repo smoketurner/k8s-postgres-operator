@@ -12,7 +12,7 @@ use crate::crd::PostgresCluster;
 use crate::health::HealthState;
 
 /// Field manager name for the operator
-pub const FIELD_MANAGER: &str = "postgres-operator";
+pub(crate) const FIELD_MANAGER: &str = "postgres-operator";
 
 /// Shared context for the controller
 #[derive(Clone)]

@@ -369,6 +369,7 @@ pub fn generate_pgbouncer_replica_certificate(cluster: &PostgresCluster) -> Opti
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
     use crate::crd::{

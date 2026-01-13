@@ -1,7 +1,27 @@
 //! Operator spawning utilities for integration tests
 //!
-//! Each test gets its own operator instance to avoid watch/state issues
-//! between tests. The operator runs in the test's tokio runtime.
+//! Each test gets its own operator instance scoped to a specific namespace.
+//! This enables test parallelization - multiple tests can run concurrently
+//! without their operators interfering with each other.
+//!
+//! The operator runs in the test's tokio runtime and is automatically
+//! stopped when dropped.
+//!
+//! ## Usage
+//!
+//! ```rust,ignore
+//! let ns = TestNamespace::create(client.clone(), "my-test").await?;
+//! let operator = ScopedOperator::start(client.clone(), ns.name()).await;
+//!
+//! // Run tests...
+//! // Operator stops automatically when dropped
+//! ```
+//!
+//! ## Design
+//!
+//! The scoped operator uses `Api::namespaced()` instead of `Api::all()` to
+//! watch only resources in a specific namespace. This prevents tests from
+//! interfering with each other when running in parallel.
 
 use kube::Client;
 use std::sync::Arc;
@@ -9,24 +29,30 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 /// A scoped operator that runs for the duration of a test
+///
+/// The operator only watches resources in its configured namespace,
+/// enabling parallel test execution without interference.
 pub struct ScopedOperator {
     handle: JoinHandle<()>,
     shutdown_tx: Option<oneshot::Sender<()>>,
+    namespace: String,
 }
 
 impl ScopedOperator {
-    /// Start a new operator instance
+    /// Start a new operator instance scoped to a specific namespace
     ///
-    /// The operator will watch PostgresCluster resources and reconcile them.
-    /// It will be automatically stopped when dropped.
-    pub async fn start(client: Client) -> Self {
+    /// The operator will only watch and reconcile PostgresCluster resources
+    /// in the specified namespace. It will be automatically stopped when dropped.
+    pub async fn start(client: Client, namespace: &str) -> Self {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let ns = namespace.to_string();
+        let ns_clone = ns.clone();
 
-        tracing::info!("Starting scoped operator controller...");
+        tracing::info!("Starting scoped operator controller in namespace: {}", ns);
 
         let handle = tokio::spawn(async move {
             tokio::select! {
-                _ = run_operator(client) => {
+                _ = run_operator(client, &ns_clone) => {
                     tracing::debug!("Operator exited normally");
                 }
                 _ = shutdown_rx => {
@@ -41,27 +67,34 @@ impl ScopedOperator {
         Self {
             handle,
             shutdown_tx: Some(shutdown_tx),
+            namespace: ns,
         }
     }
 
-    /// Start operators for both PostgresCluster and PostgresDatabase
+    /// Start operators for both PostgresCluster and PostgresDatabase in a namespace
     ///
     /// This runs both the cluster controller and the database controller
-    /// concurrently. Use this for tests that need PostgresDatabase functionality.
-    pub async fn start_with_database(client: Client) -> Self {
+    /// concurrently, scoped to the specified namespace.
+    pub async fn start_with_database(client: Client, namespace: &str) -> Self {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let ns = namespace.to_string();
+        let ns_clone = ns.clone();
 
-        tracing::info!("Starting scoped operators (cluster + database)...");
+        tracing::info!(
+            "Starting scoped operators (cluster + database) in namespace: {}",
+            ns
+        );
 
         let cluster_client = client.clone();
         let database_client = client;
+        let ns_for_db = ns_clone.clone();
 
         let handle = tokio::spawn(async move {
             tokio::select! {
-                _ = run_operator(cluster_client) => {
+                _ = run_operator(cluster_client, &ns_clone) => {
                     tracing::debug!("Cluster operator exited normally");
                 }
-                _ = run_database_operator(database_client) => {
+                _ = run_database_operator(database_client, &ns_for_db) => {
                     tracing::debug!("Database operator exited normally");
                 }
                 _ = shutdown_rx => {
@@ -76,7 +109,13 @@ impl ScopedOperator {
         Self {
             handle,
             shutdown_tx: Some(shutdown_tx),
+            namespace: ns,
         }
+    }
+
+    /// Get the namespace this operator is scoped to
+    pub fn namespace(&self) -> &str {
+        &self.namespace
     }
 }
 
@@ -91,8 +130,11 @@ impl Drop for ScopedOperator {
     }
 }
 
-/// Run the operator controller
-async fn run_operator(client: Client) {
+/// Run the operator controller scoped to a specific namespace
+///
+/// This enables parallel test execution by ensuring each operator only
+/// watches resources in its designated namespace.
+async fn run_operator(client: Client, namespace: &str) {
     use futures::StreamExt;
     use k8s_openapi::api::apps::v1::StatefulSet;
     use k8s_openapi::api::core::v1::{ConfigMap, Secret, Service};
@@ -105,12 +147,13 @@ async fn run_operator(client: Client) {
 
     let ctx = Arc::new(Context::new(client.clone(), None));
 
-    let clusters: Api<PostgresCluster> = Api::all(client.clone());
-    let statefulsets: Api<StatefulSet> = Api::all(client.clone());
-    let services: Api<Service> = Api::all(client.clone());
-    let configmaps: Api<ConfigMap> = Api::all(client.clone());
-    let secrets: Api<Secret> = Api::all(client.clone());
-    let pdbs: Api<PodDisruptionBudget> = Api::all(client.clone());
+    // Use namespaced APIs for parallel test isolation
+    let clusters: Api<PostgresCluster> = Api::namespaced(client.clone(), namespace);
+    let statefulsets: Api<StatefulSet> = Api::namespaced(client.clone(), namespace);
+    let services: Api<Service> = Api::namespaced(client.clone(), namespace);
+    let configmaps: Api<ConfigMap> = Api::namespaced(client.clone(), namespace);
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), namespace);
+    let pdbs: Api<PodDisruptionBudget> = Api::namespaced(client.clone(), namespace);
 
     let watcher_config = WatcherConfig::default().any_semantic();
 
@@ -134,20 +177,8 @@ async fn run_operator(client: Client) {
         .await;
 }
 
-/// Helper function for backward compatibility
-/// Starts a scoped operator that will be properly cleaned up
-pub async fn ensure_operator_running(client: Client) -> ScopedOperator {
-    ScopedOperator::start(client).await
-}
-
-/// Starts both cluster and database operators
-/// Use this for PostgresDatabase integration tests
-pub async fn ensure_operator_running_with_database(client: Client) -> ScopedOperator {
-    ScopedOperator::start_with_database(client).await
-}
-
-/// Run the database operator controller
-async fn run_database_operator(client: Client) {
+/// Run the database operator controller scoped to a specific namespace
+async fn run_database_operator(client: Client, namespace: &str) {
     use futures::StreamExt;
     use k8s_openapi::api::core::v1::Secret;
     use kube::Api;
@@ -158,8 +189,9 @@ async fn run_database_operator(client: Client) {
 
     let ctx = Arc::new(DatabaseContext::new(client.clone()));
 
-    let databases: Api<PostgresDatabase> = Api::all(client.clone());
-    let secrets: Api<Secret> = Api::all(client.clone());
+    // Use namespaced APIs for parallel test isolation
+    let databases: Api<PostgresDatabase> = Api::namespaced(client.clone(), namespace);
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), namespace);
 
     let watcher_config = WatcherConfig::default().any_semantic();
 

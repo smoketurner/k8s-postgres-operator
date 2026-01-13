@@ -14,7 +14,10 @@ fn generate_password(len: usize) -> String {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     let mut rng = rand::rng();
     (0..len)
-        .map(|_| CHARSET[rng.random_range(0..CHARSET.len())] as char)
+        .filter_map(|_| {
+            let idx = rng.random_range(0..CHARSET.len());
+            CHARSET.get(idx).map(|&c| c as char)
+        })
         .collect()
 }
 

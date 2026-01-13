@@ -119,6 +119,7 @@ pub fn patroni_cluster_labels(cluster: &PostgresCluster) -> BTreeMap<String, Str
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 

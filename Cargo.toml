@@ -98,6 +98,34 @@ uuid = { version = "=1.19.0", default-features = false, features = ["v4"] }
 serde_yaml = { version = "=0.9.34", default-features = false }
 proptest = { version = "=1.9.0", default-features = false, features = ["std"] }
 
+[lints.clippy]
+# Panic-prevention lints
+# See: https://blog.reverberate.org/2025/02/03/no-panic-rust.html
+#
+# Production code must never panic. These lints enforce panic-free patterns.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"
+exit = "deny"
+
+# Panic patterns inside Result-returning functions
+unwrap_in_result = "deny"
+panic_in_result_fn = "deny"
+get_unwrap = "deny"
+
+# Indexing can panic - use .get() instead
+indexing_slicing = "deny"
+
+# String slicing can panic on non-UTF8 boundaries
+string_slice = "warn"
+
+[lints.rust]
+# Unsafe code restrictions
+unsafe_code = "deny"
+
 [[test]]
 name = "integration"
 path = "tests/integration/main.rs"

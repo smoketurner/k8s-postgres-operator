@@ -5,49 +5,165 @@
 //! - 1 replica: single server
 //! - 2 replicas: primary + 1 read replica
 //! - 3+ replicas: highly available cluster
+//!
+//! # Quick Start
+//!
+//! For simple unit tests, use the convenience functions:
+//! ```rust,ignore
+//! let cluster = create_test_cluster("my-cluster", "default", 3);
+//! let cluster_with_tls = create_test_cluster_with_tls("my-cluster", "default", 3);
+//! ```
+//!
+//! For more complex configurations, use the builder pattern:
+//! ```rust,ignore
+//! let cluster = PostgresClusterBuilder::ha("my-cluster", "default")
+//!     .with_tls("letsencrypt-prod")
+//!     .with_pgbouncer()
+//!     .with_metrics()
+//!     .build();
+//! ```
 
 use kube::core::ObjectMeta;
 use postgres_operator::crd::{
     ClusterRef, ConnectionScalingMetric, CpuScalingMetric, DatabaseSpec, ExternalTrafficPolicy,
-    GrantSpec, IssuerKind, IssuerRef, MetricsSpec, PgBouncerSpec, PostgresCluster,
-    PostgresClusterSpec, PostgresDatabase, PostgresDatabaseSpec, PostgresVersion, ResourceList,
-    ResourceRequirements, RolePrivilege, RoleSpec, ScalingMetrics, ScalingSpec, ServiceSpec,
-    ServiceType, StorageSpec, TLSSpec, TablePrivilege,
+    GrantSpec, IssuerKind, IssuerRef, MetricsSpec, NetworkPolicySpec, PgBouncerSpec,
+    PostgresCluster, PostgresClusterSpec, PostgresDatabase, PostgresDatabaseSpec, PostgresVersion,
+    ResourceList, ResourceRequirements, RolePrivilege, RoleSpec, ScalingMetrics, ScalingSpec,
+    ServiceSpec, ServiceType, StorageSpec, TLSSpec, TablePrivilege,
 };
 use std::collections::BTreeMap;
 
+// =============================================================================
+// Convenience Functions for Simple Test Cases
+// =============================================================================
+
+/// Create a basic test cluster with minimal configuration
+///
+/// This is the simplest way to create a cluster for unit tests.
+/// TLS is disabled by default (no cert-manager in test environment).
+///
+/// # Example
+/// ```rust,ignore
+/// let cluster = create_test_cluster("my-cluster", "default", 1);
+/// ```
+pub fn create_test_cluster(name: &str, namespace: &str, replicas: i32) -> PostgresCluster {
+    PostgresClusterBuilder::new(name, namespace)
+        .with_replicas(replicas)
+        .with_storage("10Gi", Some("standard"))
+        .with_uid("test-uid-12345")
+        .build()
+}
+
+/// Create a test cluster with TLS enabled (cert-manager ClusterIssuer)
+///
+/// # Example
+/// ```rust,ignore
+/// let cluster = create_test_cluster_with_tls("my-cluster", "default", 3);
+/// ```
+pub fn create_test_cluster_with_tls(name: &str, namespace: &str, replicas: i32) -> PostgresCluster {
+    PostgresClusterBuilder::new(name, namespace)
+        .with_replicas(replicas)
+        .with_storage("10Gi", Some("standard"))
+        .with_uid("test-uid-12345")
+        .with_tls("letsencrypt-prod")
+        .build()
+}
+
+/// Create a test cluster with PgBouncer enabled
+///
+/// # Example
+/// ```rust,ignore
+/// let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
+/// ```
+pub fn create_test_cluster_with_pgbouncer(
+    name: &str,
+    namespace: &str,
+    replicas: i32,
+) -> PostgresCluster {
+    PostgresClusterBuilder::new(name, namespace)
+        .with_replicas(replicas)
+        .with_storage("10Gi", Some("standard"))
+        .with_uid("test-uid-12345")
+        .with_pgbouncer()
+        .build()
+}
+
+/// Create a test cluster with PgBouncer and replica pooler enabled
+///
+/// # Example
+/// ```rust,ignore
+/// let cluster = create_test_cluster_with_pgbouncer_replica("my-cluster", "default", 3);
+/// ```
+pub fn create_test_cluster_with_pgbouncer_replica(
+    name: &str,
+    namespace: &str,
+    replicas: i32,
+) -> PostgresCluster {
+    PostgresClusterBuilder::new(name, namespace)
+        .with_replicas(replicas)
+        .with_storage("10Gi", Some("standard"))
+        .with_uid("test-uid-12345")
+        .with_pgbouncer_replica()
+        .build()
+}
+
+// =============================================================================
+// PostgresCluster Builder
+// =============================================================================
+
 /// Builder for PostgresCluster test fixtures
+///
+/// Provides a fluent API for creating PostgresCluster resources with various
+/// configurations. Use this for complex test scenarios.
+///
+/// # Example
+/// ```rust,ignore
+/// let cluster = PostgresClusterBuilder::ha("my-cluster", "default")
+///     .with_tls("letsencrypt-prod")
+///     .with_pgbouncer()
+///     .with_metrics()
+///     .with_cpu_scaling(1, 5, 80)
+///     .build();
+/// ```
+#[allow(dead_code)]
 pub struct PostgresClusterBuilder {
     name: String,
     namespace: String,
+    uid: Option<String>,
+    generation: Option<i64>,
     version: PostgresVersion,
     replicas: i32,
     storage_size: String,
     storage_class: Option<String>,
     postgresql_params: BTreeMap<String, String>,
+    labels: BTreeMap<String, String>,
     resources: Option<ResourceRequirements>,
     tls: TLSSpec,
     pgbouncer: Option<PgBouncerSpec>,
     metrics: Option<MetricsSpec>,
     service: Option<ServiceSpec>,
     scaling: Option<ScalingSpec>,
-    network_policy: Option<postgres_operator::crd::NetworkPolicySpec>,
+    network_policy: Option<NetworkPolicySpec>,
 }
 
+#[allow(dead_code)]
 impl PostgresClusterBuilder {
     /// Create a new builder with default values
-    /// Note: TLS is enabled by default but without an issuer (tests must provide one)
+    ///
+    /// TLS is disabled by default for tests (no cert-manager in test environment).
     pub fn new(name: &str, namespace: &str) -> Self {
         Self {
             name: name.to_string(),
             namespace: namespace.to_string(),
+            uid: None,
+            generation: Some(1),
             version: PostgresVersion::V16,
             replicas: 1,
             storage_size: "1Gi".to_string(),
             storage_class: None,
             postgresql_params: BTreeMap::new(),
+            labels: BTreeMap::new(),
             resources: None,
-            // TLS disabled by default for tests (no cert-manager in test environment)
             tls: TLSSpec {
                 enabled: false,
                 issuer_ref: None,
@@ -71,6 +187,18 @@ impl PostgresClusterBuilder {
     /// Create a builder configured for a highly available cluster (3 replicas)
     pub fn ha(name: &str, namespace: &str) -> Self {
         Self::new(name, namespace).with_replicas(3)
+    }
+
+    /// Set the resource UID (for owner references)
+    pub fn with_uid(mut self, uid: &str) -> Self {
+        self.uid = Some(uid.to_string());
+        self
+    }
+
+    /// Set the resource generation
+    pub fn with_generation(mut self, generation: i64) -> Self {
+        self.generation = Some(generation);
+        self
     }
 
     /// Set the PostgreSQL version
@@ -99,7 +227,13 @@ impl PostgresClusterBuilder {
         self
     }
 
-    /// Set resource requirements
+    /// Add a user label
+    pub fn with_label(mut self, key: &str, value: &str) -> Self {
+        self.labels.insert(key.to_string(), value.to_string());
+        self
+    }
+
+    /// Set resource requirements (same for requests and limits)
     pub fn with_resources(mut self, cpu: &str, memory: &str) -> Self {
         self.resources = Some(ResourceRequirements {
             requests: Some(ResourceList {
@@ -137,6 +271,29 @@ impl PostgresClusterBuilder {
         self
     }
 
+    /// Set resource requirements with restart_on_resize option
+    pub fn with_resources_resize(
+        mut self,
+        req_cpu: &str,
+        req_memory: &str,
+        limit_cpu: &str,
+        limit_memory: &str,
+        restart_on_resize: bool,
+    ) -> Self {
+        self.resources = Some(ResourceRequirements {
+            requests: Some(ResourceList {
+                cpu: Some(req_cpu.to_string()),
+                memory: Some(req_memory.to_string()),
+            }),
+            limits: Some(ResourceList {
+                cpu: Some(limit_cpu.to_string()),
+                memory: Some(limit_memory.to_string()),
+            }),
+            restart_on_resize: Some(restart_on_resize),
+        });
+        self
+    }
+
     /// Enable TLS with a cert-manager ClusterIssuer
     pub fn with_tls(mut self, issuer_name: &str) -> Self {
         self.tls = TLSSpec {
@@ -165,6 +322,28 @@ impl PostgresClusterBuilder {
             additional_dns_names: vec![],
             duration: None,
             renew_before: None,
+        };
+        self
+    }
+
+    /// Enable TLS with custom duration and renewal settings
+    pub fn with_tls_full(
+        mut self,
+        issuer_name: &str,
+        additional_dns_names: Vec<String>,
+        duration: Option<&str>,
+        renew_before: Option<&str>,
+    ) -> Self {
+        self.tls = TLSSpec {
+            enabled: true,
+            issuer_ref: Some(IssuerRef {
+                name: issuer_name.to_string(),
+                kind: IssuerKind::ClusterIssuer,
+                group: "cert-manager.io".to_string(),
+            }),
+            additional_dns_names,
+            duration: duration.map(String::from),
+            renew_before: renew_before.map(String::from),
         };
         self
     }
@@ -404,7 +583,7 @@ impl PostgresClusterBuilder {
 
     /// Enable network policy with default settings (secure by default)
     pub fn with_network_policy(mut self) -> Self {
-        self.network_policy = Some(postgres_operator::crd::NetworkPolicySpec {
+        self.network_policy = Some(NetworkPolicySpec {
             allow_external_access: false,
             allow_from: vec![],
         });
@@ -413,7 +592,7 @@ impl PostgresClusterBuilder {
 
     /// Enable network policy with external access (for testing)
     pub fn with_network_policy_external_access(mut self) -> Self {
-        self.network_policy = Some(postgres_operator::crd::NetworkPolicySpec {
+        self.network_policy = Some(NetworkPolicySpec {
             allow_external_access: true,
             allow_from: vec![],
         });
@@ -425,7 +604,7 @@ impl PostgresClusterBuilder {
         mut self,
         peers: Vec<postgres_operator::crd::NetworkPolicyPeer>,
     ) -> Self {
-        self.network_policy = Some(postgres_operator::crd::NetworkPolicySpec {
+        self.network_policy = Some(NetworkPolicySpec {
             allow_external_access: false,
             allow_from: peers,
         });
@@ -438,6 +617,8 @@ impl PostgresClusterBuilder {
             metadata: ObjectMeta {
                 name: Some(self.name),
                 namespace: Some(self.namespace),
+                uid: self.uid,
+                generation: self.generation,
                 ..Default::default()
             },
             spec: PostgresClusterSpec {
@@ -448,7 +629,7 @@ impl PostgresClusterBuilder {
                     storage_class: self.storage_class,
                 },
                 postgresql_params: self.postgresql_params,
-                labels: Default::default(),
+                labels: self.labels,
                 resources: self.resources,
                 backup: None,
                 pgbouncer: self.pgbouncer,
@@ -472,6 +653,16 @@ impl PostgresClusterBuilder {
 ///
 /// Creates PostgresDatabase resources for integration testing.
 /// Provides a fluent API to configure databases, roles, grants, and extensions.
+///
+/// # Example
+/// ```rust,ignore
+/// let db = PostgresDatabaseBuilder::new("myapp", "default", "my-cluster")
+///     .with_database_name("myapp_production")
+///     .with_role("app_user", "myapp-credentials")
+///     .with_extension("uuid-ossp")
+///     .build();
+/// ```
+#[allow(dead_code)]
 pub struct PostgresDatabaseBuilder {
     name: String,
     namespace: String,
@@ -487,6 +678,7 @@ pub struct PostgresDatabaseBuilder {
     extensions: Vec<String>,
 }
 
+#[allow(dead_code)]
 impl PostgresDatabaseBuilder {
     /// Create a new builder with required fields
     ///

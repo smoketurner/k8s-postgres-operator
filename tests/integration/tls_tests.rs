@@ -7,7 +7,7 @@
 //! - Kubernetes cluster with cert-manager installed
 //! - A ClusterIssuer named "selfsigned-issuer" (or set TEST_CLUSTER_ISSUER env var)
 //!
-//! Run with: cargo test --test integration tls -- --ignored --test-threads=1
+//! Run with: cargo test --test integration tls -- --ignored
 
 use kube::Api;
 use kube::api::PostParams;
@@ -21,18 +21,11 @@ use crate::postgres::{
 };
 use crate::{
     PostgresClusterBuilder, ScopedOperator, SharedTestCluster, TestNamespace, cluster_operational,
-    ensure_crd_installed, ensure_operator_running, pgbouncer_ready, wait_for_cluster,
+    ensure_crd_installed, pgbouncer_ready, wait_for_cluster,
 };
 
-/// Test context with operator and cluster client
-struct TestContext {
-    client: kube::Client,
-    _operator: ScopedOperator,
-    _cluster: std::sync::Arc<SharedTestCluster>,
-}
-
-/// Setup test context - starts operator and returns client
-async fn setup() -> TestContext {
+/// Initialize tracing and ensure CRD is installed
+async fn init_test() -> std::sync::Arc<SharedTestCluster> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("info,kube=warn,postgres_operator=debug")
         .with_test_writer()
@@ -46,16 +39,7 @@ async fn setup() -> TestContext {
         .await
         .expect("Failed to install CRD");
 
-    let client = cluster.new_client().await.expect("Failed to create client");
-
-    // Start the operator for this test
-    let operator = ensure_operator_running(client.clone()).await;
-
-    TestContext {
-        client,
-        _operator: operator,
-        _cluster: cluster,
-    }
+    cluster
 }
 
 // =============================================================================
@@ -71,11 +55,12 @@ async fn setup() -> TestContext {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster with cert-manager"]
 async fn test_tls_standalone_connectivity() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "tls-standalone")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let issuer = get_test_cluster_issuer();
     tracing::info!(issuer = %issuer, "Using ClusterIssuer for TLS");
@@ -162,11 +147,12 @@ async fn test_tls_standalone_connectivity() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster with cert-manager"]
 async fn test_tls_ha_cluster_connectivity() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "tls-ha")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let issuer = get_test_cluster_issuer();
     tracing::info!(issuer = %issuer, "Using ClusterIssuer for TLS");
@@ -278,11 +264,12 @@ async fn test_tls_ha_cluster_connectivity() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster with cert-manager"]
 async fn test_tls_pgbouncer_connectivity() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "tls-pgb")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let issuer = get_test_cluster_issuer();
     tracing::info!(issuer = %issuer, "Using ClusterIssuer for TLS");
@@ -401,11 +388,12 @@ async fn test_tls_pgbouncer_connectivity() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster with cert-manager"]
 async fn test_tls_pgbouncer_replica_pooler() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "tls-pgb-repl")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let issuer = get_test_cluster_issuer();
     tracing::info!(issuer = %issuer, "Using ClusterIssuer for TLS");

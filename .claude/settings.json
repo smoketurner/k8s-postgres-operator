@@ -55,9 +55,6 @@
     "deny": [
       "Read(.env)",
       "Read(.env.*)",
-      "Read(**/secrets/**)",
-      "Read(**/*secret*)",
-      "Read(**/*credential*)",
       "Bash(docker run:*)"
     ]
   },

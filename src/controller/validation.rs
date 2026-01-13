@@ -203,6 +203,7 @@ pub fn validate_version_upgrade(old_version: &str, new_version: &str) -> Result<
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 

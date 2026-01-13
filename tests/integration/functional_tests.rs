@@ -3,7 +3,10 @@
 //! These tests use watch-based waiting for efficient resource detection.
 //! They verify end-to-end functionality against a real Kubernetes cluster.
 //!
-//! Run with: cargo test --test integration -- --ignored --test-threads=1
+//! Each test creates its own namespace and operator instance, enabling
+//! parallel test execution without interference.
+//!
+//! Run with: cargo test --test integration -- --ignored
 
 use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::{ConfigMap, Secret, Service};
@@ -14,18 +17,12 @@ use postgres_operator::crd::{PostgresCluster, PostgresVersion};
 
 use crate::{
     PostgresClusterBuilder, SHORT_TIMEOUT, ScopedOperator, SharedTestCluster, TestNamespace,
-    ensure_crd_installed, ensure_operator_running, wait_for_resource, wait_for_resource_deletion,
+    ensure_crd_installed, wait_for_resource, wait_for_resource_deletion,
 };
 
-/// Test context with operator and cluster client
-struct TestContext {
-    client: kube::Client,
-    _operator: ScopedOperator,
-    _cluster: std::sync::Arc<SharedTestCluster>,
-}
-
-/// Setup test context - starts operator and returns client
-async fn setup() -> TestContext {
+/// Initialize tracing and ensure CRD is installed
+/// Returns the shared test cluster for creating clients
+async fn init_test() -> std::sync::Arc<SharedTestCluster> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("info,kube=warn")
         .with_test_writer()
@@ -39,16 +36,7 @@ async fn setup() -> TestContext {
         .await
         .expect("Failed to install CRD");
 
-    let client = cluster.new_client().await.expect("Failed to create client");
-
-    // Start the operator for this test
-    let operator = ensure_operator_running(client.clone()).await;
-
-    TestContext {
-        client,
-        _operator: operator,
-        _cluster: cluster,
-    }
+    cluster
 }
 
 // =============================================================================
@@ -59,11 +47,12 @@ async fn setup() -> TestContext {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_cluster_resource_created() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "func-create")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let pg = PostgresClusterBuilder::single("test-cluster", ns.name())
         .with_version(PostgresVersion::V16)
@@ -78,19 +67,18 @@ async fn test_cluster_resource_created() {
     let created = api.get("test-cluster").await.expect("get cluster");
     assert_eq!(created.spec.version, PostgresVersion::V16);
     assert_eq!(created.spec.replicas, 1);
-
-    // Explicit cleanup to ensure it completes before test exits
 }
 
 /// Test: PostgresCluster creates StatefulSet
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_cluster_creates_statefulset() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "func-sts")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let pg = PostgresClusterBuilder::single("test-sts", ns.name())
         .with_version(PostgresVersion::V16)
@@ -117,11 +105,12 @@ async fn test_cluster_creates_statefulset() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_cluster_creates_services() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "func-svc")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let pg = PostgresClusterBuilder::single("test-svc", ns.name())
         .with_version(PostgresVersion::V16)
@@ -151,11 +140,12 @@ async fn test_cluster_creates_services() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_cluster_creates_configmap() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "func-cm")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let pg = PostgresClusterBuilder::single("test-cm", ns.name())
         .with_version(PostgresVersion::V16)
@@ -188,11 +178,12 @@ async fn test_cluster_creates_configmap() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_cluster_creates_secret() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "func-secret")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let pg = PostgresClusterBuilder::single("test-secret", ns.name())
         .with_version(PostgresVersion::V16)
@@ -213,11 +204,12 @@ async fn test_cluster_creates_secret() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_cluster_deletion_cleanup() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "func-del")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let pg = PostgresClusterBuilder::single("test-del", ns.name())
         .with_version(PostgresVersion::V16)
@@ -253,11 +245,12 @@ async fn test_cluster_deletion_cleanup() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_network_policy_created() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "func-np")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let pg = PostgresClusterBuilder::single("test-np", ns.name())
         .with_version(PostgresVersion::V16)
@@ -288,11 +281,12 @@ async fn test_network_policy_created() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_network_policy_allows_operator_namespace() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "func-np-op")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let pg = PostgresClusterBuilder::single("test-np-op", ns.name())
         .with_version(PostgresVersion::V16)
@@ -336,11 +330,12 @@ async fn test_network_policy_allows_operator_namespace() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_network_policy_external_access() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "func-np-ext")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let pg = PostgresClusterBuilder::single("test-np-ext", ns.name())
         .with_version(PostgresVersion::V16)
@@ -377,11 +372,12 @@ async fn test_network_policy_external_access() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_network_policy_allows_dns() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "func-np-dns")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let pg = PostgresClusterBuilder::single("test-np-dns", ns.name())
         .with_version(PostgresVersion::V16)
@@ -422,11 +418,12 @@ async fn test_network_policy_allows_dns() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_network_policy_owner_reference() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "func-np-own")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let pg = PostgresClusterBuilder::single("test-np-own", ns.name())
         .with_version(PostgresVersion::V16)
@@ -460,11 +457,12 @@ async fn test_network_policy_owner_reference() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_network_policy_garbage_collected() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "func-np-gc")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let pg = PostgresClusterBuilder::single("test-np-gc", ns.name())
         .with_version(PostgresVersion::V16)
@@ -501,11 +499,12 @@ async fn test_network_policy_garbage_collected() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_cluster_custom_labels() {
-    let ctx = setup().await;
-    let client = ctx.client.clone();
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "func-labels")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create cluster with custom labels via raw spec
     let mut pg = PostgresClusterBuilder::single("test-labels", ns.name())
@@ -535,5 +534,464 @@ async fn test_cluster_custom_labels() {
     assert_eq!(
         labels.get("cost-center"),
         Some(&"infrastructure".to_string())
+    );
+}
+
+// =============================================================================
+// Error Path Tests - Validation Failures
+// =============================================================================
+
+/// Test: Invalid replica count (0) is rejected by CRD validation
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Kubernetes cluster"]
+async fn test_invalid_replicas_zero_rejected() {
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
+    let ns = TestNamespace::create(client.clone(), "func-err-rep0")
+        .await
+        .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
+
+    let mut pg = PostgresClusterBuilder::single("invalid-rep", ns.name())
+        .with_version(PostgresVersion::V16)
+        .build();
+
+    // Set invalid replica count (below minimum)
+    pg.spec.replicas = 0;
+
+    let api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
+    let result = api.create(&PostParams::default(), &pg).await;
+
+    // Should fail with validation error
+    assert!(
+        result.is_err(),
+        "Should reject cluster with 0 replicas, but got: {:?}",
+        result
+    );
+
+    // Verify it's a validation error (422)
+    if let Err(kube::Error::Api(ae)) = result {
+        assert_eq!(
+            ae.code, 422,
+            "Expected validation error (422), got: {}",
+            ae.code
+        );
+        assert!(
+            ae.message.contains("Invalid value")
+                || ae.message.contains("must be greater")
+                || ae.message.contains("minimum"),
+            "Error should mention validation failure: {}",
+            ae.message
+        );
+    }
+}
+
+/// Test: Invalid replica count (above max) is rejected by CRD validation
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Kubernetes cluster"]
+async fn test_invalid_replicas_over_max_rejected() {
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
+    let ns = TestNamespace::create(client.clone(), "func-err-rep100")
+        .await
+        .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
+
+    let mut pg = PostgresClusterBuilder::single("invalid-rep", ns.name())
+        .with_version(PostgresVersion::V16)
+        .build();
+
+    // Set invalid replica count (above maximum of 100)
+    pg.spec.replicas = 101;
+
+    let api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
+    let result = api.create(&PostParams::default(), &pg).await;
+
+    // Should fail with validation error
+    assert!(
+        result.is_err(),
+        "Should reject cluster with 101 replicas, but got: {:?}",
+        result
+    );
+
+    // Verify it's a validation error (422)
+    if let Err(kube::Error::Api(ae)) = result {
+        assert_eq!(
+            ae.code, 422,
+            "Expected validation error (422), got: {}",
+            ae.code
+        );
+        assert!(
+            ae.message.contains("Invalid value")
+                || ae.message.contains("must be less")
+                || ae.message.contains("maximum"),
+            "Error should mention validation failure: {}",
+            ae.message
+        );
+    }
+}
+
+/// Test: Invalid storage size format is rejected by CRD validation
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Kubernetes cluster"]
+async fn test_invalid_storage_size_rejected() {
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
+    let ns = TestNamespace::create(client.clone(), "func-err-storage")
+        .await
+        .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
+
+    let pg = PostgresClusterBuilder::single("invalid-storage", ns.name())
+        .with_version(PostgresVersion::V16)
+        .with_storage("invalid", None) // Invalid storage format
+        .build();
+
+    let api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
+    let result = api.create(&PostParams::default(), &pg).await;
+
+    // Should fail with validation error
+    assert!(
+        result.is_err(),
+        "Should reject cluster with invalid storage size, but got: {:?}",
+        result
+    );
+
+    // Verify it's a validation error (422)
+    if let Err(kube::Error::Api(ae)) = result {
+        assert_eq!(
+            ae.code, 422,
+            "Expected validation error (422), got: {}",
+            ae.code
+        );
+    }
+}
+
+/// Test: Cluster transitions to Failed state with descriptive error for invalid config
+/// This tests operator-level validation, not CRD-level
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Kubernetes cluster"]
+async fn test_operator_detects_degraded_cluster() {
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
+    let ns = TestNamespace::create(client.clone(), "func-err-deg")
+        .await
+        .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
+
+    // Create a valid cluster first
+    let pg = PostgresClusterBuilder::single("degraded-test", ns.name())
+        .with_version(PostgresVersion::V16)
+        .build();
+
+    let api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
+    api.create(&PostParams::default(), &pg)
+        .await
+        .expect("create cluster");
+
+    // Wait for StatefulSet to be created (cluster is being processed)
+    let sts_api: Api<StatefulSet> = Api::namespaced(client.clone(), ns.name());
+    wait_for_resource(&sts_api, "degraded-test", SHORT_TIMEOUT)
+        .await
+        .expect("StatefulSet should be created");
+
+    // Verify cluster has status populated
+    let cluster = api.get("degraded-test").await.expect("get cluster");
+    assert!(
+        cluster.status.is_some(),
+        "Cluster should have status after reconciliation"
+    );
+}
+
+/// Test: Cluster handles duplicate resource name gracefully
+/// Creating a cluster with a name that already exists should fail with 409 Conflict
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Kubernetes cluster"]
+async fn test_duplicate_cluster_name_rejected() {
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
+    let ns = TestNamespace::create(client.clone(), "func-err-dup")
+        .await
+        .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
+
+    let pg = PostgresClusterBuilder::single("duplicate", ns.name())
+        .with_version(PostgresVersion::V16)
+        .build();
+
+    let api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
+
+    // Create first cluster
+    api.create(&PostParams::default(), &pg)
+        .await
+        .expect("create first cluster");
+
+    // Try to create duplicate
+    let result = api.create(&PostParams::default(), &pg).await;
+
+    // Should fail with already exists error
+    assert!(
+        result.is_err(),
+        "Should reject duplicate cluster name, but got: {:?}",
+        result
+    );
+
+    // Verify it's a conflict error (409)
+    if let Err(kube::Error::Api(ae)) = result {
+        assert_eq!(
+            ae.code, 409,
+            "Expected conflict error (409), got: {}",
+            ae.code
+        );
+    }
+}
+
+// =============================================================================
+// Status Condition Tests
+// =============================================================================
+
+/// Test: Cluster status has properly populated conditions with required fields
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Kubernetes cluster"]
+async fn test_cluster_status_conditions_populated() {
+    use crate::{DEFAULT_TIMEOUT, has_condition, wait_for_cluster_named};
+
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
+    let ns = TestNamespace::create(client.clone(), "func-cond")
+        .await
+        .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
+
+    let pg = PostgresClusterBuilder::single("test-cond", ns.name())
+        .with_version(PostgresVersion::V16)
+        .build();
+
+    let api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
+    api.create(&PostParams::default(), &pg)
+        .await
+        .expect("create cluster");
+
+    // Wait for Progressing condition to be set
+    let cluster = wait_for_cluster_named(
+        &api,
+        "test-cond",
+        has_condition("Progressing", "True"),
+        "Progressing=True",
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .expect("Cluster should have Progressing condition");
+
+    let status = cluster.status.as_ref().expect("Should have status");
+    assert!(!status.conditions.is_empty(), "Should have conditions");
+
+    // Find the Progressing condition and verify its fields
+    let progressing = status
+        .conditions
+        .iter()
+        .find(|c| c.type_ == "Progressing")
+        .expect("Should have Progressing condition");
+
+    assert_eq!(progressing.status, "True", "Progressing should be True");
+    assert!(
+        !progressing.reason.is_empty(),
+        "Condition should have a reason"
+    );
+    assert!(
+        !progressing.last_transition_time.is_empty(),
+        "Condition should have lastTransitionTime"
+    );
+}
+
+/// Test: Cluster observed_generation tracks spec changes
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Kubernetes cluster"]
+async fn test_cluster_observed_generation() {
+    use crate::{DEFAULT_TIMEOUT, generation_observed, wait_for_cluster_named};
+
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
+    let ns = TestNamespace::create(client.clone(), "func-gen")
+        .await
+        .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
+
+    let pg = PostgresClusterBuilder::single("test-gen", ns.name())
+        .with_version(PostgresVersion::V16)
+        .build();
+
+    let api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
+    api.create(&PostParams::default(), &pg)
+        .await
+        .expect("create cluster");
+
+    // Wait for observed_generation to match
+    let cluster = wait_for_cluster_named(
+        &api,
+        "test-gen",
+        generation_observed(),
+        "observedGeneration matches",
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .expect("observed_generation should match");
+
+    let status = cluster.status.as_ref().expect("Should have status");
+    let observed = status
+        .observed_generation
+        .expect("Should have observed_generation");
+    let generation = cluster.metadata.generation.expect("Should have generation");
+
+    assert_eq!(
+        observed, generation,
+        "observed_generation should match metadata.generation"
+    );
+}
+
+/// Test: Cluster ConfigurationValid condition is set for valid specs
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Kubernetes cluster"]
+async fn test_cluster_configuration_valid_condition() {
+    use crate::{DEFAULT_TIMEOUT, has_condition, wait_for_cluster_named};
+
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
+    let ns = TestNamespace::create(client.clone(), "func-cfg-valid")
+        .await
+        .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
+
+    let pg = PostgresClusterBuilder::single("test-cfg", ns.name())
+        .with_version(PostgresVersion::V16)
+        .build();
+
+    let api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
+    api.create(&PostParams::default(), &pg)
+        .await
+        .expect("create cluster");
+
+    // Wait for ConfigurationValid condition
+    let cluster = wait_for_cluster_named(
+        &api,
+        "test-cfg",
+        has_condition("ConfigurationValid", "True"),
+        "ConfigurationValid=True",
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .expect("Cluster should have ConfigurationValid condition");
+
+    let status = cluster.status.as_ref().expect("Should have status");
+    let config_valid = status
+        .conditions
+        .iter()
+        .find(|c| c.type_ == "ConfigurationValid")
+        .expect("Should have ConfigurationValid condition");
+
+    assert_eq!(
+        config_valid.status, "True",
+        "ConfigurationValid should be True for valid spec"
+    );
+    assert!(
+        !config_valid.reason.is_empty(),
+        "ConfigurationValid should have a reason"
+    );
+}
+
+/// Test: Cluster phase transitions from Pending to Creating
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Kubernetes cluster"]
+async fn test_cluster_phase_transitions() {
+    use crate::{DEFAULT_TIMEOUT, is_phase, wait_for_cluster_named};
+    use postgres_operator::crd::ClusterPhase;
+
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
+    let ns = TestNamespace::create(client.clone(), "func-phase")
+        .await
+        .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
+
+    let pg = PostgresClusterBuilder::single("test-phase", ns.name())
+        .with_version(PostgresVersion::V16)
+        .build();
+
+    let api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
+    api.create(&PostParams::default(), &pg)
+        .await
+        .expect("create cluster");
+
+    // Wait for Creating phase (initial state after pending)
+    let cluster = wait_for_cluster_named(
+        &api,
+        "test-phase",
+        is_phase(ClusterPhase::Creating),
+        "phase=Creating",
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .expect("Cluster should reach Creating phase");
+
+    let status = cluster.status.as_ref().expect("Should have status");
+    assert_eq!(
+        status.phase,
+        ClusterPhase::Creating,
+        "Should be in Creating phase"
+    );
+}
+
+/// Test: Cluster status includes connection info
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Kubernetes cluster"]
+async fn test_cluster_connection_info_populated() {
+    use crate::{DEFAULT_TIMEOUT, has_condition, wait_for_cluster_named};
+
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
+    let ns = TestNamespace::create(client.clone(), "func-conn-info")
+        .await
+        .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
+
+    let pg = PostgresClusterBuilder::single("test-conn", ns.name())
+        .with_version(PostgresVersion::V16)
+        .build();
+
+    let api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
+    api.create(&PostParams::default(), &pg)
+        .await
+        .expect("create cluster");
+
+    // Wait for the cluster to be progressing (resources created)
+    let cluster = wait_for_cluster_named(
+        &api,
+        "test-conn",
+        has_condition("Progressing", "True"),
+        "Progressing=True",
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .expect("Cluster should be progressing");
+
+    let status = cluster.status.as_ref().expect("Should have status");
+    let conn_info = status
+        .connection_info
+        .as_ref()
+        .expect("Should have connectionInfo");
+
+    // Verify connection info fields (primary endpoint should be set)
+    assert!(
+        conn_info.primary.is_some(),
+        "connectionInfo.primary should be populated"
+    );
+    let primary = conn_info.primary.as_ref().unwrap();
+    assert!(
+        !primary.is_empty(),
+        "connectionInfo.primary should not be empty"
+    );
+    assert!(
+        primary.contains("test-conn-primary"),
+        "connectionInfo.primary should reference primary service"
     );
 }

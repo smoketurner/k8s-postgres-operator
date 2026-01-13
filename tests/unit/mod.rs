@@ -1,3 +1,12 @@
+// Test code is allowed to panic on failure
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::string_slice
+)]
+
 //! Unit tests for the PostgreSQL Operator
 //!
 //! This module contains unit tests for:

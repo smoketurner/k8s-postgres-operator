@@ -262,6 +262,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Wait for shutdown signal (SIGTERM or SIGINT)
+///
+/// Note: Signal handler setup failures are fatal - the operator cannot shut down
+/// gracefully without them. Using expect() here is intentional.
+#[allow(clippy::expect_used)]
 async fn shutdown_signal() {
     let ctrl_c = async {
         signal::ctrl_c()

@@ -81,7 +81,7 @@ pub struct AdmissionStatus {
 }
 
 /// Shared state for webhook handlers
-pub struct WebhookState {
+pub(crate) struct WebhookState {
     pub client: Client,
 }
 
@@ -92,14 +92,14 @@ impl WebhookState {
 }
 
 /// Create the webhook router
-pub fn create_webhook_router(state: Arc<WebhookState>) -> Router {
+pub(crate) fn create_webhook_router(state: Arc<WebhookState>) -> Router {
     Router::new()
         .route("/validate", post(validate_postgres_cluster))
         .with_state(state)
 }
 
 /// Validate PostgresCluster admission webhook handler
-pub async fn validate_postgres_cluster(
+pub(crate) async fn validate_postgres_cluster(
     State(state): State<Arc<WebhookState>>,
     Json(review): Json<AdmissionReview>,
 ) -> impl IntoResponse {
@@ -307,6 +307,7 @@ impl std::fmt::Display for WebhookError {
 impl std::error::Error for WebhookError {}
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 

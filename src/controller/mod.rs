@@ -8,17 +8,21 @@ pub mod state_machine;
 pub mod status;
 pub mod validation;
 
-pub use backup_status::BackupStatusCollector;
+// Public exports (used by main.rs, lib.rs, or integration tests)
 pub use context::Context;
 pub use database_reconciler::{
-    DATABASE_FINALIZER, DatabaseContext, DatabaseError, database_error_policy, reconcile_database,
+    DatabaseContext, DatabaseError, database_error_policy, reconcile_database,
 };
 pub use error::{BackoffConfig, Error, Result};
 pub use reconciler::{FINALIZER, error_policy, reconcile};
-pub use replication_lag::{ReplicationLagCollector, ReplicationLagStatus, collect_replication_lag};
+// State machine types used by proptest
 pub use state_machine::{ClusterEvent, ClusterStateMachine, TransitionContext, TransitionResult};
-pub use status::{ConditionBuilder, StatusManager, spec_changed};
+// Validation types used by proptest and unit tests
 pub use validation::{
     MAX_REPLICAS, MIN_REPLICAS, SpecDiff, validate_spec, validate_spec_change,
     validate_version_upgrade,
+};
+// Status types used by unit tests
+pub use status::{
+    ConditionBuilder, condition_status, condition_types, get_replica_pod_names, spec_changed,
 };
