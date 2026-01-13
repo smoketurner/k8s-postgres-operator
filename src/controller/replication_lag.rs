@@ -100,28 +100,6 @@ pub(crate) enum ReplicationLagError {
     InvalidClusterName(String),
 }
 
-impl ReplicationLagError {
-    /// Returns true if this error is transient and the operation may succeed on retry.
-    ///
-    /// Transient errors include network issues, timeouts, and temporary unavailability.
-    /// Permanent errors include malformed responses and configuration issues.
-    #[must_use]
-    pub fn is_retryable(&self) -> bool {
-        match self {
-            // Transient errors - may succeed on retry
-            Self::KubeError(_) => true,
-            Self::NoPrimaryPod => true,
-            Self::NoPodIp(_) => true,
-            Self::HttpError(_) => true,
-            Self::ConnectionError(_) => true,
-            Self::Timeout => true,
-            // Permanent errors - won't succeed without changes
-            Self::JsonError(_) => false,
-            Self::InvalidClusterName(_) => false,
-        }
-    }
-}
-
 /// Patroni cluster member information (from /cluster endpoint)
 #[derive(Debug, Deserialize)]
 struct PatroniClusterResponse {
@@ -638,28 +616,24 @@ mod tests {
     fn test_validate_label_value_invalid_empty() {
         let result = validate_label_value("");
         assert!(result.is_err());
-        assert!(!result.unwrap_err().is_retryable());
     }
 
     #[test]
     fn test_validate_label_value_invalid_start() {
         let result = validate_label_value("-invalid");
         assert!(result.is_err());
-        assert!(!result.unwrap_err().is_retryable());
     }
 
     #[test]
     fn test_validate_label_value_invalid_end() {
         let result = validate_label_value("invalid-");
         assert!(result.is_err());
-        assert!(!result.unwrap_err().is_retryable());
     }
 
     #[test]
     fn test_validate_label_value_invalid_char() {
         let result = validate_label_value("invalid@name");
         assert!(result.is_err());
-        assert!(!result.unwrap_err().is_retryable());
     }
 
     #[test]
@@ -667,26 +641,6 @@ mod tests {
         let long_name = "a".repeat(64);
         let result = validate_label_value(&long_name);
         assert!(result.is_err());
-        assert!(!result.unwrap_err().is_retryable());
-    }
-
-    // =========================================================================
-    // Error classification tests
-    // =========================================================================
-
-    #[test]
-    fn test_error_is_retryable_transient() {
-        assert!(ReplicationLagError::NoPrimaryPod.is_retryable());
-        assert!(ReplicationLagError::NoPodIp("test".to_string()).is_retryable());
-        assert!(ReplicationLagError::Timeout.is_retryable());
-        assert!(ReplicationLagError::ConnectionError("test".to_string()).is_retryable());
-        assert!(ReplicationLagError::HttpError("test".to_string()).is_retryable());
-    }
-
-    #[test]
-    fn test_error_is_retryable_permanent() {
-        assert!(!ReplicationLagError::InvalidClusterName("test".to_string()).is_retryable());
-        // JsonError requires a serde_json::Error which is harder to construct
     }
 
     // =========================================================================

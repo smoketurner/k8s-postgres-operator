@@ -519,76 +519,10 @@ pub(crate) fn detect_backup_events(
     events
 }
 
-/// Update the backup status in a PostgresCluster status object
-///
-/// Only updates fields that have values in the new status, preserving
-/// existing values for fields that are None in the new status.
-pub(crate) fn update_backup_status(status: &mut BackupStatus, new_status: BackupStatus) {
-    // Macro to reduce boilerplate for optional field updates
-    macro_rules! update_if_some {
-        ($($field:ident),+ $(,)?) => {
-            $(
-                if new_status.$field.is_some() {
-                    status.$field = new_status.$field;
-                }
-            )+
-        };
-    }
-
-    // Always update enabled flag
-    status.enabled = new_status.enabled;
-
-    // Update optional fields only if new values are present
-    update_if_some!(
-        destination_type,
-        last_backup_time,
-        last_backup_size_bytes,
-        last_backup_name,
-        oldest_backup_time,
-        backup_count,
-        last_wal_archived,
-        last_wal_archive_time,
-        wal_archiving_healthy,
-        last_error,
-        last_error_time,
-        recovery_window_start,
-        recovery_window_end,
-        last_manual_backup_trigger,
-        last_manual_backup_status,
-    );
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_update_backup_status_merges_fields() {
-        let mut existing = BackupStatus {
-            enabled: true,
-            destination_type: Some("S3".to_string()),
-            last_backup_time: Some("2025-01-10T00:00:00Z".to_string()),
-            ..Default::default()
-        };
-
-        let new_status = BackupStatus {
-            enabled: true,
-            backup_count: Some(5),
-            wal_archiving_healthy: Some(true),
-            ..Default::default()
-        };
-
-        update_backup_status(&mut existing, new_status);
-
-        assert_eq!(existing.destination_type, Some("S3".to_string()));
-        assert_eq!(
-            existing.last_backup_time,
-            Some("2025-01-10T00:00:00Z".to_string())
-        );
-        assert_eq!(existing.backup_count, Some(5));
-        assert_eq!(existing.wal_archiving_healthy, Some(true));
-    }
 
     #[test]
     fn test_walg_backup_parse() {

@@ -41,7 +41,8 @@ pub const FINALIZER: &str = "postgres-operator.smoketurner.com/finalizer";
 
 /// Annotation to trigger a manual backup
 /// Value should be a unique identifier (e.g., timestamp) to distinguish triggers
-pub(crate) const BACKUP_TRIGGER_ANNOTATION: &str = "postgres-operator.smoketurner.com/trigger-backup";
+pub(crate) const BACKUP_TRIGGER_ANNOTATION: &str =
+    "postgres-operator.smoketurner.com/trigger-backup";
 
 /// Tracks which critical resources are missing for a cluster
 #[derive(Debug, Default)]

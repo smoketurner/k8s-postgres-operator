@@ -13,5 +13,4 @@ too-many-lines-threshold = 150
 # Allow certain common names for single-char variables
 allowed-idents-below-min-chars = ["x", "y", "z", "i", "j", "k", "n", "s", "e"]
 
-# Standard style settings
-msrv = "1.92"
+# Note: MSRV is read automatically from Cargo.toml rust-version field
