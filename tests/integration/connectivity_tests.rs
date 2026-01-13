@@ -220,6 +220,7 @@ async fn test_ha_cluster_connectivity() {
     let ns = TestNamespace::create(client.clone(), "conn-ha")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create HA cluster: 3 replicas, TLS disabled
     let pg = PostgresClusterBuilder::ha("ha-cluster", ns.name())
@@ -448,6 +449,7 @@ async fn test_pgbouncer_connectivity() {
     let ns = TestNamespace::create(client.clone(), "conn-pgb")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create cluster with PgBouncer: 3 replicas, 2 PgBouncer replicas
     let pg = PostgresClusterBuilder::ha("pgbouncer", ns.name())

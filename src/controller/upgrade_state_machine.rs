@@ -89,6 +89,10 @@ pub struct UpgradeTransitionContext {
     pub source_cluster_ready: bool,
     /// Whether the target cluster is ready and running
     pub target_cluster_ready: bool,
+    /// Source cluster's PostgreSQL major version (for validation)
+    pub source_cluster_version: Option<i32>,
+    /// Whether version validation failed (same version or downgrade)
+    pub version_validation_failed: bool,
     /// Current replication lag in bytes (None if not replicating)
     pub replication_lag_bytes: Option<i64>,
     /// Current replication lag in seconds (None if not replicating)
@@ -124,6 +128,8 @@ impl Default for UpgradeTransitionContext {
         Self {
             source_cluster_ready: false,
             target_cluster_ready: false,
+            source_cluster_version: None,
+            version_validation_failed: false,
             replication_lag_bytes: None,
             replication_lag_seconds: None,
             verification_passes: 0,

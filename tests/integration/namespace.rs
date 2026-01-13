@@ -7,10 +7,13 @@
 use k8s_openapi::api::core::v1::Namespace;
 use kube::api::{DeleteParams, Patch, PatchParams, PostParams};
 use kube::core::ObjectMeta;
-use kube::{Api, Client};
-use postgres_operator::crd::{PostgresCluster, PostgresDatabase};
+use kube::{Api, Client, Resource};
+use postgres_operator::crd::{PostgresCluster, PostgresDatabase, PostgresUpgrade};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::fmt::Debug;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 use uuid::Uuid;
@@ -82,9 +85,9 @@ impl TestNamespace {
 
     /// Cleanup the namespace and all resources within it
     ///
-    /// This deletes PostgresCluster and PostgresDatabase resources first to
-    /// trigger operator cleanup, then removes any remaining finalizers, then
-    /// deletes the namespace.
+    /// This deletes PostgresDatabase, PostgresUpgrade, and PostgresCluster
+    /// resources first to trigger operator cleanup, then removes any remaining
+    /// finalizers, then deletes the namespace.
     ///
     /// Note: This is also called automatically by Drop, but you can call it
     /// explicitly if you want to handle errors.
@@ -98,17 +101,21 @@ impl TestNamespace {
         tracing::debug!("Cleaning up namespace: {}", self.name);
 
         // First, delete all PostgresDatabase resources (before clusters)
-        Self::delete_databases(&self.client, &self.name).await;
+        Self::delete_resources::<PostgresDatabase>(&self.client, &self.name).await;
+
+        // Delete all PostgresUpgrade resources (before clusters, since they reference clusters)
+        Self::delete_resources::<PostgresUpgrade>(&self.client, &self.name).await;
 
         // Then delete all PostgresCluster resources to trigger operator cleanup
-        Self::delete_clusters(&self.client, &self.name).await;
+        Self::delete_resources::<PostgresCluster>(&self.client, &self.name).await;
 
         // Brief wait for operator to process deletions
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Remove any remaining finalizers (in case operator didn't clean up)
-        Self::remove_database_finalizers(&self.client, &self.name).await;
-        Self::remove_finalizers(&self.client, &self.name).await;
+        Self::remove_resource_finalizers::<PostgresDatabase>(&self.client, &self.name).await;
+        Self::remove_resource_finalizers::<PostgresUpgrade>(&self.client, &self.name).await;
+        Self::remove_resource_finalizers::<PostgresCluster>(&self.client, &self.name).await;
 
         let namespaces: Api<Namespace> = Api::all(self.client.clone());
 
@@ -133,131 +140,77 @@ impl TestNamespace {
         Ok(())
     }
 
-    /// Delete all PostgresCluster resources in the namespace
-    async fn delete_clusters(client: &Client, namespace: &str) {
-        let clusters: Api<PostgresCluster> = Api::namespaced(client.clone(), namespace);
+    /// Delete all resources of type `T` in the namespace.
+    ///
+    /// This is a generic helper that works with any kube-rs custom resource type
+    /// that implements the required traits for API operations.
+    async fn delete_resources<T>(client: &Client, namespace: &str)
+    where
+        T: Resource<Scope = k8s_openapi::NamespaceResourceScope> + Clone + DeserializeOwned + Debug,
+        <T as Resource>::DynamicType: Default,
+    {
+        let dt = T::DynamicType::default();
+        let kind = T::kind(&dt);
+        let api: Api<T> = Api::namespaced(client.clone(), namespace);
 
-        // List all clusters in the namespace
-        let cluster_list = match clusters.list(&Default::default()).await {
+        let resource_list = match api.list(&Default::default()).await {
             Ok(list) => list,
             Err(e) => {
-                tracing::debug!("Failed to list clusters for deletion: {}", e);
+                tracing::debug!("Failed to list {} resources for deletion: {}", kind, e);
                 return;
             }
         };
 
         let dp = DeleteParams::default();
-        for cluster in cluster_list.items {
-            if let Some(name) = cluster.metadata.name
-                && let Err(e) = clusters.delete(&name, &dp).await
+        for resource in resource_list.items {
+            if let Some(name) = Resource::meta(&resource).name.as_ref()
+                && let Err(e) = api.delete(name, &dp).await
             {
-                tracing::debug!("Failed to delete cluster {}: {}", name, e);
+                tracing::debug!("Failed to delete {} {}: {}", kind, name, e);
             }
         }
     }
 
-    /// Remove finalizers from all PostgresCluster resources in the namespace
-    async fn remove_finalizers(client: &Client, namespace: &str) {
-        let clusters: Api<PostgresCluster> = Api::namespaced(client.clone(), namespace);
+    /// Remove finalizers from all resources of type `T` in the namespace.
+    ///
+    /// This is a generic helper that patches resources to remove their finalizers,
+    /// which is necessary for cleanup when the operator is not running.
+    async fn remove_resource_finalizers<T>(client: &Client, namespace: &str)
+    where
+        T: Resource<Scope = k8s_openapi::NamespaceResourceScope>
+            + Clone
+            + DeserializeOwned
+            + Serialize
+            + Debug,
+        <T as Resource>::DynamicType: Default,
+    {
+        let dt = T::DynamicType::default();
+        let kind = T::kind(&dt);
+        let api: Api<T> = Api::namespaced(client.clone(), namespace);
 
-        // List all clusters in the namespace
-        let cluster_list = match clusters.list(&Default::default()).await {
+        let resource_list = match api.list(&Default::default()).await {
             Ok(list) => list,
             Err(e) => {
-                tracing::debug!("Failed to list clusters for cleanup: {}", e);
+                tracing::debug!("Failed to list {} resources for cleanup: {}", kind, e);
                 return;
             }
         };
 
-        // Remove finalizers using JSON patch - replace the array with empty
-        let patch: Patch<serde_json::Value> = Patch::Json(
-            serde_json::from_value(json!([
-                { "op": "replace", "path": "/metadata/finalizers", "value": [] }
-            ]))
-            .expect("valid json patch"),
-        );
+        let patch: Patch<serde_json::Value> =
+            Patch::Merge(json!({"metadata": {"finalizers": null}}));
         let patch_params = PatchParams::default();
 
-        for cluster in cluster_list.items {
-            if let Some(name) = cluster.metadata.name {
+        for resource in resource_list.items {
+            let meta = Resource::meta(&resource);
+            if let Some(name) = meta.name.as_ref() {
                 // Skip if no finalizers
-                if cluster
-                    .metadata
-                    .finalizers
-                    .as_ref()
-                    .is_none_or(|f| f.is_empty())
-                {
+                if meta.finalizers.as_ref().is_none_or(|f| f.is_empty()) {
                     continue;
                 }
-                if let Err(e) = clusters.patch(&name, &patch_params, &patch).await {
-                    tracing::warn!("Failed to remove finalizer from {}: {}", name, e);
+                if let Err(e) = api.patch(name, &patch_params, &patch).await {
+                    tracing::warn!("Failed to remove finalizer from {} {}: {}", kind, name, e);
                 } else {
-                    tracing::debug!("Removed finalizer from cluster {}", name);
-                }
-            }
-        }
-    }
-
-    /// Delete all PostgresDatabase resources in the namespace
-    async fn delete_databases(client: &Client, namespace: &str) {
-        let databases: Api<PostgresDatabase> = Api::namespaced(client.clone(), namespace);
-
-        // List all databases in the namespace
-        let database_list = match databases.list(&Default::default()).await {
-            Ok(list) => list,
-            Err(e) => {
-                tracing::debug!("Failed to list databases for deletion: {}", e);
-                return;
-            }
-        };
-
-        let dp = DeleteParams::default();
-        for database in database_list.items {
-            if let Some(name) = database.metadata.name
-                && let Err(e) = databases.delete(&name, &dp).await
-            {
-                tracing::debug!("Failed to delete database {}: {}", name, e);
-            }
-        }
-    }
-
-    /// Remove finalizers from all PostgresDatabase resources in the namespace
-    async fn remove_database_finalizers(client: &Client, namespace: &str) {
-        let databases: Api<PostgresDatabase> = Api::namespaced(client.clone(), namespace);
-
-        // List all databases in the namespace
-        let database_list = match databases.list(&Default::default()).await {
-            Ok(list) => list,
-            Err(e) => {
-                tracing::debug!("Failed to list databases for cleanup: {}", e);
-                return;
-            }
-        };
-
-        // Remove finalizers using JSON patch - replace the array with empty
-        let patch: Patch<serde_json::Value> = Patch::Json(
-            serde_json::from_value(json!([
-                { "op": "replace", "path": "/metadata/finalizers", "value": [] }
-            ]))
-            .expect("valid json patch"),
-        );
-        let patch_params = PatchParams::default();
-
-        for database in database_list.items {
-            if let Some(name) = database.metadata.name {
-                // Skip if no finalizers
-                if database
-                    .metadata
-                    .finalizers
-                    .as_ref()
-                    .is_none_or(|f| f.is_empty())
-                {
-                    continue;
-                }
-                if let Err(e) = databases.patch(&name, &patch_params, &patch).await {
-                    tracing::warn!("Failed to remove finalizer from database {}: {}", name, e);
-                } else {
-                    tracing::debug!("Removed finalizer from database {}", name);
+                    tracing::debug!("Removed finalizer from {} {}", kind, name);
                 }
             }
         }
@@ -273,7 +226,7 @@ impl TestNamespace {
     }
 }
 
-/// Automatic cleanup on drop - synchronously deletes databases, clusters, removes finalizers, and deletes namespace.
+/// Automatic cleanup on drop - synchronously deletes databases, upgrades, clusters, removes finalizers, and deletes namespace.
 ///
 /// Uses tokio::task::block_in_place to allow blocking on async code from within
 /// the tokio runtime. This requires the multi-threaded runtime (use `#[tokio::test(flavor = "multi_thread")]`).
@@ -295,17 +248,21 @@ impl Drop for TestNamespace {
             let handle = tokio::runtime::Handle::current();
             handle.block_on(async {
                 // First delete all PostgresDatabase resources
-                Self::delete_databases(&client, &name).await;
+                Self::delete_resources::<PostgresDatabase>(&client, &name).await;
+
+                // Delete all PostgresUpgrade resources (before clusters)
+                Self::delete_resources::<PostgresUpgrade>(&client, &name).await;
 
                 // Then delete all PostgresCluster resources to trigger operator cleanup
-                Self::delete_clusters(&client, &name).await;
+                Self::delete_resources::<PostgresCluster>(&client, &name).await;
 
                 // Brief wait for operator to process deletions
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
                 // Remove any remaining finalizers
-                Self::remove_database_finalizers(&client, &name).await;
-                Self::remove_finalizers(&client, &name).await;
+                Self::remove_resource_finalizers::<PostgresDatabase>(&client, &name).await;
+                Self::remove_resource_finalizers::<PostgresUpgrade>(&client, &name).await;
+                Self::remove_resource_finalizers::<PostgresCluster>(&client, &name).await;
 
                 let namespaces: Api<Namespace> = Api::all(client);
                 let dp = DeleteParams {

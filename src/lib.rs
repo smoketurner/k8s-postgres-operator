@@ -24,9 +24,23 @@ use k8s_openapi::api::core::v1::{ConfigMap, Secret, Service};
 use k8s_openapi::api::policy::v1::PodDisruptionBudget;
 use kube::runtime::Controller;
 use kube::runtime::watcher::Config as WatcherConfig;
-use kube::{Api, Client};
+use kube::{Api, Client, Resource};
+use serde::de::DeserializeOwned;
 
-/// Run the operator controller
+/// Helper to create a namespaced or cluster-wide API based on scope.
+fn scoped_api<T>(client: Client, namespace: Option<&str>) -> Api<T>
+where
+    T: Resource<Scope = k8s_openapi::NamespaceResourceScope>,
+    <T as Resource>::DynamicType: Default,
+    T: Clone + DeserializeOwned + std::fmt::Debug,
+{
+    match namespace {
+        Some(ns) => Api::namespaced(client, ns),
+        None => Api::all(client),
+    }
+}
+
+/// Run the operator controller (cluster-wide).
 ///
 /// This is the main controller loop that watches PostgresCluster resources
 /// and reconciles them. It can be called from main.rs or spawned as a
@@ -34,7 +48,25 @@ use kube::{Api, Client};
 ///
 /// If health_state is provided, metrics will be recorded for reconciliations.
 pub async fn run_controller(client: Client, health_state: Option<Arc<HealthState>>) {
-    tracing::info!("Starting controller for PostgresCluster resources");
+    run_controller_scoped(client, health_state, None).await
+}
+
+/// Run the operator controller with optional namespace scoping.
+///
+/// When `namespace` is `Some(ns)`, only watches resources in that namespace.
+/// When `namespace` is `None`, watches resources cluster-wide.
+///
+/// Use the scoped version for integration tests to enable parallel test execution.
+pub async fn run_controller_scoped(
+    client: Client,
+    health_state: Option<Arc<HealthState>>,
+    namespace: Option<&str>,
+) {
+    let scope_msg = namespace.unwrap_or("cluster-wide");
+    tracing::info!(
+        "Starting controller for PostgresCluster resources (scope: {})",
+        scope_msg
+    );
 
     // Mark as ready once we start the controller
     if let Some(ref state) = health_state {
@@ -43,13 +75,13 @@ pub async fn run_controller(client: Client, health_state: Option<Arc<HealthState
 
     let ctx = Arc::new(Context::new(client.clone(), health_state));
 
-    // Set up APIs for the controller
-    let clusters: Api<PostgresCluster> = Api::all(client.clone());
-    let statefulsets: Api<StatefulSet> = Api::all(client.clone());
-    let services: Api<Service> = Api::all(client.clone());
-    let configmaps: Api<ConfigMap> = Api::all(client.clone());
-    let secrets: Api<Secret> = Api::all(client.clone());
-    let pdbs: Api<PodDisruptionBudget> = Api::all(client.clone());
+    // Set up APIs for the controller (namespaced or cluster-wide)
+    let clusters: Api<PostgresCluster> = scoped_api(client.clone(), namespace);
+    let statefulsets: Api<StatefulSet> = scoped_api(client.clone(), namespace);
+    let services: Api<Service> = scoped_api(client.clone(), namespace);
+    let configmaps: Api<ConfigMap> = scoped_api(client.clone(), namespace);
+    let secrets: Api<Secret> = scoped_api(client.clone(), namespace);
+    let pdbs: Api<PodDisruptionBudget> = scoped_api(client.clone(), namespace);
 
     // Configure watcher to handle dynamic resource creation
     // Use any_semantic() for more reliable resource discovery in test environments
@@ -91,18 +123,30 @@ pub async fn run_controller(client: Client, health_state: Option<Arc<HealthState
     tracing::error!("Controller stream ended unexpectedly");
 }
 
-/// Run the database controller
+/// Run the database controller (cluster-wide).
 ///
 /// This controller watches PostgresDatabase resources and provisions databases,
 /// roles, and credentials within PostgresCluster instances.
 pub async fn run_database_controller(client: Client) {
-    tracing::info!("Starting controller for PostgresDatabase resources");
+    run_database_controller_scoped(client, None).await
+}
+
+/// Run the database controller with optional namespace scoping.
+///
+/// When `namespace` is `Some(ns)`, only watches resources in that namespace.
+/// When `namespace` is `None`, watches resources cluster-wide.
+pub async fn run_database_controller_scoped(client: Client, namespace: Option<&str>) {
+    let scope_msg = namespace.unwrap_or("cluster-wide");
+    tracing::info!(
+        "Starting controller for PostgresDatabase resources (scope: {})",
+        scope_msg
+    );
 
     let ctx = Arc::new(DatabaseContext::new(client.clone()));
 
-    // Set up APIs for the controller
-    let databases: Api<PostgresDatabase> = Api::all(client.clone());
-    let secrets: Api<Secret> = Api::all(client.clone());
+    // Set up APIs for the controller (namespaced or cluster-wide)
+    let databases: Api<PostgresDatabase> = scoped_api(client.clone(), namespace);
+    let secrets: Api<Secret> = scoped_api(client.clone(), namespace);
 
     // Configure watcher
     let watcher_config = WatcherConfig::default().any_semantic();
@@ -136,17 +180,29 @@ pub async fn run_database_controller(client: Client) {
     tracing::error!("Database controller stream ended unexpectedly");
 }
 
-/// Run the upgrade controller
+/// Run the upgrade controller (cluster-wide).
 ///
 /// This controller watches PostgresUpgrade resources and manages blue-green
 /// major version upgrades using logical replication.
 pub async fn run_upgrade_controller(client: Client) {
-    tracing::info!("Starting controller for PostgresUpgrade resources");
+    run_upgrade_controller_scoped(client, None).await
+}
+
+/// Run the upgrade controller with optional namespace scoping.
+///
+/// When `namespace` is `Some(ns)`, only watches resources in that namespace.
+/// When `namespace` is `None`, watches resources cluster-wide.
+pub async fn run_upgrade_controller_scoped(client: Client, namespace: Option<&str>) {
+    let scope_msg = namespace.unwrap_or("cluster-wide");
+    tracing::info!(
+        "Starting controller for PostgresUpgrade resources (scope: {})",
+        scope_msg
+    );
 
     let ctx = Arc::new(UpgradeContext::new(client.clone()));
 
-    // Set up APIs for the controller
-    let upgrades: Api<PostgresUpgrade> = Api::all(client.clone());
+    // Set up APIs for the controller (namespaced or cluster-wide)
+    let upgrades: Api<PostgresUpgrade> = scoped_api(client.clone(), namespace);
 
     // Configure watcher
     let watcher_config = WatcherConfig::default().any_semantic();

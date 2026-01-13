@@ -64,7 +64,7 @@ async fn test_database_resource_created() {
     let ns = TestNamespace::create(client.clone(), "db-create")
         .await
         .expect("create ns");
-    let _operator = ScopedOperator::start_with_database(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create just the PostgresDatabase (no cluster yet)
     let db = PostgresDatabaseBuilder::new("testdb", ns.name(), "nonexistent-cluster")
@@ -111,7 +111,7 @@ async fn test_database_waits_for_cluster_ready() {
     let ns = TestNamespace::create(client.clone(), "db-pending")
         .await
         .expect("create ns");
-    let _operator = ScopedOperator::start_with_database(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create PostgresDatabase without a cluster
     let db = PostgresDatabaseBuilder::new("waitdb", ns.name(), "missing-cluster")
@@ -155,7 +155,7 @@ async fn test_database_creates_database() {
     let ns = TestNamespace::create(client.clone(), "db-creates")
         .await
         .expect("create ns");
-    let _operator = ScopedOperator::start_with_database(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create PostgresCluster first
     let pg = PostgresClusterBuilder::single("dbcluster", ns.name())
@@ -239,7 +239,7 @@ async fn test_database_creates_role_with_secret() {
     let ns = TestNamespace::create(client.clone(), "db-role")
         .await
         .expect("create ns");
-    let _operator = ScopedOperator::start_with_database(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create cluster
     let pg = PostgresClusterBuilder::single("rolecluster", ns.name())
@@ -344,7 +344,7 @@ async fn test_database_role_connectivity() {
     let ns = TestNamespace::create(client.clone(), "db-conn")
         .await
         .expect("create ns");
-    let _operator = ScopedOperator::start_with_database(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create cluster
     let pg = PostgresClusterBuilder::single("conncluster", ns.name())
@@ -432,7 +432,7 @@ async fn test_database_creates_extension() {
     let ns = TestNamespace::create(client.clone(), "db-ext")
         .await
         .expect("create ns");
-    let _operator = ScopedOperator::start_with_database(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create cluster
     let pg = PostgresClusterBuilder::single("extcluster", ns.name())
@@ -526,7 +526,7 @@ async fn test_database_applies_grants() {
     let ns = TestNamespace::create(client.clone(), "db-grant")
         .await
         .expect("create ns");
-    let _operator = ScopedOperator::start_with_database(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create cluster
     let pg = PostgresClusterBuilder::single("grantcluster", ns.name())
@@ -617,7 +617,7 @@ async fn test_database_credentials_secret_contents() {
     let ns = TestNamespace::create(client.clone(), "db-secret")
         .await
         .expect("create ns");
-    let _operator = ScopedOperator::start_with_database(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create cluster
     let pg = PostgresClusterBuilder::single("secretcluster", ns.name())
@@ -725,7 +725,7 @@ async fn test_database_deletion_cleanup() {
     let ns = TestNamespace::create(client.clone(), "db-delete")
         .await
         .expect("create ns");
-    let _operator = ScopedOperator::start_with_database(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create cluster
     let pg = PostgresClusterBuilder::single("deletecluster", ns.name())
@@ -846,7 +846,7 @@ async fn test_database_owner_reference() {
     let ns = TestNamespace::create(client.clone(), "db-owner")
         .await
         .expect("create ns");
-    let _operator = ScopedOperator::start_with_database(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create cluster
     let pg = PostgresClusterBuilder::single("ownercluster", ns.name())
@@ -941,7 +941,7 @@ async fn test_database_status_connection_info() {
     let ns = TestNamespace::create(client.clone(), "db-status")
         .await
         .expect("create ns");
-    let _operator = ScopedOperator::start_with_database(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create cluster
     let pg = PostgresClusterBuilder::single("statuscluster", ns.name())
@@ -1041,7 +1041,7 @@ async fn test_database_multiple_roles() {
     let ns = TestNamespace::create(client.clone(), "db-multi")
         .await
         .expect("create ns");
-    let _operator = ScopedOperator::start_with_database(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create cluster
     let pg = PostgresClusterBuilder::single("multicluster", ns.name())

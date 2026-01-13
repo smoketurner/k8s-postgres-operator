@@ -121,6 +121,16 @@ impl ConditionBuilder {
         self.set_condition(condition_types::DEGRADED, status, reason, message)
     }
 
+    /// Set the ConfigurationValid condition
+    pub fn config_valid(self, is_valid: bool, reason: &str, message: &str) -> Self {
+        let status = if is_valid {
+            condition_status::TRUE
+        } else {
+            condition_status::FALSE
+        };
+        self.set_condition(condition_types::CONFIG_VALID, status, reason, message)
+    }
+
     /// Set the ResourceResizeInProgress condition (Kubernetes 1.35+, KEP-1287)
     pub fn resource_resize_in_progress(
         self,
@@ -267,6 +277,7 @@ impl<'a> StatusManager<'a> {
             )
             .progressing(false, "Stable", "Cluster is stable")
             .degraded(false, "Healthy", "Cluster is healthy")
+            .config_valid(true, "SpecValid", "Cluster specification is valid")
             .build();
 
         // Track when we entered this phase
@@ -373,6 +384,7 @@ impl<'a> StatusManager<'a> {
             .ready(false, "Creating", "Cluster is being created")
             .progressing(true, "CreatingResources", "Creating cluster resources")
             .degraded(false, "NotApplicable", "Cluster is being created")
+            .config_valid(true, "SpecValid", "Cluster specification is valid")
             .build();
 
         // Track when we entered this phase
@@ -455,6 +467,7 @@ impl<'a> StatusManager<'a> {
             .ready(false, "Updating", "Cluster is being updated")
             .progressing(true, "RollingUpdate", "Performing rolling update")
             .degraded(false, "NotDegraded", "Cluster is updating normally")
+            .config_valid(true, "SpecValid", "Cluster specification is valid")
             .build();
 
         // Track when we entered this phase

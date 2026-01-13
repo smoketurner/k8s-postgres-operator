@@ -248,6 +248,7 @@ async fn test_scaling_connection_resource_created() {
     let ns = TestNamespace::create(client.clone(), "scaling-conn")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let cluster = PostgresClusterBuilder::new("test-conn", ns.name())
         .with_replicas(2)
@@ -291,6 +292,7 @@ async fn test_scaling_combined_resource_created() {
     let ns = TestNamespace::create(client.clone(), "scaling-combined")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Note: CPU scaling requires resource requests for KEDA to calculate utilization
     let cluster = PostgresClusterBuilder::new("test-combined", ns.name())
@@ -341,6 +343,7 @@ async fn test_scaling_owner_reference() {
     let ns = TestNamespace::create(client.clone(), "scaling-owner")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Note: CPU scaling requires resource requests for KEDA to calculate utilization
     let cluster = PostgresClusterBuilder::new("test-owner", ns.name())
@@ -386,6 +389,7 @@ async fn test_scaling_standard_labels() {
     let ns = TestNamespace::create(client.clone(), "scaling-labels")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Note: CPU scaling requires resource requests for KEDA to calculate utilization
     let cluster = PostgresClusterBuilder::new("test-labels", ns.name())
@@ -440,6 +444,7 @@ async fn test_scaling_hpa_behavior_best_practices() {
     let ns = TestNamespace::create(client.clone(), "scaling-hpa")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Note: CPU scaling requires resource requests for KEDA to calculate utilization
     let cluster = PostgresClusterBuilder::new("test-hpa", ns.name())
@@ -501,6 +506,7 @@ async fn test_scaling_cooldown_periods() {
     let ns = TestNamespace::create(client.clone(), "scaling-cooldown")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Note: CPU scaling requires resource requests for KEDA to calculate utilization
     let cluster = PostgresClusterBuilder::new("test-cooldown", ns.name())
@@ -604,6 +610,7 @@ async fn test_scaling_cpu_utilization_target() {
     let ns = TestNamespace::create(client.clone(), "scaling-cpu-target")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Note: CPU scaling requires resource requests for KEDA to calculate utilization
     let cluster = PostgresClusterBuilder::new("test-cpu-target", ns.name())
@@ -657,6 +664,7 @@ async fn test_scaling_connection_target() {
     let ns = TestNamespace::create(client.clone(), "scaling-conn-target")
         .await
         .expect("create ns");
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let cluster = PostgresClusterBuilder::new("test-conn-target", ns.name())
         .with_replicas(2)

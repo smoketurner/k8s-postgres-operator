@@ -1,8 +1,47 @@
-//! PostgreSQL connection utilities for integration tests
+//! PostgreSQL connection and verification utilities for integration tests.
 //!
-//! This module provides test-specific helpers for PostgreSQL connections.
-//! Production types should be imported directly from:
-//! `postgres_operator::resources::postgres_client`
+//! This module provides test-specific helpers for connecting to and verifying
+//! PostgreSQL instances created by the operator.
+//!
+//! # Usage
+//!
+//! ```ignore
+//! // Fetch credentials from a secret
+//! let creds = fetch_credentials(client.clone(), namespace, "my-cluster-credentials").await?;
+//!
+//! // Verify connection (non-TLS)
+//! let info = verify_connection(&creds, "my-cluster", 5432).await?;
+//! info.assert_version(17);
+//! info.assert_is_primary();
+//!
+//! // Verify connection with TLS
+//! let info = verify_connection_tls(&creds, host, port, &TlsMode::RequireUnverified).await?;
+//! info.assert_tls(true);
+//!
+//! // Verify connection with retry
+//! let info = verify_connection_with_retry(&creds, host, port, 10, Duration::from_secs(2)).await?;
+//!
+//! // Execute SQL
+//! execute_sql(&creds, host, port, "CREATE TABLE test (id int)").await?;
+//!
+//! // Query a single value
+//! let count: Option<i64> = query_single_value(&creds, host, port, "SELECT count(*) FROM test").await?;
+//! ```
+//!
+//! # Re-exports
+//!
+//! Core types are re-exported from the production module:
+//! - [`PostgresCredentials`] - Database credentials
+//! - [`TlsMode`] - TLS configuration options
+//! - [`fetch_credentials`] - Fetch credentials from Kubernetes secret
+//!
+//! # Database Verification
+//!
+//! For testing PostgresDatabase provisioning:
+//! - [`verify_database_exists`] - Check if a database was created
+//! - [`verify_role_exists`] - Check if a role was created
+//! - [`query_extensions`] - List installed extensions
+//! - [`verify_schema_usage`] - Check role has schema privileges
 
 use std::time::Duration;
 use thiserror::Error;
@@ -37,7 +76,18 @@ pub enum PostgresError {
     VersionParse(String),
 }
 
-/// Information about a PostgreSQL connection
+/// Information about a PostgreSQL connection obtained after verification.
+///
+/// Contains details about the PostgreSQL version, TLS status, and replication
+/// state. Use the assertion methods to verify expected values in tests.
+///
+/// # Example
+/// ```ignore
+/// let info = verify_connection(&creds, host, port).await?;
+/// info.assert_version(17);
+/// info.assert_tls(true);
+/// info.assert_is_primary();
+/// ```
 #[derive(Debug, Clone)]
 pub struct ConnectionInfo {
     /// Full version string (e.g., "PostgreSQL 17.2 on x86_64-pc-linux-gnu")

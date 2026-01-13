@@ -672,6 +672,8 @@ async fn test_invalid_storage_size_rejected() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_operator_detects_degraded_cluster() {
+    use crate::{SHORT_TIMEOUT, has_condition, wait_for_cluster_named};
+
     let cluster = init_test().await;
     let client = cluster.new_client().await.expect("create client");
     let ns = TestNamespace::create(client.clone(), "func-err-deg")
@@ -689,14 +691,19 @@ async fn test_operator_detects_degraded_cluster() {
         .await
         .expect("create cluster");
 
-    // Wait for StatefulSet to be created (cluster is being processed)
-    let sts_api: Api<StatefulSet> = Api::namespaced(client.clone(), ns.name());
-    wait_for_resource(&sts_api, "degraded-test", SHORT_TIMEOUT)
-        .await
-        .expect("StatefulSet should be created");
+    // Wait for cluster to have status populated (via condition)
+    // The cluster should reach at least the Creating phase with Progressing=True
+    let cluster = wait_for_cluster_named(
+        &api,
+        "degraded-test",
+        has_condition("Progressing", "True"),
+        "Progressing=True",
+        SHORT_TIMEOUT,
+    )
+    .await
+    .expect("Cluster should be progressing");
 
     // Verify cluster has status populated
-    let cluster = api.get("degraded-test").await.expect("get cluster");
     assert!(
         cluster.status.is_some(),
         "Cluster should have status after reconciliation"
@@ -945,7 +952,7 @@ async fn test_cluster_phase_transitions() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_cluster_connection_info_populated() {
-    use crate::{DEFAULT_TIMEOUT, has_condition, wait_for_cluster_named};
+    use crate::{DEFAULT_TIMEOUT, has_connection_info, wait_for_cluster_named};
 
     let cluster = init_test().await;
     let client = cluster.new_client().await.expect("create client");
@@ -963,16 +970,16 @@ async fn test_cluster_connection_info_populated() {
         .await
         .expect("create cluster");
 
-    // Wait for the cluster to be progressing (resources created)
+    // Wait for connection info to be populated in status
     let cluster = wait_for_cluster_named(
         &api,
         "test-conn",
-        has_condition("Progressing", "True"),
-        "Progressing=True",
+        has_connection_info(),
+        "connectionInfo populated",
         DEFAULT_TIMEOUT,
     )
     .await
-    .expect("Cluster should be progressing");
+    .expect("Cluster should have connection info");
 
     let status = cluster.status.as_ref().expect("Should have status");
     let conn_info = status

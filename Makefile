@@ -46,7 +46,7 @@ audit: ## Run security audit on dependencies
 	$(CARGO) audit
 
 test-integration: install ## Run integration tests (requires running cluster)
-	$(CARGO) test --test integration -- --ignored --test-threads=1
+	$(CARGO) test --test integration -- --ignored
 
 ##@ Installation
 

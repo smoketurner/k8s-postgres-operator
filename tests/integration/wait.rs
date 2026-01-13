@@ -1,4 +1,53 @@
-//! Wait condition helpers for PostgresCluster, PostgresDatabase, and PostgresUpgrade resources
+//! Wait condition helpers for PostgresCluster, PostgresDatabase, and PostgresUpgrade resources.
+//!
+//! This module provides condition functions and wait helpers for integration tests.
+//! All conditions implement kube-rs's [`Condition`] trait and can be used with
+//! [`await_condition`] for efficient watch-based waiting.
+//!
+//! # Overview
+//!
+//! - **Condition functions**: Return closures that check resource state (e.g., [`is_phase`], [`has_ready_replicas`])
+//! - **Wait functions**: Wrap conditions with timeouts and error handling (e.g., [`wait_for_cluster`])
+//! - **Timeouts**: Pre-defined constants for common operations ([`DEFAULT_TIMEOUT`], [`SHORT_TIMEOUT`])
+//!
+//! # Usage Examples
+//!
+//! ```ignore
+//! use crate::wait::*;
+//!
+//! // Wait for cluster to be Running with 3 ready replicas
+//! wait_for_cluster_named(
+//!     &api,
+//!     "my-cluster",
+//!     cluster_operational(3),
+//!     "cluster_operational(3)",
+//!     DEFAULT_TIMEOUT,
+//! ).await?;
+//!
+//! // Combine conditions
+//! wait_for_cluster_named(
+//!     &api,
+//!     "my-cluster",
+//!     |obj| is_phase(ClusterPhase::Running)(obj) && has_primary_pod()(obj),
+//!     "Running with primary",
+//!     DEFAULT_TIMEOUT,
+//! ).await?;
+//!
+//! // Wait for database to be ready
+//! wait_for_database(&api, "my-db", database_ready(), DATABASE_TIMEOUT).await?;
+//!
+//! // Wait for upgrade to complete
+//! wait_for_upgrade(&api, "my-upgrade", upgrade_terminal(), UPGRADE_TIMEOUT).await?;
+//! ```
+//!
+//! # Generic Trait
+//!
+//! The [`HasPhase`] trait enables generic phase checking across all CRD types:
+//!
+//! ```ignore
+//! // Works with PostgresCluster, PostgresDatabase, or PostgresUpgrade
+//! wait_for_cluster(&api, "name", phase_is(ClusterPhase::Running), timeout).await?;
+//! ```
 
 use kube::Api;
 use kube::runtime::wait::{Condition, await_condition};
@@ -6,8 +55,70 @@ use postgres_operator::crd::{
     ClusterPhase, DatabaseConditionType, DatabasePhase, PostgresCluster, PostgresDatabase,
     PostgresUpgrade, UpgradePhase,
 };
+use serde::de::DeserializeOwned;
+use std::fmt::Debug;
 use std::time::Duration;
 use thiserror::Error;
+
+// =============================================================================
+// HasPhase Trait for Generic Phase Checking
+// =============================================================================
+
+/// Trait for resources that have a phase in their status.
+///
+/// This enables generic phase-checking conditions across PostgresCluster,
+/// PostgresDatabase, and PostgresUpgrade resources.
+pub trait HasPhase {
+    /// The phase enum type for this resource
+    type Phase: PartialEq + Clone;
+
+    /// Get the current phase from the resource's status
+    fn phase(&self) -> Option<Self::Phase>;
+}
+
+impl HasPhase for PostgresCluster {
+    type Phase = ClusterPhase;
+
+    fn phase(&self) -> Option<Self::Phase> {
+        self.status.as_ref().map(|s| s.phase)
+    }
+}
+
+impl HasPhase for PostgresDatabase {
+    type Phase = DatabasePhase;
+
+    fn phase(&self) -> Option<Self::Phase> {
+        self.status.as_ref().map(|s| s.phase)
+    }
+}
+
+impl HasPhase for PostgresUpgrade {
+    type Phase = UpgradePhase;
+
+    fn phase(&self) -> Option<Self::Phase> {
+        self.status.as_ref().map(|s| s.phase)
+    }
+}
+
+/// Generic condition that checks if a resource is in a specific phase.
+///
+/// Works with any resource that implements `HasPhase`.
+///
+/// # Example
+/// ```ignore
+/// use crate::wait::{phase_is, wait_for_cluster};
+/// wait_for_cluster(&api, "my-cluster", phase_is(ClusterPhase::Running), timeout).await?;
+/// ```
+pub fn phase_is<T>(expected: T::Phase) -> impl Condition<T>
+where
+    T: HasPhase,
+{
+    move |obj: Option<&T>| {
+        obj.and_then(|r| r.phase())
+            .map(|p| p == expected)
+            .unwrap_or(false)
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum WaitError {
@@ -33,7 +144,16 @@ impl WaitError {
     }
 }
 
-/// Condition that checks if PostgresCluster is in a specific phase
+// =============================================================================
+// PostgresCluster Conditions
+// =============================================================================
+
+/// Checks if a PostgresCluster is in a specific phase.
+///
+/// # Example
+/// ```ignore
+/// wait_for_cluster(&api, "name", is_phase(ClusterPhase::Running), timeout).await?;
+/// ```
 pub fn is_phase(expected: ClusterPhase) -> impl Condition<PostgresCluster> {
     move |obj: Option<&PostgresCluster>| {
         obj.and_then(|cluster| cluster.status.as_ref())
@@ -42,7 +162,9 @@ pub fn is_phase(expected: ClusterPhase) -> impl Condition<PostgresCluster> {
     }
 }
 
-/// Condition that checks if readyReplicas >= expected
+/// Checks if ready replicas count is at least `expected`.
+///
+/// Useful for verifying cluster has sufficient healthy pods before proceeding.
 pub fn has_ready_replicas(expected: i32) -> impl Condition<PostgresCluster> {
     move |obj: Option<&PostgresCluster>| {
         obj.and_then(|cluster| cluster.status.as_ref())
@@ -83,6 +205,15 @@ pub fn has_condition(type_: &str, expected_status: &str) -> impl Condition<Postg
                     .any(|c| c.type_ == cond_type && c.status == status)
             })
             .unwrap_or(false)
+    }
+}
+
+/// Condition that checks if connection_info is populated in status
+pub fn has_connection_info() -> impl Condition<PostgresCluster> {
+    |obj: Option<&PostgresCluster>| {
+        obj.and_then(|cluster| cluster.status.as_ref())
+            .and_then(|status| status.connection_info.as_ref())
+            .is_some()
     }
 }
 
@@ -248,10 +379,18 @@ pub async fn wait_for_deletion(
     Ok(())
 }
 
-/// Default timeout for wait operations (reduced for faster tests)
+// =============================================================================
+// Timeout Constants
+// =============================================================================
+
+/// Default timeout for wait operations (90 seconds).
+///
+/// Use for standard cluster operations like reaching Running phase or scaling.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(90);
 
-/// Short timeout for quick checks
+/// Short timeout for quick checks (30 seconds).
+///
+/// Use for operations expected to complete quickly, like status updates.
 pub const SHORT_TIMEOUT: Duration = Duration::from_secs(30);
 
 // =============================================================================
@@ -308,6 +447,48 @@ where
         .map_err(WaitError::Watch)?;
 
     Ok(())
+}
+
+/// Wait for a CRD resource to be completely deleted (returns 404).
+///
+/// This polls until the resource is actually gone, not just marked for deletion.
+/// This ensures finalizers have completed. Use this for PostgresDatabase,
+/// PostgresUpgrade, and other CRD resources with finalizers.
+pub async fn wait_for_crd_deletion<T>(
+    api: &Api<T>,
+    name: &str,
+    resource_kind: &str,
+    timeout: Duration,
+) -> Result<(), WaitError>
+where
+    T: kube::Resource + Clone + Debug + DeserializeOwned,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    let poll_interval = Duration::from_millis(500);
+
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(WaitError::timeout(format!(
+                "deletion of {} '{}'",
+                resource_kind, name
+            )));
+        }
+
+        match api.get(name).await {
+            Ok(_) => {
+                // Resource still exists, wait and retry
+                tokio::time::sleep(poll_interval).await;
+            }
+            Err(kube::Error::Api(ref ae)) if ae.code == 404 => {
+                // Resource is gone, success!
+                return Ok(());
+            }
+            Err(e) => {
+                // Unexpected error
+                return Err(WaitError::KubeError(e));
+            }
+        }
+    }
 }
 
 // =============================================================================
@@ -424,35 +605,12 @@ pub async fn wait_for_database_deletion(
     name: &str,
     timeout: Duration,
 ) -> Result<(), WaitError> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    let poll_interval = Duration::from_millis(500);
-
-    loop {
-        if tokio::time::Instant::now() >= deadline {
-            return Err(WaitError::timeout(format!(
-                "deletion of database '{}'",
-                name
-            )));
-        }
-
-        match api.get(name).await {
-            Ok(_) => {
-                // Resource still exists, wait and retry
-                tokio::time::sleep(poll_interval).await;
-            }
-            Err(kube::Error::Api(ref ae)) if ae.code == 404 => {
-                // Resource is gone, success!
-                return Ok(());
-            }
-            Err(e) => {
-                // Unexpected error
-                return Err(WaitError::KubeError(e));
-            }
-        }
-    }
+    wait_for_crd_deletion(api, name, "database", timeout).await
 }
 
-/// Timeout for database operations (shorter than cluster operations)
+/// Timeout for database operations (60 seconds).
+///
+/// Database provisioning (CREATE DATABASE, roles, grants) is faster than cluster creation.
 pub const DATABASE_TIMEOUT: Duration = Duration::from_secs(60);
 
 // =============================================================================
@@ -707,36 +865,17 @@ pub async fn wait_for_upgrade_deletion(
     name: &str,
     timeout: Duration,
 ) -> Result<(), WaitError> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    let poll_interval = Duration::from_millis(500);
-
-    loop {
-        if tokio::time::Instant::now() >= deadline {
-            return Err(WaitError::timeout(format!(
-                "deletion of upgrade '{}'",
-                name
-            )));
-        }
-
-        match api.get(name).await {
-            Ok(_) => {
-                // Resource still exists, wait and retry
-                tokio::time::sleep(poll_interval).await;
-            }
-            Err(kube::Error::Api(ref ae)) if ae.code == 404 => {
-                // Resource is gone, success!
-                return Ok(());
-            }
-            Err(e) => {
-                // Unexpected error
-                return Err(WaitError::KubeError(e));
-            }
-        }
-    }
+    wait_for_crd_deletion(api, name, "upgrade", timeout).await
 }
 
-/// Timeout for upgrade operations (longer due to cluster creation)
+/// Timeout for upgrade operations (10 minutes).
+///
+/// Upgrades involve creating a new cluster, setting up replication, and
+/// synchronizing data. Use for waiting on upgrade completion.
 pub const UPGRADE_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// Short timeout for upgrade phase transitions
+/// Timeout for upgrade phase transitions (5 minutes).
+///
+/// Individual phase transitions (e.g., Replicating -> Verifying) should
+/// complete within this timeframe.
 pub const UPGRADE_PHASE_TIMEOUT: Duration = Duration::from_secs(300);

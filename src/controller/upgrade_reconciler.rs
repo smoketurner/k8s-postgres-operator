@@ -230,6 +230,26 @@ async fn build_transition_context(
                 .map(|s| s.phase)
                 .unwrap_or(ClusterPhase::Pending);
             tc.source_cluster_ready = phase == ClusterPhase::Running;
+
+            // Store source version for validation
+            let source_version = cluster.spec.version.as_major_version();
+            tc.source_cluster_version = Some(source_version);
+
+            // Validate target version against source
+            let target_version = upgrade.spec.target_version.as_major_version();
+            if target_version == source_version {
+                tc.version_validation_failed = true;
+                tc.error_message = Some(format!(
+                    "Invalid upgrade: source and target versions are the same (PostgreSQL {})",
+                    source_version
+                ));
+            } else if target_version < source_version {
+                tc.version_validation_failed = true;
+                tc.error_message = Some(format!(
+                    "Invalid upgrade: cannot downgrade from PostgreSQL {} to {}",
+                    source_version, target_version
+                ));
+            }
         }
         Ok(None) => {
             tc.source_cluster_ready = false;

@@ -38,7 +38,6 @@ mod common;
 // Test infrastructure modules
 mod assertions;
 mod cluster;
-mod crd;
 mod namespace;
 mod operator;
 mod postgres;
@@ -56,7 +55,6 @@ mod upgrade_tests;
 pub use assertions::*;
 pub use cluster::*;
 pub use common::*;
-pub use crd::*;
 pub use namespace::*;
 pub use operator::*;
 pub use postgres::*;

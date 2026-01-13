@@ -249,7 +249,7 @@ pub struct PostgresDatabaseStatus {
 }
 
 /// Phase of database provisioning
-#[derive(Serialize, Deserialize, Clone, Debug, Default, JsonSchema, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, JsonSchema, PartialEq, Eq)]
 pub enum DatabasePhase {
     /// Initial state, not yet processed
     #[default]

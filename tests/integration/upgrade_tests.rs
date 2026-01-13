@@ -25,7 +25,7 @@ use crate::postgres::{
 use crate::{
     PostgresClusterBuilder, PostgresUpgradeBuilder, ScopedOperator, SharedTestCluster,
     TestNamespace, UPGRADE_PHASE_TIMEOUT, UPGRADE_TIMEOUT, cluster_operational,
-    ensure_crd_installed, install_upgrade_crd, upgrade_is_phase, upgrade_past_pending,
+    ensure_crd_installed, ensure_upgrade_crd_installed, upgrade_is_phase, upgrade_past_pending,
     upgrade_past_phase, upgrade_ready_for_cutover, upgrade_terminal, wait_for_cluster,
     wait_for_upgrade_named,
 };
@@ -46,8 +46,7 @@ async fn init_test() -> Arc<SharedTestCluster> {
         .await
         .expect("Failed to install PostgresCluster CRD");
 
-    let client = cluster.new_client().await.expect("create client");
-    install_upgrade_crd(client)
+    ensure_upgrade_crd_installed(&cluster)
         .await
         .expect("Failed to install PostgresUpgrade CRD");
 
@@ -70,7 +69,7 @@ async fn test_upgrade_resource_created() {
     let ns = TestNamespace::create(client.clone(), "upgrade-create")
         .await
         .expect("create ns");
-    let _operator = ScopedOperator::start_with_upgrade(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create just the PostgresUpgrade (referencing non-existent cluster)
     // This tests that the CRD schema is valid
@@ -112,7 +111,7 @@ async fn test_upgrade_source_cluster_not_found() {
     let ns = TestNamespace::create(client.clone(), "upgrade-source-notfound")
         .await
         .expect("create ns");
-    let _operator = ScopedOperator::start_with_upgrade(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create upgrade referencing non-existent cluster using builder
     let upgrade = PostgresUpgradeBuilder::new("test-upgrade", ns.name())
@@ -168,7 +167,7 @@ async fn test_upgrade_same_version_rejected() {
     let ns = TestNamespace::create(client.clone(), "upgrade-same-ver")
         .await
         .expect("create ns");
-    let _operator = ScopedOperator::start_with_upgrade(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create source cluster with v16
     let source = PostgresClusterBuilder::single("source-cluster", ns.name())
@@ -255,7 +254,7 @@ async fn test_upgrade_starts_creating_target() {
     let ns = TestNamespace::create(client.clone(), "upgrade-start")
         .await
         .expect("create ns");
-    let _operator = ScopedOperator::start_with_upgrade(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create source cluster with v16
     let source = PostgresClusterBuilder::single("source-cluster", ns.name())
@@ -372,7 +371,7 @@ async fn test_upgrade_full_v16_to_v17() {
     let ns = TestNamespace::create(client.clone(), "upgrade-e2e")
         .await
         .expect("create ns");
-    let _operator = ScopedOperator::start_with_upgrade(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // =========================================================================
     // Step 1: Create source cluster with PostgreSQL 16
@@ -615,7 +614,7 @@ async fn test_upgrade_downgrade_rejected() {
     let ns = TestNamespace::create(client.clone(), "upgrade-downgrade")
         .await
         .expect("create ns");
-    let _operator = ScopedOperator::start_with_upgrade(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create source cluster with v17
     let source = PostgresClusterBuilder::single("source-cluster", ns.name())
@@ -707,7 +706,7 @@ async fn test_upgrade_creates_target_cluster() {
     let ns = TestNamespace::create(client.clone(), "upgrade-target")
         .await
         .expect("create ns");
-    let _operator = ScopedOperator::start_with_upgrade(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     // Create source cluster with v16
     let source = PostgresClusterBuilder::single("source", ns.name())
@@ -761,7 +760,8 @@ async fn test_upgrade_creates_target_cluster() {
     .await;
 
     // Check if target cluster exists
-    let target_result = cluster_api.get("source-v17").await;
+    // Target cluster is named {upgrade-name}-target
+    let target_result = cluster_api.get("test-upgrade-target").await;
 
     match target_result {
         Ok(target) => {
@@ -809,7 +809,7 @@ async fn test_upgrade_creates_target_cluster() {
         .await
         .ok();
     cluster_api
-        .delete("source-v17", &DeleteParams::default())
+        .delete("test-upgrade-target", &DeleteParams::default())
         .await
         .ok();
 }
@@ -833,7 +833,7 @@ async fn test_upgrade_row_count_with_data() {
         .await
         .expect("create namespace");
 
-    let _operator = ScopedOperator::start_with_upgrade(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let cluster_api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
     let upgrade_api: Api<PostgresUpgrade> = Api::namespaced(client.clone(), ns.name());
@@ -1050,7 +1050,7 @@ async fn test_upgrade_replication_status() {
         .await
         .expect("create namespace");
 
-    let _operator = ScopedOperator::start_with_upgrade(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let cluster_api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
     let upgrade_api: Api<PostgresUpgrade> = Api::namespaced(client.clone(), ns.name());
@@ -1179,7 +1179,7 @@ async fn test_upgrade_auto_cutover() {
         .await
         .expect("create namespace");
 
-    let _operator = ScopedOperator::start_with_upgrade(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let cluster_api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
     let upgrade_api: Api<PostgresUpgrade> = Api::namespaced(client.clone(), ns.name());
@@ -1268,7 +1268,7 @@ async fn test_upgrade_connectivity_after_cutover() {
         .await
         .expect("create namespace");
 
-    let _operator = ScopedOperator::start_with_upgrade(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let cluster_api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
     let upgrade_api: Api<PostgresUpgrade> = Api::namespaced(client.clone(), ns.name());
@@ -1484,7 +1484,7 @@ async fn test_upgrade_cutover_data_integrity() {
         .await
         .expect("create namespace");
 
-    let _operator = ScopedOperator::start_with_upgrade(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let cluster_api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
     let upgrade_api: Api<PostgresUpgrade> = Api::namespaced(client.clone(), ns.name());
@@ -1739,7 +1739,7 @@ async fn test_upgrade_rollback_during_replication() {
         .await
         .expect("create namespace");
 
-    let _operator = ScopedOperator::start_with_upgrade(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let cluster_api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
     let upgrade_api: Api<PostgresUpgrade> = Api::namespaced(client.clone(), ns.name());
@@ -1926,7 +1926,7 @@ async fn test_upgrade_rollback_from_cutover_ready() {
         .await
         .expect("create namespace");
 
-    let _operator = ScopedOperator::start_with_upgrade(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let cluster_api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
     let upgrade_api: Api<PostgresUpgrade> = Api::namespaced(client.clone(), ns.name());
@@ -2140,7 +2140,7 @@ async fn test_upgrade_verification_mismatch_detection() {
         .await
         .expect("create namespace");
 
-    let _operator = ScopedOperator::start_with_upgrade(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let cluster_api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
     let upgrade_api: Api<PostgresUpgrade> = Api::namespaced(client.clone(), ns.name());
@@ -2283,7 +2283,7 @@ async fn test_upgrade_deletion_during_upgrade() {
         .await
         .expect("create namespace");
 
-    let _operator = ScopedOperator::start_with_upgrade(client.clone(), ns.name()).await;
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
 
     let cluster_api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
     let upgrade_api: Api<PostgresUpgrade> = Api::namespaced(client.clone(), ns.name());
