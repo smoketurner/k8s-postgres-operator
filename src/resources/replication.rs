@@ -22,9 +22,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, instrument, warn};
 
-use crate::resources::sql::{
-    SqlError, apply_schema, dump_schema, escape_sql_string_pub, exec_sql, quote_identifier_pub,
-};
+use crate::resources::postgres_client::{PostgresClientError, PostgresConnection};
+use crate::resources::sql::{SqlError, apply_schema, dump_schema};
 
 /// Errors that can occur during replication operations
 #[derive(Error, Debug)]
@@ -32,6 +31,10 @@ pub enum ReplicationError {
     /// SQL execution failed
     #[error("SQL execution failed: {0}")]
     SqlError(#[from] SqlError),
+
+    /// PostgreSQL client error
+    #[error("PostgreSQL client error: {0}")]
+    PostgresClient(#[from] PostgresClientError),
 
     /// Publication not found
     #[error("Publication not found: {0}")]
@@ -209,78 +212,71 @@ pub struct SequenceSyncFailure {
 /// Create a publication on the source cluster for all tables
 ///
 /// # Arguments
-/// * `client` - Kubernetes client
-/// * `namespace` - Namespace of the source cluster
-/// * `cluster_name` - Name of the source PostgresCluster
+/// * `conn` - PostgreSQL connection to the source cluster
 /// * `publication_name` - Name for the publication
 ///
 /// # Returns
 /// `true` if the publication was created, `false` if it already exists
-#[instrument(skip(client), fields(namespace = %namespace, cluster = %cluster_name))]
+#[instrument(skip(conn))]
 pub async fn setup_publication(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
+    conn: &PostgresConnection,
     publication_name: &str,
 ) -> ReplicationResult<bool> {
     // Check if publication already exists
-    let check_sql = format!(
-        "SELECT 1 FROM pg_publication WHERE pubname = '{}'",
-        escape_sql_string_pub(publication_name)
-    );
+    let row = conn
+        .query_opt(
+            "SELECT 1 FROM pg_publication WHERE pubname = $1",
+            &[&publication_name],
+        )
+        .await?;
 
-    let result = exec_sql(client, namespace, cluster_name, "postgres", &check_sql).await?;
-
-    if !result.trim().is_empty() {
+    if row.is_some() {
         debug!(publication = %publication_name, "Publication already exists");
         return Ok(false);
     }
 
     // Create publication for all tables
-    let create_sql = format!(
-        "CREATE PUBLICATION {} FOR ALL TABLES",
-        quote_identifier_pub(publication_name)
+    // Note: Publication names are identifiers - we use format! here because
+    // CREATE PUBLICATION doesn't support parameterized identifiers
+    let sql = format!(
+        "CREATE PUBLICATION \"{}\" FOR ALL TABLES",
+        publication_name.replace('"', "\"\"")
     );
+    conn.batch_execute(&sql).await?;
 
-    exec_sql(client, namespace, cluster_name, "postgres", &create_sql).await?;
     debug!(publication = %publication_name, "Publication created successfully");
-
     Ok(true)
 }
 
 /// Drop a publication from the source cluster
-#[instrument(skip(client), fields(namespace = %namespace, cluster = %cluster_name))]
+#[instrument(skip(conn))]
 pub async fn drop_publication(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
+    conn: &PostgresConnection,
     publication_name: &str,
 ) -> ReplicationResult<()> {
     let sql = format!(
-        "DROP PUBLICATION IF EXISTS {}",
-        quote_identifier_pub(publication_name)
+        "DROP PUBLICATION IF EXISTS \"{}\"",
+        publication_name.replace('"', "\"\"")
     );
+    conn.batch_execute(&sql).await?;
 
-    exec_sql(client, namespace, cluster_name, "postgres", &sql).await?;
     debug!(publication = %publication_name, "Publication dropped");
-
     Ok(())
 }
 
 /// Check if a publication exists
 pub async fn publication_exists(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
+    conn: &PostgresConnection,
     publication_name: &str,
 ) -> ReplicationResult<bool> {
-    let sql = format!(
-        "SELECT 1 FROM pg_publication WHERE pubname = '{}'",
-        escape_sql_string_pub(publication_name)
-    );
+    let row = conn
+        .query_opt(
+            "SELECT 1 FROM pg_publication WHERE pubname = $1",
+            &[&publication_name],
+        )
+        .await?;
 
-    let result = exec_sql(client, namespace, cluster_name, "postgres", &sql).await?;
-    Ok(!result.trim().is_empty())
+    Ok(row.is_some())
 }
 
 // =============================================================================
@@ -290,9 +286,7 @@ pub async fn publication_exists(
 /// Create a subscription on the target cluster
 ///
 /// # Arguments
-/// * `client` - Kubernetes client
-/// * `target_namespace` - Namespace of the target cluster
-/// * `target_cluster_name` - Name of the target PostgresCluster
+/// * `conn` - PostgreSQL connection to the target cluster
 /// * `subscription_name` - Name for the subscription
 /// * `source_host` - Hostname of the source cluster (typically the service name)
 /// * `source_port` - Port of the source cluster
@@ -302,11 +296,9 @@ pub async fn publication_exists(
 /// # Returns
 /// `true` if the subscription was created, `false` if it already exists
 #[allow(clippy::too_many_arguments)]
-#[instrument(skip(client, source_password), fields(target_namespace = %target_namespace, target_cluster = %target_cluster_name))]
+#[instrument(skip(conn, source_password))]
 pub async fn setup_subscription(
-    client: &Client,
-    target_namespace: &str,
-    target_cluster_name: &str,
+    conn: &PostgresConnection,
     subscription_name: &str,
     source_host: &str,
     source_port: u16,
@@ -314,21 +306,14 @@ pub async fn setup_subscription(
     source_password: &str,
 ) -> ReplicationResult<bool> {
     // Check if subscription already exists
-    let check_sql = format!(
-        "SELECT 1 FROM pg_subscription WHERE subname = '{}'",
-        escape_sql_string_pub(subscription_name)
-    );
+    let row = conn
+        .query_opt(
+            "SELECT 1 FROM pg_subscription WHERE subname = $1",
+            &[&subscription_name],
+        )
+        .await?;
 
-    let result = exec_sql(
-        client,
-        target_namespace,
-        target_cluster_name,
-        "postgres",
-        &check_sql,
-    )
-    .await?;
-
-    if !result.trim().is_empty() {
+    if row.is_some() {
         debug!(subscription = %subscription_name, "Subscription already exists");
         return Ok(false);
     }
@@ -340,112 +325,88 @@ pub async fn setup_subscription(
     );
 
     // Create subscription
-    // copy_data = true: Copy existing data first
-    // create_slot = true: Create a replication slot on the source
-    let create_sql = format!(
-        "CREATE SUBSCRIPTION {} CONNECTION '{}' PUBLICATION {} WITH (copy_data = true, create_slot = true)",
-        quote_identifier_pub(subscription_name),
-        escape_sql_string_pub(&conn_string),
-        quote_identifier_pub(publication_name)
+    // Note: Subscription names and connection strings need special handling
+    let sql = format!(
+        "CREATE SUBSCRIPTION \"{}\" CONNECTION '{}' PUBLICATION \"{}\" WITH (copy_data = true, create_slot = true)",
+        subscription_name.replace('"', "\"\""),
+        conn_string.replace('\'', "''"),
+        publication_name.replace('"', "\"\"")
     );
 
-    exec_sql(
-        client,
-        target_namespace,
-        target_cluster_name,
-        "postgres",
-        &create_sql,
-    )
-    .await?;
+    conn.batch_execute(&sql).await?;
     debug!(subscription = %subscription_name, "Subscription created successfully");
 
     Ok(true)
 }
 
 /// Drop a subscription from the target cluster
-#[instrument(skip(client), fields(namespace = %namespace, cluster = %cluster_name))]
+#[instrument(skip(conn))]
 pub async fn drop_subscription(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
+    conn: &PostgresConnection,
     subscription_name: &str,
 ) -> ReplicationResult<()> {
-    // First disable the subscription to release the replication slot
-    let disable_sql = format!(
-        "ALTER SUBSCRIPTION {} DISABLE",
-        quote_identifier_pub(subscription_name)
-    );
+    let escaped_name = subscription_name.replace('"', "\"\"");
 
-    // Ignore errors if subscription doesn't exist
-    if let Err(e) = exec_sql(client, namespace, cluster_name, "postgres", &disable_sql).await {
+    // First disable the subscription to release the replication slot
+    let disable_sql = format!("ALTER SUBSCRIPTION \"{}\" DISABLE", escaped_name);
+    if let Err(e) = conn.batch_execute(&disable_sql).await {
         debug!(subscription = %subscription_name, error = %e, "Failed to disable subscription (may not exist)");
     }
 
     // Drop the replication slot association
     let drop_slot_sql = format!(
-        "ALTER SUBSCRIPTION {} SET (slot_name = NONE)",
-        quote_identifier_pub(subscription_name)
+        "ALTER SUBSCRIPTION \"{}\" SET (slot_name = NONE)",
+        escaped_name
     );
-
-    if let Err(e) = exec_sql(client, namespace, cluster_name, "postgres", &drop_slot_sql).await {
+    if let Err(e) = conn.batch_execute(&drop_slot_sql).await {
         debug!(subscription = %subscription_name, error = %e, "Failed to drop slot association");
     }
 
     // Drop the subscription
-    let drop_sql = format!(
-        "DROP SUBSCRIPTION IF EXISTS {}",
-        quote_identifier_pub(subscription_name)
-    );
+    let drop_sql = format!("DROP SUBSCRIPTION IF EXISTS \"{}\"", escaped_name);
+    conn.batch_execute(&drop_sql).await?;
 
-    exec_sql(client, namespace, cluster_name, "postgres", &drop_sql).await?;
     debug!(subscription = %subscription_name, "Subscription dropped");
-
     Ok(())
 }
 
 /// Get the state of a subscription
-#[instrument(skip(client), fields(namespace = %namespace, cluster = %cluster_name))]
+#[instrument(skip(conn))]
 pub async fn get_subscription_state(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
+    conn: &PostgresConnection,
     subscription_name: &str,
 ) -> ReplicationResult<SubscriptionState> {
     // Query subscription state using pg_subscription and pg_stat_subscription
-    // - pg_subscription.subenabled: whether subscription is enabled
-    // - pg_stat_subscription.pid: worker process ID (non-null = active)
-    // - pg_subscription_rel.srsubstate: per-table sync state ('i'=init, 'd'=copy, 's'=sync, 'r'=ready)
-    let sql = format!(
-        r#"
-        SELECT
-            CASE
-                WHEN NOT EXISTS (SELECT 1 FROM pg_subscription WHERE subname = '{}') THEN 'not_found'
-                WHEN NOT (SELECT subenabled FROM pg_subscription WHERE subname = '{}') THEN 'disabled'
-                WHEN (SELECT pid FROM pg_stat_subscription WHERE subname = '{}' LIMIT 1) IS NULL THEN 'inactive'
-                WHEN EXISTS (
-                    SELECT 1 FROM pg_subscription_rel sr
-                    JOIN pg_subscription s ON s.oid = sr.srsubid
-                    WHERE s.subname = '{}' AND sr.srsubstate IN ('i', 'd')
-                ) THEN 'syncing'
-                WHEN EXISTS (
-                    SELECT 1 FROM pg_subscription_rel sr
-                    JOIN pg_subscription s ON s.oid = sr.srsubid
-                    WHERE s.subname = '{}' AND sr.srsubstate = 's'
-                ) THEN 'catchup'
-                ELSE 'active'
-            END as state
-        "#,
-        escape_sql_string_pub(subscription_name),
-        escape_sql_string_pub(subscription_name),
-        escape_sql_string_pub(subscription_name),
-        escape_sql_string_pub(subscription_name),
-        escape_sql_string_pub(subscription_name)
-    );
+    let row = conn
+        .query_opt(
+            r#"
+            SELECT
+                CASE
+                    WHEN NOT EXISTS (SELECT 1 FROM pg_subscription WHERE subname = $1) THEN 'not_found'
+                    WHEN NOT (SELECT subenabled FROM pg_subscription WHERE subname = $1) THEN 'disabled'
+                    WHEN (SELECT pid FROM pg_stat_subscription WHERE subname = $1 LIMIT 1) IS NULL THEN 'inactive'
+                    WHEN EXISTS (
+                        SELECT 1 FROM pg_subscription_rel sr
+                        JOIN pg_subscription s ON s.oid = sr.srsubid
+                        WHERE s.subname = $1 AND sr.srsubstate IN ('i', 'd')
+                    ) THEN 'syncing'
+                    WHEN EXISTS (
+                        SELECT 1 FROM pg_subscription_rel sr
+                        JOIN pg_subscription s ON s.oid = sr.srsubid
+                        WHERE s.subname = $1 AND sr.srsubstate = 's'
+                    ) THEN 'catchup'
+                    ELSE 'active'
+                END as state
+            "#,
+            &[&subscription_name],
+        )
+        .await?;
 
-    let result = exec_sql(client, namespace, cluster_name, "postgres", &sql).await?;
-    let state_str = result.trim();
+    let state_str: String = row
+        .map(|r| r.get("state"))
+        .unwrap_or_else(|| "not_found".to_string());
 
-    match state_str {
+    match state_str.as_str() {
         "not_found" => Err(ReplicationError::SubscriptionNotFound(
             subscription_name.to_string(),
         )),
@@ -459,18 +420,17 @@ pub async fn get_subscription_state(
 
 /// Check if a subscription exists
 pub async fn subscription_exists(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
+    conn: &PostgresConnection,
     subscription_name: &str,
 ) -> ReplicationResult<bool> {
-    let sql = format!(
-        "SELECT 1 FROM pg_subscription WHERE subname = '{}'",
-        escape_sql_string_pub(subscription_name)
-    );
+    let row = conn
+        .query_opt(
+            "SELECT 1 FROM pg_subscription WHERE subname = $1",
+            &[&subscription_name],
+        )
+        .await?;
 
-    let result = exec_sql(client, namespace, cluster_name, "postgres", &sql).await?;
-    Ok(!result.trim().is_empty())
+    Ok(row.is_some())
 }
 
 // =============================================================================
@@ -483,6 +443,8 @@ pub async fn subscription_exists(
 /// PostgreSQL logical replication only replicates DML (data), not DDL (schema).
 /// The tables, sequences, and other objects must exist on the target before
 /// the subscription can sync data.
+///
+/// Note: This function uses pod exec for pg_dump since it's a CLI tool.
 #[instrument(skip(client), fields(source_namespace = %source_namespace, target_namespace = %target_namespace))]
 pub async fn copy_schema(
     client: &Client,
@@ -499,7 +461,7 @@ pub async fn copy_schema(
         "Copying schema from source to target"
     );
 
-    // Dump schema from source
+    // Dump schema from source (uses pg_dump via pod exec)
     let schema_sql = dump_schema(client, source_namespace, source_cluster_name, database).await?;
 
     if schema_sql.trim().is_empty() {
@@ -512,7 +474,7 @@ pub async fn copy_schema(
         "Schema dump completed, applying to target"
     );
 
-    // Apply schema to target
+    // Apply schema to target (uses psql via pod exec)
     apply_schema(
         client,
         target_namespace,
@@ -531,66 +493,34 @@ pub async fn copy_schema(
 // =============================================================================
 
 /// Get the current replication lag
-#[instrument(skip(client), fields(source_namespace = %source_namespace, source_cluster = %source_cluster_name))]
+#[instrument(skip(conn))]
 pub async fn get_replication_lag(
-    client: &Client,
-    source_namespace: &str,
-    source_cluster_name: &str,
+    conn: &PostgresConnection,
     subscription_name: &str,
 ) -> ReplicationResult<LagStatus> {
     // Query the source cluster for replication slot lag
-    let sql = format!(
-        r#"
-        SELECT
-            pg_current_wal_lsn() as source_lsn,
-            COALESCE(confirmed_flush_lsn, '0/0') as target_lsn,
-            COALESCE(pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn), 0)::bigint as lag_bytes
-        FROM pg_replication_slots
-        WHERE slot_name = '{}'
-        "#,
-        escape_sql_string_pub(subscription_name)
-    );
+    let row = conn
+        .query_opt(
+            r#"
+            SELECT
+                pg_current_wal_lsn()::text as source_lsn,
+                COALESCE(confirmed_flush_lsn::text, '0/0') as target_lsn,
+                COALESCE(pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn), 0)::bigint as lag_bytes
+            FROM pg_replication_slots
+            WHERE slot_name = $1
+            "#,
+            &[&subscription_name],
+        )
+        .await?;
 
-    let result = exec_sql(
-        client,
-        source_namespace,
-        source_cluster_name,
-        "postgres",
-        &sql,
-    )
-    .await?;
+    let row = row
+        .ok_or_else(|| ReplicationError::ReplicationSlotNotFound(subscription_name.to_string()))?;
 
-    let line = result.trim();
-    if line.is_empty() {
-        return Err(ReplicationError::ReplicationSlotNotFound(
-            subscription_name.to_string(),
-        ));
-    }
-
-    // Parse the result (format: source_lsn|target_lsn|lag_bytes)
-    let parts: Vec<&str> = line.split('|').collect();
-    if parts.len() < 3 {
-        return Err(ReplicationError::ParseError(format!(
-            "Unexpected result format: {}",
-            line
-        )));
-    }
-
-    let source_lsn = parts
-        .first()
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
-    let target_lsn = parts
-        .get(1)
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
-    let lag_str = parts.get(2).map(|s| s.trim()).unwrap_or("0");
-    let lag_bytes: i64 = lag_str
-        .parse()
-        .map_err(|_| ReplicationError::ParseError(format!("Invalid lag_bytes: {}", lag_str)))?;
+    let source_lsn: String = row.get("source_lsn");
+    let target_lsn: String = row.get("target_lsn");
+    let lag_bytes: i64 = row.get("lag_bytes");
 
     // Estimate lag in seconds based on typical write rate (rough estimate)
-    // Assuming ~1MB/s write rate, adjust based on your workload
     let lag_seconds = if lag_bytes > 0 {
         Some((lag_bytes / (1024 * 1024)).max(1))
     } else {
@@ -607,20 +537,12 @@ pub async fn get_replication_lag(
 }
 
 /// Check if source and target LSNs are in sync
-#[instrument(skip(client), fields(source_namespace = %source_namespace))]
+#[instrument(skip(conn))]
 pub async fn check_lsn_sync(
-    client: &Client,
-    source_namespace: &str,
-    source_cluster_name: &str,
+    conn: &PostgresConnection,
     subscription_name: &str,
 ) -> ReplicationResult<LsnSyncStatus> {
-    let lag_status = get_replication_lag(
-        client,
-        source_namespace,
-        source_cluster_name,
-        subscription_name,
-    )
-    .await?;
+    let lag_status = get_replication_lag(conn, subscription_name).await?;
 
     Ok(LsnSyncStatus {
         source_lsn: lag_status.source_lsn,
@@ -637,21 +559,17 @@ pub async fn check_lsn_sync(
 /// Verify row counts between source and target clusters
 ///
 /// This compares row counts for all user tables in both clusters.
-/// Only tables in the 'public' schema are compared by default.
-#[instrument(skip(client), fields(source_namespace = %source_namespace, target_namespace = %target_namespace))]
+#[instrument(skip(source_conn, target_conn))]
 pub async fn verify_row_counts(
-    client: &Client,
-    source_namespace: &str,
-    source_cluster_name: &str,
-    target_namespace: &str,
-    target_cluster_name: &str,
+    source_conn: &PostgresConnection,
+    target_conn: &PostgresConnection,
     tolerance: i64,
 ) -> ReplicationResult<RowCountVerification> {
     // Get table list and row counts from source
-    let source_counts = get_table_row_counts(client, source_namespace, source_cluster_name).await?;
+    let source_counts = get_table_row_counts(source_conn).await?;
 
     // Get table list and row counts from target
-    let target_counts = get_table_row_counts(client, target_namespace, target_cluster_name).await?;
+    let target_counts = get_table_row_counts(target_conn).await?;
 
     let mut tables_checked = 0;
     let mut tables_matched = 0;
@@ -721,36 +639,28 @@ pub async fn verify_row_counts(
 
 /// Get row counts for all user tables in a cluster
 async fn get_table_row_counts(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
+    conn: &PostgresConnection,
 ) -> ReplicationResult<std::collections::HashMap<String, i64>> {
     // Use pg_stat_user_tables for approximate counts (faster than COUNT(*))
-    let sql = r#"
-        SELECT
-            schemaname || '.' || relname as table_name,
-            n_live_tup as row_count
-        FROM pg_stat_user_tables
-        WHERE schemaname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
-        ORDER BY schemaname, relname
-    "#;
-
-    let result = exec_sql(client, namespace, cluster_name, "postgres", sql).await?;
+    let rows = conn
+        .query(
+            r#"
+            SELECT
+                schemaname || '.' || relname as table_name,
+                n_live_tup as row_count
+            FROM pg_stat_user_tables
+            WHERE schemaname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+            ORDER BY schemaname, relname
+            "#,
+            &[],
+        )
+        .await?;
 
     let mut counts = std::collections::HashMap::new();
-
-    for line in result.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        let parts: Vec<&str> = line.split('|').collect();
-        if let (Some(name), Some(count_str)) = (parts.first(), parts.get(1)) {
-            let table_name = name.trim().to_string();
-            let row_count: i64 = count_str.trim().parse().unwrap_or(0);
-            counts.insert(table_name, row_count);
-        }
+    for row in rows {
+        let table_name: String = row.get("table_name");
+        let row_count: i64 = row.get("row_count");
+        counts.insert(table_name, row_count);
     }
 
     Ok(counts)
@@ -764,53 +674,32 @@ async fn get_table_row_counts(
 ///
 /// This should be called after setting the source to read-only and before cutover.
 /// It copies the current value of all sequences from source to target.
-#[instrument(skip(client), fields(source_namespace = %source_namespace, target_namespace = %target_namespace))]
+#[instrument(skip(source_conn, target_conn))]
 pub async fn sync_sequences(
-    client: &Client,
-    source_namespace: &str,
-    source_cluster_name: &str,
-    target_namespace: &str,
-    target_cluster_name: &str,
+    source_conn: &PostgresConnection,
+    target_conn: &PostgresConnection,
 ) -> ReplicationResult<SequenceSyncResult> {
     // Get all sequences and their current values from source
-    let source_sql = r#"
-        SELECT
-            schemaname || '.' || sequencename as seq_name,
-            last_value
-        FROM pg_sequences
-        WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
-    "#;
-
-    let source_result = exec_sql(
-        client,
-        source_namespace,
-        source_cluster_name,
-        "postgres",
-        source_sql,
-    )
-    .await?;
+    let rows = source_conn
+        .query(
+            r#"
+            SELECT
+                schemaname || '.' || sequencename as seq_name,
+                last_value
+            FROM pg_sequences
+            WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+            "#,
+            &[],
+        )
+        .await?;
 
     let mut total_sequences = 0;
     let mut synced_count = 0;
     let mut failures = Vec::new();
 
-    for line in source_result.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        let parts: Vec<&str> = line.split('|').collect();
-        if parts.len() < 2 {
-            continue;
-        }
-
-        let Some(seq_name) = parts.first().map(|s| s.trim()) else {
-            continue;
-        };
-        let Some(last_value) = parts.get(1).map(|s| s.trim()) else {
-            continue;
-        };
+    for row in rows {
+        let seq_name: String = row.get("seq_name");
+        let last_value: Option<i64> = row.get("last_value");
 
         total_sequences += 1;
 
@@ -819,33 +708,25 @@ pub async fn sync_sequences(
         let (schema, sequence) = if name_parts.len() == 2 {
             (
                 name_parts.first().copied().unwrap_or("public"),
-                name_parts.get(1).copied().unwrap_or(seq_name),
+                name_parts.get(1).copied().unwrap_or(&seq_name),
             )
         } else {
-            ("public", seq_name)
+            ("public", seq_name.as_str())
         };
 
         // Set the sequence value on target
         // Add a buffer to avoid conflicts with in-flight transactions
         let buffer = 1000i64;
-        let target_value: i64 = last_value.parse().unwrap_or(0) + buffer;
+        let target_value: i64 = last_value.unwrap_or(0) + buffer;
 
+        // setval requires the sequence name as a regclass, use format for the identifier
         let set_sql = format!(
-            "SELECT setval('{}.{}', {}, true)",
-            escape_sql_string_pub(schema),
-            escape_sql_string_pub(sequence),
-            target_value
+            "SELECT setval('\"{}\".\"{}\"', $1, true)",
+            schema.replace('"', "\"\""),
+            sequence.replace('"', "\"\"")
         );
 
-        match exec_sql(
-            client,
-            target_namespace,
-            target_cluster_name,
-            "postgres",
-            &set_sql,
-        )
-        .await
-        {
+        match target_conn.execute(&set_sql, &[&target_value]).await {
             Ok(_) => {
                 synced_count += 1;
                 debug!(sequence = %seq_name, value = %target_value, "Sequence synchronized");
@@ -877,71 +758,54 @@ pub async fn sync_sequences(
 ///
 /// This should be called just before cutover to ensure no new writes
 /// are made to the source cluster.
-#[instrument(skip(client), fields(namespace = %namespace, cluster = %cluster_name))]
-pub async fn set_source_readonly(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
-) -> ReplicationResult<()> {
+#[instrument(skip(conn))]
+pub async fn set_source_readonly(conn: &PostgresConnection) -> ReplicationResult<()> {
     // Set default_transaction_read_only to prevent new writes
-    let sql = "ALTER SYSTEM SET default_transaction_read_only = on";
-    exec_sql(client, namespace, cluster_name, "postgres", sql).await?;
+    conn.batch_execute("ALTER SYSTEM SET default_transaction_read_only = on")
+        .await?;
 
     // Reload configuration
-    let reload_sql = "SELECT pg_reload_conf()";
-    exec_sql(client, namespace, cluster_name, "postgres", reload_sql).await?;
+    conn.execute("SELECT pg_reload_conf()", &[]).await?;
 
-    debug!(cluster = %cluster_name, "Source cluster set to read-only");
+    debug!("Source cluster set to read-only");
     Ok(())
 }
 
 /// Set the source cluster back to read-write mode (for rollback)
-#[instrument(skip(client), fields(namespace = %namespace, cluster = %cluster_name))]
-pub async fn set_source_readwrite(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
-) -> ReplicationResult<()> {
-    let sql = "ALTER SYSTEM SET default_transaction_read_only = off";
-    exec_sql(client, namespace, cluster_name, "postgres", sql).await?;
+#[instrument(skip(conn))]
+pub async fn set_source_readwrite(conn: &PostgresConnection) -> ReplicationResult<()> {
+    conn.batch_execute("ALTER SYSTEM SET default_transaction_read_only = off")
+        .await?;
 
-    let reload_sql = "SELECT pg_reload_conf()";
-    exec_sql(client, namespace, cluster_name, "postgres", reload_sql).await?;
+    conn.execute("SELECT pg_reload_conf()", &[]).await?;
 
-    debug!(cluster = %cluster_name, "Source cluster set to read-write");
+    debug!("Source cluster set to read-write");
     Ok(())
 }
 
 /// Get the count of active connections to the source cluster
-#[instrument(skip(client), fields(namespace = %namespace, cluster = %cluster_name))]
-pub async fn get_active_connections(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
-) -> ReplicationResult<i64> {
-    let sql = r#"
-        SELECT COUNT(*)
-        FROM pg_stat_activity
-        WHERE state = 'active'
-        AND backend_type = 'client backend'
-        AND pid != pg_backend_pid()
-    "#;
+#[instrument(skip(conn))]
+pub async fn get_active_connections(conn: &PostgresConnection) -> ReplicationResult<i64> {
+    let row = conn
+        .query_one(
+            r#"
+            SELECT COUNT(*)::bigint as count
+            FROM pg_stat_activity
+            WHERE state = 'active'
+            AND backend_type = 'client backend'
+            AND pid != pg_backend_pid()
+            "#,
+            &[],
+        )
+        .await?;
 
-    let result = exec_sql(client, namespace, cluster_name, "postgres", sql).await?;
-    let count: i64 = result
-        .trim()
-        .parse()
-        .map_err(|_| ReplicationError::ParseError(format!("Invalid count: {}", result)))?;
-
-    Ok(count)
+    Ok(row.get("count"))
 }
 
 /// Wait for active connections to drain (with timeout)
-#[instrument(skip(client), fields(namespace = %namespace, cluster = %cluster_name))]
+#[instrument(skip(conn))]
 pub async fn wait_for_connections_drain(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
+    conn: &PostgresConnection,
     timeout_seconds: u64,
     poll_interval_seconds: u64,
 ) -> ReplicationResult<bool> {
@@ -950,16 +814,15 @@ pub async fn wait_for_connections_drain(
     let poll_interval = std::time::Duration::from_secs(poll_interval_seconds);
 
     loop {
-        let connections = get_active_connections(client, namespace, cluster_name).await?;
+        let connections = get_active_connections(conn).await?;
 
         if connections == 0 {
-            debug!(cluster = %cluster_name, "All connections drained");
+            debug!("All connections drained");
             return Ok(true);
         }
 
         if start.elapsed() >= timeout {
             warn!(
-                cluster = %cluster_name,
                 remaining_connections = %connections,
                 "Timeout waiting for connections to drain"
             );
@@ -967,7 +830,6 @@ pub async fn wait_for_connections_drain(
         }
 
         debug!(
-            cluster = %cluster_name,
             connections = %connections,
             "Waiting for connections to drain"
         );
@@ -981,21 +843,25 @@ pub async fn wait_for_connections_drain(
 // =============================================================================
 
 /// Clean up replication slot on the source cluster
-#[instrument(skip(client), fields(namespace = %namespace, cluster = %cluster_name))]
+#[instrument(skip(conn))]
 pub async fn drop_replication_slot(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
+    conn: &PostgresConnection,
     slot_name: &str,
 ) -> ReplicationResult<()> {
-    let sql = format!(
-        "SELECT pg_drop_replication_slot('{}') WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = '{}')",
-        escape_sql_string_pub(slot_name),
-        escape_sql_string_pub(slot_name)
-    );
+    // Check if slot exists before trying to drop
+    let row = conn
+        .query_opt(
+            "SELECT 1 FROM pg_replication_slots WHERE slot_name = $1",
+            &[&slot_name],
+        )
+        .await?;
 
-    exec_sql(client, namespace, cluster_name, "postgres", &sql).await?;
-    debug!(slot = %slot_name, "Replication slot dropped");
+    if row.is_some() {
+        // Use format! for the function call since pg_drop_replication_slot takes text
+        conn.execute("SELECT pg_drop_replication_slot($1)", &[&slot_name])
+            .await?;
+        debug!(slot = %slot_name, "Replication slot dropped");
+    }
 
     Ok(())
 }

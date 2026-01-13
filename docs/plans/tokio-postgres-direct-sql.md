@@ -1,6 +1,6 @@
 # Plan: Adopt tokio-postgres for Direct SQL Connections
 
-> **Status**: Parked - implement after upgrade operator testing is complete
+> **Status**: Ready for implementation - upgrade operator testing structure is complete
 
 ## Summary
 
@@ -20,6 +20,21 @@ Replace pod exec (`psql` CLI) with direct PostgreSQL connections using `tokio-po
 | Query Building | Prepared statements (`$1`, `$2`) | String interpolation (`format!()`) |
 | Result Handling | Typed via `row.get()` | Manual string parsing (split on `\|`) |
 
+### Test Infrastructure Maturity
+
+The existing test code provides a solid foundation for production use:
+
+| Module | Lines | Features |
+|--------|-------|----------|
+| `tests/integration/port_forward.rs` | 384 | RAII wrapper, label-based pod resolution (`spilo-role=master/replica`), automatic port selection |
+| `tests/integration/postgres.rs` | 831 | TLS modes (Disabled, RequireUnverified, RequireVerified), connection retry with exponential backoff, role-specific credential fetching, JDBC/connection string support |
+
+Key capabilities already implemented in test code:
+- `TlsMode` enum for flexible TLS configuration
+- `PostgresCredentials` struct with connection string generation
+- `verify_connection_with_retry()` for robust connectivity
+- `fetch_ca_certificate()` for TLS verification tests
+
 ## Benefits of Migration
 
 1. **Code simplification**: Single SQL execution path for tests and production
@@ -27,6 +42,45 @@ Replace pod exec (`psql` CLI) with direct PostgreSQL connections using `tokio-po
 3. **Typed results**: No manual string parsing - `row.get::<_, i64>("lag_bytes")` instead of `line.split('|').get(2).parse()`
 4. **Better error handling**: PostgreSQL error codes instead of string-matching "ERROR" in stderr
 5. **Remove dead code**: Delete `exec_sql()`, `escape_sql_string_pub()`, `quote_identifier_pub()`, and manual parsing logic
+
+## Upgrade Operator Integration
+
+The upgrade reconciler is a **major consumer** of SQL operations. This migration affects critical upgrade workflows:
+
+### SQL Operations in Upgrade Workflow
+
+**Setup Phase:**
+- `copy_schema()` - Dump DDL from source, apply to target
+- `setup_publication()` - Create logical replication publication on source
+- `setup_subscription()` - Create subscription on target with connection string
+
+**Monitoring Phase (Loop):**
+- `get_replication_lag()` - Monitor WAL sync progress via `pg_replication_slots`
+- `get_subscription_state()` - Check subscription status
+- `verify_row_counts()` - Cross-cluster data integrity validation
+
+**Pre-Cutover Phase:**
+- `set_source_readonly()` - `ALTER SYSTEM` to prevent writes
+- `sync_sequences()` - Copy sequence values from source to target
+- `wait_for_connections_drain()` - Check active connections
+
+**Cleanup Phase:**
+- `drop_subscription()`, `drop_publication()`, `drop_replication_slot()`
+- `set_source_readwrite()` - Restore write access on rollback
+
+### Connection Lifecycle
+
+The upgrade reconciler performs long-running operations with multiple SQL calls. The migration should reuse `PostgresConnection` within reconcile cycles rather than creating new connections per operation:
+
+```rust
+// Create connections once per reconcile, reuse across operations
+let source_conn = PostgresConnection::connect_primary(&client, &ns, &source_name).await?;
+let target_conn = PostgresConnection::connect_primary(&client, &ns, &target_name).await?;
+
+// Reuse connections
+let result = setup_publication(&source_conn, &pub_name).await?;
+let lag = get_replication_lag(&source_conn, &sub_name).await?;
+```
 
 ## Why tokio-postgres-rustls-improved
 
@@ -198,20 +252,50 @@ Change from passing `kube::Client` + namespace + cluster_name to SQL functions, 
 2. Pass connection to SQL functions
 3. Connection auto-closes on drop
 
-### Phase 7: Refactor Tests to Use Production Modules
+### Phase 7: Refactor ALL Tests to Use Production Modules
 
-**Goal**: Tests use the exact same code paths as production, eliminating duplication.
+**Goal**: Single code path for tests and production. No test-specific SQL helpers. Maximum code reuse.
 
 **Files to delete** (moved to `src/resources/`):
 - `tests/integration/postgres.rs`
 - `tests/integration/port_forward.rs`
 
-**Files to update**:
-- `tests/integration/main.rs` - Update imports
-- `tests/integration/database_tests.rs` - Use `PostgresConnection`
-- `tests/integration/upgrade_tests.rs` - Use `PostgresConnection`
-- `tests/integration/connectivity_tests.rs` - Use `PostgresConnection`
-- `tests/integration/tls_tests.rs` - Keep TLS-specific helpers, use production for base
+**All test files must use production modules:**
+
+| Test File | Current Pattern | New Pattern |
+|-----------|-----------------|-------------|
+| `database_tests.rs` | `fetch_credentials()`, `verify_database_exists()` | `PostgresConnection::connect_primary()`, `.query_opt()` |
+| `upgrade_tests.rs` | Direct `tokio_postgres::Config::new()` | `PostgresConnection::connect_primary()` |
+| `connectivity_tests.rs` | Custom connection helpers | `PostgresConnection` with TLS options |
+| `tls_tests.rs` | TLS-specific helpers | `PostgresConnection::connect_with_tls()` |
+| `scaling_tests.rs` | Connection verification | `PostgresConnection` |
+| `functional_tests.rs` | Ad-hoc connections | `PostgresConnection` |
+
+**TLS Support in Production Module:**
+
+The `PostgresConnection` must support TLS modes to enable TLS tests to use production code:
+
+```rust
+impl PostgresConnection {
+    /// Connect with TLS (for tls_tests.rs and production TLS support)
+    pub async fn connect_with_tls(
+        kube_client: &kube::Client,
+        namespace: &str,
+        service_name: &str,
+        port: u16,
+        credentials: &PostgresCredentials,
+        tls_mode: TlsMode,
+    ) -> Result<Self, Error>;
+}
+
+pub enum TlsMode {
+    Disabled,
+    RequireUnverified,  // Self-signed certs
+    RequireVerified { ca_cert_pem: String },
+}
+```
+
+**No direct tokio_postgres usage in tests** - all connections go through `PostgresConnection`.
 
 **Example test refactoring**:
 
@@ -239,36 +323,32 @@ async fn test_database_creation() {
 }
 ```
 
-**TLS tests** (`tls_tests.rs`):
-
-These tests verify that TLS works for external clients. They will continue to use `tokio-postgres-rustls-improved` to make TLS connections and verify SSL is active:
-
-```rust
-use tokio_postgres_rustls_improved::MakeRustlsConnect;
-
-async fn test_tls_connection() {
-    let pf = PortForward::start(...).await?;  // From production module
-    let tls = build_tls_connector(&ca_cert)?; // Use rustls-improved for TLS tests
-    let (client, conn) = tokio_postgres::connect(&config, tls).await?;
-    // Verify ssl_enabled = true
-}
-```
-
 ## Critical Files to Modify
 
+### Production Code
 | File | Action |
 |------|--------|
 | `Cargo.toml` | Move deps, replace `tokio-postgres-rustls` with `tokio-postgres-rustls-improved` |
 | `src/resources/mod.rs` | Export new modules |
 | `src/resources/port_forward.rs` | **NEW** - move from `tests/integration/port_forward.rs` |
-| `src/resources/postgres_client.rs` | **NEW** - merge from `tests/integration/postgres.rs` |
+| `src/resources/postgres_client.rs` | **NEW** - merge from `tests/integration/postgres.rs`, with TlsMode |
 | `src/resources/replication.rs` | **REWRITE** - use prepared statements |
 | `src/resources/sql.rs` | **REWRITE** - remove exec_sql, use PostgresConnection |
 | `src/controller/upgrade_reconciler.rs` | Update to use PostgresConnection |
 | `src/controller/database_reconciler.rs` | Update to use PostgresConnection |
-| `tests/integration/postgres.rs` | **DELETE** - use production module |
-| `tests/integration/port_forward.rs` | **DELETE** - use production module |
-| `tests/integration/*.rs` | Update imports to use `crate::resources::*` |
+
+### Test Code
+| File | Action |
+|------|--------|
+| `tests/integration/postgres.rs` | **DELETE** - moved to production |
+| `tests/integration/port_forward.rs` | **DELETE** - moved to production |
+| `tests/integration/main.rs` | Update imports |
+| `tests/integration/database_tests.rs` | Migrate to `PostgresConnection` |
+| `tests/integration/upgrade_tests.rs` | Migrate from direct `tokio_postgres::Config` |
+| `tests/integration/connectivity_tests.rs` | Migrate to `PostgresConnection` |
+| `tests/integration/tls_tests.rs` | Migrate to `PostgresConnection::connect_with_tls()` |
+| `tests/integration/scaling_tests.rs` | Migrate to `PostgresConnection` |
+| `tests/integration/functional_tests.rs` | Migrate to `PostgresConnection` |
 
 **Note**: No changes to `src/resources/patroni.rs` needed - existing pg_hba.conf already allows non-TLS connections.
 

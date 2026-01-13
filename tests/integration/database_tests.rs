@@ -13,8 +13,8 @@ use postgres_operator::crd::{
     DatabaseConditionType, DatabasePhase, PostgresCluster, PostgresDatabase, PostgresVersion,
     TablePrivilege,
 };
+use postgres_operator::resources::port_forward::{PortForward, PortForwardTarget};
 
-use crate::port_forward::{PortForward, PortForwardTarget};
 use crate::postgres::{
     CONNECT_RETRY_INTERVAL, MAX_CONNECT_RETRIES, POSTGRES_READY_TIMEOUT, decode_secret_value,
     fetch_credentials, fetch_role_credentials, query_extensions, verify_connection_with_retry,

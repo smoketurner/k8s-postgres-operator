@@ -41,7 +41,6 @@ mod cluster;
 mod crd;
 mod namespace;
 mod operator;
-mod port_forward;
 mod postgres;
 mod wait;
 
@@ -60,6 +59,5 @@ pub use common::*;
 pub use crd::*;
 pub use namespace::*;
 pub use operator::*;
-pub use port_forward::*;
 pub use postgres::*;
 pub use wait::*;

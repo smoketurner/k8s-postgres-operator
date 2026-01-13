@@ -5,6 +5,8 @@ pub mod network_policy;
 pub mod patroni;
 pub mod pdb;
 pub mod pgbouncer;
+pub mod port_forward;
+pub mod postgres_client;
 pub mod replication;
 pub mod scaled_object;
 pub mod secret;

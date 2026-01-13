@@ -1,8 +1,11 @@
-//! Port forwarding utilities for integration tests
+//! Port forwarding utilities for PostgreSQL connections
 //!
-//! Provides `PortForward` which uses kube-rs native port-forwarding.
+//! Provides `PortForward` which uses kube-rs native port-forwarding to establish
+//! connections to PostgreSQL pods. This enables direct SQL connections without
+//! requiring pod exec.
+//!
 //! When a `PortForward` goes out of scope, it will automatically stop
-//! the forwarding.
+//! the forwarding (RAII pattern).
 
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::ListParams;
@@ -16,6 +19,7 @@ use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
+/// Errors that can occur during port forwarding
 #[derive(Error, Debug)]
 pub enum PortForwardError {
     #[error("Kubernetes API error: {0}")]
@@ -297,6 +301,7 @@ async fn run_port_forward(
 }
 
 /// Handle a single port-forward connection
+#[allow(clippy::indexing_slicing)] // Safe: n is always <= buf.len() after read()
 async fn handle_connection(
     pods: Api<Pod>,
     pod_name: &str,
@@ -360,6 +365,7 @@ pub fn get_available_port() -> Result<u16, PortForwardError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

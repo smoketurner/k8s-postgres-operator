@@ -1,7 +1,8 @@
-//! SQL execution via pod exec
+//! SQL execution for PostgreSQL operations
 //!
-//! This module provides functionality to execute SQL commands in PostgreSQL pods
-//! via the Kubernetes exec API. Used for database and role provisioning.
+//! This module provides functionality to execute SQL commands in PostgreSQL.
+//! Uses direct PostgreSQL connections via tokio-postgres for most operations,
+//! and pod exec for CLI tools like pg_dump.
 
 // SQL provisioning functions naturally have many parameters (connection info + DDL options)
 #![allow(clippy::too_many_arguments)]
@@ -12,6 +13,8 @@ use kube::api::{Api, AttachParams};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tracing::debug;
+
+use super::postgres_client::{PostgresClientError, PostgresConnection};
 
 /// Errors that can occur during SQL execution
 #[derive(Error, Debug)]
@@ -35,94 +38,20 @@ pub enum SqlError {
     /// IO error during exec
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
+
+    /// PostgreSQL client error
+    #[error("PostgreSQL client error: {0}")]
+    PostgresClient(#[from] PostgresClientError),
 }
 
 /// Result type for SQL operations
 pub(crate) type SqlResult<T> = std::result::Result<T, SqlError>;
 
-/// Execute SQL on the primary pod of a PostgresCluster
-///
-/// # Arguments
-/// * `client` - Kubernetes client
-/// * `namespace` - Namespace of the cluster
-/// * `cluster_name` - Name of the PostgresCluster
-/// * `database` - Database to connect to (default: postgres)
-/// * `sql` - SQL command to execute
-///
-/// # Returns
-/// The output of the SQL command, or an error
-pub(crate) async fn exec_sql(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
-    database: &str,
-    sql: &str,
-) -> SqlResult<String> {
-    // Find the primary pod
-    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
+// ============================================================================
+// Pod Exec Functions (for CLI tools like pg_dump, psql)
+// ============================================================================
 
-    // Primary pods have the spilo-role=master label set by Patroni
-    let primary_selector = format!(
-        "postgres-operator.smoketurner.com/cluster={},spilo-role=master",
-        cluster_name
-    );
-
-    let pod_list = pods
-        .list(&kube::api::ListParams::default().labels(&primary_selector))
-        .await?;
-
-    let primary_pod = pod_list
-        .items
-        .into_iter()
-        .next()
-        .ok_or_else(|| SqlError::NoPrimaryPod {
-            cluster: cluster_name.to_string(),
-            namespace: namespace.to_string(),
-        })?;
-
-    let pod_name = primary_pod
-        .metadata
-        .name
-        .as_ref()
-        .ok_or_else(|| SqlError::ExecFailed("Pod has no name".to_string()))?;
-
-    debug!(
-        pod = %pod_name,
-        namespace = %namespace,
-        database = %database,
-        "Executing SQL on primary pod"
-    );
-
-    // Execute psql command
-    exec_psql(&pods, pod_name, database, sql).await
-}
-
-/// Execute psql command in a pod
-async fn exec_psql(
-    pods: &Api<Pod>,
-    pod_name: &str,
-    database: &str,
-    sql: &str,
-) -> SqlResult<String> {
-    // Build the psql command
-    // Use -A for unaligned output, -t for tuples only (no headers/footers)
-    // -c executes the command
-    let command = vec![
-        "psql".to_string(),
-        "-U".to_string(),
-        "postgres".to_string(),
-        "-d".to_string(),
-        database.to_string(),
-        "-A".to_string(),
-        "-t".to_string(),
-        "-c".to_string(),
-        sql.to_string(),
-    ];
-
-    exec_command_in_pod(pods, pod_name, command).await
-}
-
-/// Execute an arbitrary command in a pod
+/// Execute a command in a pod
 async fn exec_command_in_pod(
     pods: &Api<Pod>,
     pod_name: &str,
@@ -181,17 +110,21 @@ async fn exec_command_in_pod(
     Ok(stdout_output)
 }
 
-/// Dump schema from a PostgreSQL database using pg_dump
-///
-/// This exports the schema (tables, sequences, constraints, etc.) without data.
-/// The output is SQL DDL statements that can be executed on another database.
-pub(crate) async fn dump_schema(
+/// Read all data from an async read stream
+async fn read_stream<R: tokio::io::AsyncRead + Unpin>(mut reader: R) -> SqlResult<String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut buffer = Vec::new();
+    reader.read_to_end(&mut buffer).await?;
+    Ok(String::from_utf8_lossy(&buffer).to_string())
+}
+
+/// Find the primary pod for a cluster
+async fn find_primary_pod(
     client: &Client,
     namespace: &str,
     cluster_name: &str,
-    database: &str,
-) -> SqlResult<String> {
-    // Find the primary pod
+) -> SqlResult<(Api<Pod>, String)> {
     let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
 
     let primary_selector = format!(
@@ -215,8 +148,24 @@ pub(crate) async fn dump_schema(
     let pod_name = primary_pod
         .metadata
         .name
-        .as_ref()
         .ok_or_else(|| SqlError::ExecFailed("Pod has no name".to_string()))?;
+
+    Ok((pods, pod_name))
+}
+
+/// Dump schema from a PostgreSQL database using pg_dump
+///
+/// This exports the schema (tables, sequences, constraints, etc.) without data.
+/// The output is SQL DDL statements that can be executed on another database.
+///
+/// Note: This uses pod exec because pg_dump is a CLI tool.
+pub(crate) async fn dump_schema(
+    client: &Client,
+    namespace: &str,
+    cluster_name: &str,
+    database: &str,
+) -> SqlResult<String> {
+    let (pods, pod_name) = find_primary_pod(client, namespace, cluster_name).await?;
 
     debug!(
         pod = %pod_name,
@@ -245,12 +194,14 @@ pub(crate) async fn dump_schema(
         "--exclude-schema=admin".to_string(),
     ];
 
-    exec_command_in_pod(&pods, pod_name, command).await
+    exec_command_in_pod(&pods, &pod_name, command).await
 }
 
 /// Apply schema DDL to a PostgreSQL database using psql
 ///
 /// This executes the DDL statements from a pg_dump output on the target database.
+///
+/// Note: This uses pod exec because psql handles multi-statement input better.
 pub(crate) async fn apply_schema(
     client: &Client,
     namespace: &str,
@@ -258,32 +209,7 @@ pub(crate) async fn apply_schema(
     database: &str,
     schema_sql: &str,
 ) -> SqlResult<()> {
-    // Find the primary pod
-    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
-
-    let primary_selector = format!(
-        "postgres-operator.smoketurner.com/cluster={},spilo-role=master",
-        cluster_name
-    );
-
-    let pod_list = pods
-        .list(&kube::api::ListParams::default().labels(&primary_selector))
-        .await?;
-
-    let primary_pod = pod_list
-        .items
-        .into_iter()
-        .next()
-        .ok_or_else(|| SqlError::NoPrimaryPod {
-            cluster: cluster_name.to_string(),
-            namespace: namespace.to_string(),
-        })?;
-
-    let pod_name = primary_pod
-        .metadata
-        .name
-        .as_ref()
-        .ok_or_else(|| SqlError::ExecFailed("Pod has no name".to_string()))?;
+    let (pods, pod_name) = find_primary_pod(client, namespace, cluster_name).await?;
 
     debug!(
         pod = %pod_name,
@@ -307,7 +233,7 @@ pub(crate) async fn apply_schema(
         ),
     ];
 
-    let output = exec_command_in_pod(&pods, pod_name, command).await?;
+    let output = exec_command_in_pod(&pods, &pod_name, command).await?;
 
     // Check if there are any real errors (not "already exists")
     if output.contains("ERROR:") {
@@ -323,69 +249,50 @@ fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\"'\"'"))
 }
 
-/// Read all data from an async read stream
-async fn read_stream<R: tokio::io::AsyncRead + Unpin>(mut reader: R) -> SqlResult<String> {
-    use tokio::io::AsyncReadExt;
-
-    let mut buffer = Vec::new();
-    reader.read_to_end(&mut buffer).await?;
-    Ok(String::from_utf8_lossy(&buffer).to_string())
-}
+// ============================================================================
+// Direct SQL Functions (using PostgresConnection)
+// ============================================================================
 
 /// Check if a database exists
 pub(crate) async fn database_exists(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
+    conn: &PostgresConnection,
     database_name: &str,
 ) -> SqlResult<bool> {
-    let sql = format!(
-        "SELECT 1 FROM pg_database WHERE datname = '{}'",
-        escape_sql_string(database_name)
-    );
-
-    let result = exec_sql(client, namespace, cluster_name, "postgres", &sql).await?;
-    Ok(!result.trim().is_empty())
+    let row = conn
+        .query_opt(
+            "SELECT 1 FROM pg_database WHERE datname = $1",
+            &[&database_name],
+        )
+        .await?;
+    Ok(row.is_some())
 }
 
 /// Check if a role exists
-pub(crate) async fn role_exists(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
-    role_name: &str,
-) -> SqlResult<bool> {
-    let sql = format!(
-        "SELECT 1 FROM pg_roles WHERE rolname = '{}'",
-        escape_sql_string(role_name)
-    );
-
-    let result = exec_sql(client, namespace, cluster_name, "postgres", &sql).await?;
-    Ok(!result.trim().is_empty())
+pub(crate) async fn role_exists(conn: &PostgresConnection, role_name: &str) -> SqlResult<bool> {
+    let row = conn
+        .query_opt("SELECT 1 FROM pg_roles WHERE rolname = $1", &[&role_name])
+        .await?;
+    Ok(row.is_some())
 }
 
 /// Ensure a database exists (idempotent - creates if not exists)
 ///
 /// Returns true if the database was created, false if it already existed.
 pub(crate) async fn ensure_database(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
+    conn: &PostgresConnection,
     database_name: &str,
     owner: &str,
     encoding: Option<&str>,
     locale: Option<&str>,
     connection_limit: Option<i32>,
 ) -> SqlResult<bool> {
-    if database_exists(client, namespace, cluster_name, database_name).await? {
+    if database_exists(conn, database_name).await? {
         debug!(database = %database_name, "Database already exists");
         return Ok(false);
     }
 
     create_database(
-        client,
-        namespace,
-        cluster_name,
+        conn,
         database_name,
         owner,
         encoding,
@@ -399,10 +306,11 @@ pub(crate) async fn ensure_database(
 /// Create a database (not idempotent - will fail if database exists)
 ///
 /// Prefer `ensure_database` for reconciliation loops.
+///
+/// Note: CREATE DATABASE doesn't support parameterized queries for identifiers,
+/// so we use quote_identifier() to safely quote names.
 pub(crate) async fn create_database(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
+    conn: &PostgresConnection,
     database_name: &str,
     owner: &str,
     encoding: Option<&str>,
@@ -427,7 +335,7 @@ pub(crate) async fn create_database(
         sql.push_str(&format!(" CONNECTION LIMIT {}", limit));
     }
 
-    exec_sql(client, namespace, cluster_name, "postgres", &sql).await?;
+    conn.batch_execute(&sql).await?;
     Ok(())
 }
 
@@ -436,26 +344,22 @@ pub(crate) async fn create_database(
 /// Returns true if the role was created, false if it already existed.
 /// If the role exists, the password is updated to match.
 pub(crate) async fn ensure_role(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
+    conn: &PostgresConnection,
     role_name: &str,
     password: &str,
     privileges: &[String],
     connection_limit: Option<i32>,
     login: bool,
 ) -> SqlResult<bool> {
-    if role_exists(client, namespace, cluster_name, role_name).await? {
+    if role_exists(conn, role_name).await? {
         debug!(role = %role_name, "Role already exists, updating password");
         // Update password to ensure it matches the secret
-        update_role_password(client, namespace, cluster_name, role_name, password).await?;
+        update_role_password(conn, role_name, password).await?;
         return Ok(false);
     }
 
     create_role(
-        client,
-        namespace,
-        cluster_name,
+        conn,
         role_name,
         password,
         privileges,
@@ -469,10 +373,11 @@ pub(crate) async fn ensure_role(
 /// Create a role (not idempotent - will fail if role exists)
 ///
 /// Prefer `ensure_role` for reconciliation loops.
+///
+/// Note: CREATE ROLE doesn't support parameterized queries for identifiers,
+/// so we use quote_identifier() to safely quote names.
 pub(crate) async fn create_role(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
+    conn: &PostgresConnection,
     role_name: &str,
     password: &str,
     privileges: &[String],
@@ -497,15 +402,13 @@ pub(crate) async fn create_role(
         sql.push_str(&format!(" CONNECTION LIMIT {}", limit));
     }
 
-    exec_sql(client, namespace, cluster_name, "postgres", &sql).await?;
+    conn.batch_execute(&sql).await?;
     Ok(())
 }
 
 /// Update a role's password
 pub(crate) async fn update_role_password(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
+    conn: &PostgresConnection,
     role_name: &str,
     password: &str,
 ) -> SqlResult<()> {
@@ -515,43 +418,32 @@ pub(crate) async fn update_role_password(
         escape_sql_string(password)
     );
 
-    exec_sql(client, namespace, cluster_name, "postgres", &sql).await?;
+    conn.batch_execute(&sql).await?;
     Ok(())
 }
 
 /// Drop a role
-pub(crate) async fn drop_role(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
-    role_name: &str,
-) -> SqlResult<()> {
+pub(crate) async fn drop_role(conn: &PostgresConnection, role_name: &str) -> SqlResult<()> {
     let sql = format!("DROP ROLE IF EXISTS {}", quote_identifier(role_name));
-    exec_sql(client, namespace, cluster_name, "postgres", &sql).await?;
+    conn.batch_execute(&sql).await?;
     Ok(())
 }
 
 /// Drop a database
-pub(crate) async fn drop_database(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
-    database_name: &str,
-) -> SqlResult<()> {
+pub(crate) async fn drop_database(conn: &PostgresConnection, database_name: &str) -> SqlResult<()> {
     let sql = format!(
         "DROP DATABASE IF EXISTS {}",
         quote_identifier(database_name)
     );
-    exec_sql(client, namespace, cluster_name, "postgres", &sql).await?;
+    conn.batch_execute(&sql).await?;
     Ok(())
 }
 
 /// Grant table privileges
+///
+/// Note: GRANT doesn't support parameterized queries for identifiers.
 pub(crate) async fn grant_privileges(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
-    database_name: &str,
+    conn: &PostgresConnection,
     role: &str,
     schema: &str,
     privileges: &[String],
@@ -575,25 +467,26 @@ pub(crate) async fn grant_privileges(
         quote_identifier(role)
     );
 
-    exec_sql(client, namespace, cluster_name, database_name, &sql).await?;
+    conn.batch_execute(&sql).await?;
     Ok(())
 }
 
 /// Create an extension
 pub(crate) async fn create_extension(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
-    database_name: &str,
+    conn: &PostgresConnection,
     extension_name: &str,
 ) -> SqlResult<()> {
     let sql = format!(
         "CREATE EXTENSION IF NOT EXISTS {}",
         quote_identifier(extension_name)
     );
-    exec_sql(client, namespace, cluster_name, database_name, &sql).await?;
+    conn.batch_execute(&sql).await?;
     Ok(())
 }
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
 
 /// Quote a SQL identifier (table name, column name, etc.)
 /// Uses PostgreSQL's standard double-quote escaping

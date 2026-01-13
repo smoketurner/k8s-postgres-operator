@@ -17,6 +17,7 @@ use crate::crd::{
     ClusterPhase, DatabaseCondition, DatabaseConditionType, DatabaseConnectionInfo, DatabasePhase,
     GrantSpec, PostgresCluster, PostgresDatabase, PostgresDatabaseStatus, RoleSpec,
 };
+use crate::resources::postgres_client::PostgresConnection;
 use crate::resources::sql::{
     self, SqlError, create_extension, drop_database, drop_role, ensure_database, ensure_role,
     generate_password, grant_privileges,
@@ -56,6 +57,9 @@ pub enum DatabaseError {
 
     #[error("Serialization error: {0}")]
     SerializationError(#[from] serde_json::Error),
+
+    #[error("PostgreSQL client error: {0}")]
+    PostgresClientError(#[from] crate::resources::postgres_client::PostgresClientError),
 }
 
 /// Result type for database reconciliation
@@ -267,30 +271,21 @@ async fn provision_database(
         "Provisioning database"
     );
 
+    // Connect to the cluster's primary
+    let conn = PostgresConnection::connect_primary(&ctx.client, namespace, &cluster_name).await?;
+
     // First, ensure the owner role exists (create with a temporary password if needed)
     // The owner needs to exist before we can create the database
-    let owner_exists = sql::role_exists(&ctx.client, namespace, &cluster_name, owner).await?;
+    let owner_exists = sql::role_exists(&conn, owner).await?;
     if !owner_exists {
         debug!(role = %owner, "Creating owner role");
         let temp_password = generate_password();
-        sql::create_role(
-            &ctx.client,
-            namespace,
-            &cluster_name,
-            owner,
-            &temp_password,
-            &[],
-            None,
-            true,
-        )
-        .await?;
+        sql::create_role(&conn, owner, &temp_password, &[], None, true).await?;
     }
 
     // Create the database
     ensure_database(
-        &ctx.client,
-        namespace,
-        &cluster_name,
+        &conn,
         db_name,
         owner,
         db.spec.database.encoding.as_deref(),
@@ -299,23 +294,29 @@ async fn provision_database(
     )
     .await?;
 
+    // For extensions and grants, we need to connect to the target database
+    // Create a new connection to the specific database
+    let db_conn =
+        PostgresConnection::connect_database(&ctx.client, namespace, &cluster_name, db_name)
+            .await?;
+
     // Create extensions
     for extension in &db.spec.extensions {
         debug!(extension = %extension, database = %db_name, "Creating extension");
-        create_extension(&ctx.client, namespace, &cluster_name, db_name, extension).await?;
+        create_extension(&db_conn, extension).await?;
     }
 
-    // Create roles and secrets
+    // Create roles and secrets (still use the postgres database connection)
     let mut created_secrets = Vec::new();
     for role_spec in &db.spec.roles {
         let secret_name =
-            create_role_with_secret(db, ctx, cluster, namespace, db_name, role_spec).await?;
+            create_role_with_secret(db, ctx, cluster, namespace, db_name, role_spec, &conn).await?;
         created_secrets.push(secret_name);
     }
 
-    // Apply grants
+    // Apply grants (use the target database connection)
     for grant in &db.spec.grants {
-        apply_grant(&ctx.client, namespace, &cluster_name, db_name, grant).await?;
+        apply_grant(&db_conn, grant).await?;
     }
 
     Ok(created_secrets)
@@ -329,6 +330,7 @@ async fn create_role_with_secret(
     namespace: &str,
     db_name: &str,
     role_spec: &RoleSpec,
+    conn: &PostgresConnection,
 ) -> Result<String> {
     let cluster_name = cluster.name_any();
     let role_name = &role_spec.name;
@@ -357,9 +359,7 @@ async fn create_role_with_secret(
 
     // Create or update the role
     ensure_role(
-        &ctx.client,
-        namespace,
-        &cluster_name,
+        conn,
         role_name,
         &password,
         &privileges,
@@ -451,13 +451,7 @@ async fn create_role_with_secret(
 }
 
 /// Apply a grant specification
-async fn apply_grant(
-    client: &Client,
-    namespace: &str,
-    cluster_name: &str,
-    db_name: &str,
-    grant: &GrantSpec,
-) -> Result<()> {
+async fn apply_grant(conn: &PostgresConnection, grant: &GrantSpec) -> Result<()> {
     let privileges: Vec<String> = grant
         .privileges
         .iter()
@@ -465,17 +459,7 @@ async fn apply_grant(
         .collect();
 
     if !privileges.is_empty() && grant.all_tables {
-        grant_privileges(
-            client,
-            namespace,
-            cluster_name,
-            db_name,
-            &grant.role,
-            &grant.schema,
-            &privileges,
-            true,
-        )
-        .await?;
+        grant_privileges(conn, &grant.role, &grant.schema, &privileges, true).await?;
     }
 
     // Grant USAGE on schema
@@ -484,7 +468,7 @@ async fn apply_grant(
         sql::quote_identifier_pub(&grant.schema),
         sql::quote_identifier_pub(&grant.role)
     );
-    sql::exec_sql(client, namespace, cluster_name, db_name, &usage_sql).await?;
+    conn.batch_execute(&usage_sql).await?;
 
     Ok(())
 }
@@ -512,37 +496,26 @@ async fn handle_deletion(
             .unwrap_or(&ClusterPhase::Pending);
 
         if *cluster_phase == ClusterPhase::Running {
-            // Drop roles first (they depend on the database)
-            for role_spec in &db.spec.roles {
-                if let Err(e) =
-                    drop_role(&ctx.client, namespace, &cluster_name, &role_spec.name).await
-                {
-                    warn!(role = %role_spec.name, error = %e, "Failed to drop role during cleanup");
+            // Connect to the cluster
+            if let Ok(conn) =
+                PostgresConnection::connect_primary(&ctx.client, namespace, &cluster_name).await
+            {
+                // Drop roles first (they depend on the database)
+                for role_spec in &db.spec.roles {
+                    if let Err(e) = drop_role(&conn, &role_spec.name).await {
+                        warn!(role = %role_spec.name, error = %e, "Failed to drop role during cleanup");
+                    }
                 }
-            }
 
-            // Drop the owner role if it was created by us
-            if let Err(e) = drop_role(
-                &ctx.client,
-                namespace,
-                &cluster_name,
-                &db.spec.database.owner,
-            )
-            .await
-            {
-                warn!(role = %db.spec.database.owner, error = %e, "Failed to drop owner role during cleanup");
-            }
+                // Drop the owner role if it was created by us
+                if let Err(e) = drop_role(&conn, &db.spec.database.owner).await {
+                    warn!(role = %db.spec.database.owner, error = %e, "Failed to drop owner role during cleanup");
+                }
 
-            // Drop the database
-            if let Err(e) = drop_database(
-                &ctx.client,
-                namespace,
-                &cluster_name,
-                &db.spec.database.name,
-            )
-            .await
-            {
-                warn!(database = %db.spec.database.name, error = %e, "Failed to drop database during cleanup");
+                // Drop the database
+                if let Err(e) = drop_database(&conn, &db.spec.database.name).await {
+                    warn!(database = %db.spec.database.name, error = %e, "Failed to drop database during cleanup");
+                }
             }
         } else {
             warn!(

@@ -429,6 +429,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
+ "const-oid",
  "crypto-common",
  "subtle",
 ]
@@ -1394,7 +1395,7 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "tokio-postgres",
- "tokio-postgres-rustls",
+ "tokio-postgres-rustls-improved",
  "tokio-test",
  "tracing",
  "tracing-subscriber",
@@ -2129,14 +2130,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokio-postgres-rustls"
-version = "0.13.0"
+name = "tokio-postgres-rustls-improved"
+version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27d684bad428a0f2481f42241f821db42c54e2dc81d8c00db8536c506b0a0144"
+checksum = "14825be0f2b3ecfee9df1e7dcd3e6b7ee82c69a865ff0ab9adb61e17a8e0732f"
 dependencies = [
- "const-oid",
- "ring",
  "rustls",
+ "sha2",
  "tokio",
  "tokio-postgres",
  "tokio-rustls",

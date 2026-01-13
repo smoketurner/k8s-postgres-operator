@@ -14,10 +14,10 @@
 use kube::Api;
 use kube::api::{DeleteParams, Patch, PatchParams, PostParams};
 use postgres_operator::crd::{PostgresCluster, PostgresUpgrade, PostgresVersion, UpgradePhase};
+use postgres_operator::resources::port_forward::{PortForward, PortForwardTarget};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::port_forward::{PortForward, PortForwardTarget};
 use crate::postgres::{
     CONNECT_RETRY_INTERVAL, MAX_CONNECT_RETRIES, POSTGRES_READY_TIMEOUT, fetch_credentials,
     verify_connection_with_retry,

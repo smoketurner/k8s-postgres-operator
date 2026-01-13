@@ -15,8 +15,8 @@
 use kube::Api;
 use kube::api::PostParams;
 use postgres_operator::crd::{PostgresCluster, PostgresVersion};
+use postgres_operator::resources::port_forward::{PortForward, PortForwardTarget};
 
-use crate::port_forward::{PortForward, PortForwardTarget};
 use crate::postgres::{
     CONNECT_RETRY_INTERVAL, MAX_CONNECT_RETRIES, POSTGRES_READY_TIMEOUT, execute_sql,
     fetch_credentials, verify_connection_with_retry,

@@ -34,6 +34,7 @@ use crate::crd::{
     ClusterPhase, CutoverMode, PostgresCluster, PostgresClusterSpec, PostgresUpgrade,
     ReplicationStatus, SequenceSyncStatus, UpgradePhase, VerificationStatus,
 };
+use crate::resources::postgres_client::PostgresConnection;
 use crate::resources::replication::{
     self, LagStatus, ReplicationError, RowCountVerification, SequenceSyncResult,
 };
@@ -343,16 +344,21 @@ async fn determine_event_for_phase(
             let target_name = generate_target_cluster_name(&upgrade.name_any());
             let sub_name = generate_subscription_name(&upgrade.name_any());
 
-            match replication::get_subscription_state(&ctx.client, ns, &target_name, &sub_name)
-                .await
-            {
-                Ok(state) if state.is_active() || state.is_syncing() => {
-                    Ok(Some(UpgradeEvent::ReplicationConfigured))
-                }
-                Ok(_) => Ok(None),
-                Err(ReplicationError::SubscriptionNotFound(_)) => Ok(None),
+            // Connect to target cluster to check subscription state
+            match PostgresConnection::connect_primary(&ctx.client, ns, &target_name).await {
+                Ok(conn) => match replication::get_subscription_state(&conn, &sub_name).await {
+                    Ok(state) if state.is_active() || state.is_syncing() => {
+                        Ok(Some(UpgradeEvent::ReplicationConfigured))
+                    }
+                    Ok(_) => Ok(None),
+                    Err(ReplicationError::SubscriptionNotFound(_)) => Ok(None),
+                    Err(e) => {
+                        warn!("Error checking subscription state: {}", e);
+                        Ok(None)
+                    }
+                },
                 Err(e) => {
-                    warn!("Error checking subscription state: {}", e);
+                    warn!("Failed to connect to target cluster: {}", e);
                     Ok(None)
                 }
             }
@@ -460,7 +466,11 @@ async fn execute_phase_transition(
                 .as_deref()
                 .unwrap_or(ns);
 
-            replication::set_source_readonly(&ctx.client, source_ns, source_name).await?;
+            // Connect to source and set read-only
+            let source_conn =
+                PostgresConnection::connect_primary(&ctx.client, source_ns, source_name).await?;
+            replication::set_source_readonly(&source_conn).await?;
+
             sync_sequences(upgrade, ctx, ns).await?;
         }
 
@@ -637,6 +647,7 @@ async fn setup_replication(
 
     // Copy schema from source to target before setting up replication
     // Logical replication only replicates DML (data), not DDL (schema)
+    // Note: copy_schema still uses pod exec for pg_dump
     info!(
         "Copying schema from source {} to target {} for upgrade {}",
         source_name,
@@ -653,8 +664,10 @@ async fn setup_replication(
     )
     .await?;
 
-    // Create publication on source
-    replication::setup_publication(&ctx.client, source_ns, source_name, &pub_name).await?;
+    // Connect to source cluster and create publication
+    let source_conn =
+        PostgresConnection::connect_primary(&ctx.client, source_ns, source_name).await?;
+    replication::setup_publication(&source_conn, &pub_name).await?;
 
     // Get source cluster service host
     let source_host = format!("{}-primary.{}.svc", source_name, source_ns);
@@ -662,11 +675,10 @@ async fn setup_replication(
     // Get source credentials (simplified - in production, get from secret)
     let source_password = get_postgres_password(&ctx.client, source_ns, source_name).await?;
 
-    // Create subscription on target
+    // Connect to target cluster and create subscription
+    let target_conn = PostgresConnection::connect_primary(&ctx.client, ns, &target_name).await?;
     replication::setup_subscription(
-        &ctx.client,
-        ns,
-        &target_name,
+        &target_conn,
         &sub_name,
         &source_host,
         5432,
@@ -700,7 +712,10 @@ async fn get_replication_lag(
         .unwrap_or(ns);
     let sub_name = generate_subscription_name(&upgrade.name_any());
 
-    let lag = replication::get_replication_lag(&ctx.client, source_ns, source_name, &sub_name)
+    // Connect to source cluster and get replication lag
+    let source_conn =
+        PostgresConnection::connect_primary(&ctx.client, source_ns, source_name).await?;
+    let lag = replication::get_replication_lag(&source_conn, &sub_name)
         .await
         .map_err(|e| UpgradeError::SqlError(e.to_string()))?;
 
@@ -724,16 +739,14 @@ async fn run_verification(
 
     let tolerance = upgrade.spec.strategy.pre_checks.row_count_tolerance;
 
-    let verification = replication::verify_row_counts(
-        &ctx.client,
-        source_ns,
-        source_name,
-        ns,
-        &target_name,
-        tolerance,
-    )
-    .await
-    .map_err(|e| UpgradeError::SqlError(e.to_string()))?;
+    // Connect to both clusters
+    let source_conn =
+        PostgresConnection::connect_primary(&ctx.client, source_ns, source_name).await?;
+    let target_conn = PostgresConnection::connect_primary(&ctx.client, ns, &target_name).await?;
+
+    let verification = replication::verify_row_counts(&source_conn, &target_conn, tolerance)
+        .await
+        .map_err(|e| UpgradeError::SqlError(e.to_string()))?;
 
     Ok(verification)
 }
@@ -753,7 +766,12 @@ async fn sync_sequences(
         .unwrap_or(ns);
     let target_name = generate_target_cluster_name(&upgrade.name_any());
 
-    let result = replication::sync_sequences(&ctx.client, source_ns, source_name, ns, &target_name)
+    // Connect to both clusters
+    let source_conn =
+        PostgresConnection::connect_primary(&ctx.client, source_ns, source_name).await?;
+    let target_conn = PostgresConnection::connect_primary(&ctx.client, ns, &target_name).await?;
+
+    let result = replication::sync_sequences(&source_conn, &target_conn)
         .await
         .map_err(|e| UpgradeError::SqlError(e.to_string()))?;
 
@@ -825,23 +843,24 @@ async fn cleanup_replication(
     let pub_name = generate_publication_name(&upgrade.name_any());
     let sub_name = generate_subscription_name(&upgrade.name_any());
 
-    // Drop subscription on target
-    if let Err(e) = replication::drop_subscription(&ctx.client, ns, &target_name, &sub_name).await {
+    // Try to connect to target and drop subscription
+    if let Ok(target_conn) =
+        PostgresConnection::connect_primary(&ctx.client, ns, &target_name).await
+        && let Err(e) = replication::drop_subscription(&target_conn, &sub_name).await
+    {
         warn!("Failed to drop subscription {}: {}", sub_name, e);
     }
 
-    // Drop publication on source
-    if let Err(e) =
-        replication::drop_publication(&ctx.client, source_ns, source_name, &pub_name).await
+    // Try to connect to source and drop publication/replication slot
+    if let Ok(source_conn) =
+        PostgresConnection::connect_primary(&ctx.client, source_ns, source_name).await
     {
-        warn!("Failed to drop publication {}: {}", pub_name, e);
-    }
-
-    // Drop replication slot on source
-    if let Err(e) =
-        replication::drop_replication_slot(&ctx.client, source_ns, source_name, &sub_name).await
-    {
-        warn!("Failed to drop replication slot {}: {}", sub_name, e);
+        if let Err(e) = replication::drop_publication(&source_conn, &pub_name).await {
+            warn!("Failed to drop publication {}: {}", pub_name, e);
+        }
+        if let Err(e) = replication::drop_replication_slot(&source_conn, &sub_name).await {
+            warn!("Failed to drop replication slot {}: {}", sub_name, e);
+        }
     }
 
     info!("Cleaned up replication for upgrade {}", upgrade.name_any());
@@ -896,7 +915,10 @@ async fn handle_rollback(
         .unwrap_or(ns);
 
     // Set source back to read-write
-    if let Err(e) = replication::set_source_readwrite(&ctx.client, source_ns, source_name).await {
+    if let Ok(source_conn) =
+        PostgresConnection::connect_primary(&ctx.client, source_ns, source_name).await
+        && let Err(e) = replication::set_source_readwrite(&source_conn).await
+    {
         warn!("Failed to set source read-write during rollback: {}", e);
     }
 

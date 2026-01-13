@@ -55,6 +55,10 @@ pub enum UpgradeError {
     #[error("Replication error: {0}")]
     ReplicationError(#[from] crate::resources::replication::ReplicationError),
 
+    /// PostgreSQL client error
+    #[error("PostgreSQL client error: {0}")]
+    PostgresClientError(#[from] crate::resources::postgres_client::PostgresClientError),
+
     /// Source cluster not ready
     #[error("Source cluster not ready: {0}")]
     SourceClusterNotReady(String),
@@ -143,6 +147,7 @@ impl UpgradeError {
             // Transient errors are retryable
             UpgradeError::KubeError(_)
                 | UpgradeError::ReplicationError(_)
+                | UpgradeError::PostgresClientError(_)
                 | UpgradeError::SourceClusterNotReady(_)
                 | UpgradeError::TargetClusterNotReady(_)
                 | UpgradeError::TargetCreationInProgress
