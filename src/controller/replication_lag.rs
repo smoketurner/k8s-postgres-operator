@@ -62,11 +62,11 @@ const DEFAULT_THROUGHPUT_MB_PER_SEC: i32 = 100;
 const MAX_LABEL_VALUE_LENGTH: usize = 63;
 
 /// Result type for replication lag operations
-pub type Result<T> = std::result::Result<T, ReplicationLagError>;
+pub(crate) type Result<T> = std::result::Result<T, ReplicationLagError>;
 
 /// Errors that can occur during replication lag collection
 #[derive(Debug, thiserror::Error)]
-pub enum ReplicationLagError {
+pub(crate) enum ReplicationLagError {
     /// Kubernetes API error (transient - may be retried)
     #[error("Kubernetes API error: {0}")]
     KubeError(#[from] kube::Error),

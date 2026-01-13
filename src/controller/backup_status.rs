@@ -27,11 +27,11 @@ const EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 use crate::crd::{BackupStatus, PostgresCluster};
 
 /// Result type for backup status operations
-pub type Result<T> = std::result::Result<T, BackupStatusError>;
+pub(crate) type Result<T> = std::result::Result<T, BackupStatusError>;
 
 /// Errors that can occur during backup status collection
 #[derive(Debug, thiserror::Error)]
-pub enum BackupStatusError {
+pub(crate) enum BackupStatusError {
     /// Kubernetes API error
     #[error("Kubernetes API error: {0}")]
     KubeError(#[from] kube::Error),
@@ -445,7 +445,7 @@ impl BackupStatusCollector {
 
 /// Events that can be emitted based on backup status changes
 #[derive(Debug, Clone, PartialEq)]
-pub enum BackupEvent {
+pub(crate) enum BackupEvent {
     /// A new backup was completed successfully
     BackupCompleted {
         name: String,
@@ -462,7 +462,7 @@ pub enum BackupEvent {
 /// Detect backup events by comparing previous and current status
 ///
 /// Returns a list of events that should be emitted by the reconciler.
-pub fn detect_backup_events(
+pub(crate) fn detect_backup_events(
     previous: Option<&BackupStatus>,
     current: &BackupStatus,
 ) -> Vec<BackupEvent> {
@@ -523,7 +523,7 @@ pub fn detect_backup_events(
 ///
 /// Only updates fields that have values in the new status, preserving
 /// existing values for fields that are None in the new status.
-pub fn update_backup_status(status: &mut BackupStatus, new_status: BackupStatus) {
+pub(crate) fn update_backup_status(status: &mut BackupStatus, new_status: BackupStatus) {
     // Macro to reduce boilerplate for optional field updates
     macro_rules! update_if_some {
         ($($field:ident),+ $(,)?) => {

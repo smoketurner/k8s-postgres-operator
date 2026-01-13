@@ -1,9 +1,9 @@
-pub mod backup_status;
+pub(crate) mod backup_status;
 pub mod context;
 pub mod database_reconciler;
 pub mod error;
 pub mod reconciler;
-pub mod replication_lag;
+pub(crate) mod replication_lag;
 pub mod state_machine;
 pub mod status;
 pub mod validation;
