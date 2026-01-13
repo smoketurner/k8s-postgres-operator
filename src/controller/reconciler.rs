@@ -108,16 +108,23 @@ async fn check_missing_resources(
         .is_none();
 
     // Check Services
+    // Note: the -repl service is only created when replicas > 1
     let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
-    let services = svc_api
+    let primary_missing = svc_api
         .get_opt(&format!("{}-primary", name))
         .await?
-        .is_none()
-        || svc_api.get_opt(&format!("{}-repl", name)).await?.is_none()
-        || svc_api
-            .get_opt(&format!("{}-headless", name))
-            .await?
-            .is_none();
+        .is_none();
+    let headless_missing = svc_api
+        .get_opt(&format!("{}-headless", name))
+        .await?
+        .is_none();
+    // Only check for replicas service if replicas > 1
+    let repl_missing = if cluster.spec.replicas > 1 {
+        svc_api.get_opt(&format!("{}-repl", name)).await?.is_none()
+    } else {
+        false // Single replica mode doesn't need -repl service
+    };
+    let services = primary_missing || headless_missing || repl_missing;
 
     // Check StatefulSet
     let sts_api: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), ns);

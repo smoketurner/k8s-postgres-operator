@@ -691,3 +691,25 @@ spec:
                 replicasLagging:
                   type: boolean
                   description: Whether any replica exceeds the configured lag threshold
+                connectionInfo:
+                  type: object
+                  description: Connection information for applications to connect to this cluster
+                  properties:
+                    primary:
+                      type: string
+                      description: "Primary (read-write) service endpoint. Format: {cluster}-primary.{namespace}.svc:5432"
+                    replicas:
+                      type: string
+                      description: "Replica (read-only) service endpoint. Format: {cluster}-repl.{namespace}.svc:5432"
+                    pooler:
+                      type: string
+                      description: "PgBouncer pooler endpoint for primary connections. Format: {cluster}-pooler.{namespace}.svc:6432"
+                    poolerReplicas:
+                      type: string
+                      description: "PgBouncer pooler endpoint for replica connections. Format: {cluster}-pooler-repl.{namespace}.svc:6432"
+                    credentialsSecret:
+                      type: string
+                      description: Name of the Secret containing database credentials
+                    database:
+                      type: string
+                      description: Default database name
