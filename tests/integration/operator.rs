@@ -113,6 +113,94 @@ impl ScopedOperator {
         }
     }
 
+    /// Start operators for PostgresCluster and PostgresUpgrade in a namespace
+    ///
+    /// This runs both the cluster controller and the upgrade controller
+    /// concurrently, scoped to the specified namespace.
+    pub async fn start_with_upgrade(client: Client, namespace: &str) -> Self {
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let ns = namespace.to_string();
+        let ns_clone = ns.clone();
+
+        tracing::info!(
+            "Starting scoped operators (cluster + upgrade) in namespace: {}",
+            ns
+        );
+
+        let cluster_client = client.clone();
+        let upgrade_client = client;
+        let ns_for_upgrade = ns_clone.clone();
+
+        let handle = tokio::spawn(async move {
+            tokio::select! {
+                _ = run_operator(cluster_client, &ns_clone) => {
+                    tracing::debug!("Cluster operator exited normally");
+                }
+                _ = run_upgrade_operator(upgrade_client, &ns_for_upgrade) => {
+                    tracing::debug!("Upgrade operator exited normally");
+                }
+                _ = shutdown_rx => {
+                    tracing::debug!("Operators received shutdown signal");
+                }
+            }
+        });
+
+        // Give the controllers a moment to start watching
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        Self {
+            handle,
+            shutdown_tx: Some(shutdown_tx),
+            namespace: ns,
+        }
+    }
+
+    /// Start all operators (cluster, database, and upgrade) in a namespace
+    ///
+    /// This runs all three controllers concurrently, scoped to the specified namespace.
+    pub async fn start_all(client: Client, namespace: &str) -> Self {
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let ns = namespace.to_string();
+        let ns_clone = ns.clone();
+
+        tracing::info!(
+            "Starting scoped operators (cluster + database + upgrade) in namespace: {}",
+            ns
+        );
+
+        let cluster_client = client.clone();
+        let database_client = client.clone();
+        let upgrade_client = client;
+        let ns_for_db = ns_clone.clone();
+        let ns_for_upgrade = ns_clone.clone();
+
+        let handle = tokio::spawn(async move {
+            tokio::select! {
+                _ = run_operator(cluster_client, &ns_clone) => {
+                    tracing::debug!("Cluster operator exited normally");
+                }
+                _ = run_database_operator(database_client, &ns_for_db) => {
+                    tracing::debug!("Database operator exited normally");
+                }
+                _ = run_upgrade_operator(upgrade_client, &ns_for_upgrade) => {
+                    tracing::debug!("Upgrade operator exited normally");
+                }
+                _ = shutdown_rx => {
+                    tracing::debug!("Operators received shutdown signal");
+                }
+            }
+        });
+
+        // Give the controllers a moment to start watching
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        Self {
+            handle,
+            shutdown_tx: Some(shutdown_tx),
+            namespace: ns,
+        }
+    }
+
     /// Get the namespace this operator is scoped to
     pub fn namespace(&self) -> &str {
         &self.namespace
@@ -205,6 +293,37 @@ async fn run_database_operator(client: Client, namespace: &str) {
                 }
                 Err(e) => {
                     tracing::error!("Database reconciliation error: {:?}", e);
+                }
+            }
+        })
+        .await;
+}
+
+/// Run the upgrade operator controller scoped to a specific namespace
+async fn run_upgrade_operator(client: Client, namespace: &str) {
+    use futures::StreamExt;
+    use kube::Api;
+    use kube::runtime::Controller;
+    use kube::runtime::watcher::Config as WatcherConfig;
+    use postgres_operator::crd::PostgresUpgrade;
+    use postgres_operator::{UpgradeContext, reconcile_upgrade, upgrade_error_policy};
+
+    let ctx = Arc::new(UpgradeContext::new(client.clone()));
+
+    // Use namespaced APIs for parallel test isolation
+    let upgrades: Api<PostgresUpgrade> = Api::namespaced(client.clone(), namespace);
+
+    let watcher_config = WatcherConfig::default().any_semantic();
+
+    Controller::new(upgrades, watcher_config)
+        .run(reconcile_upgrade, upgrade_error_policy, ctx)
+        .for_each(|result| async move {
+            match result {
+                Ok((obj, _action)) => {
+                    tracing::debug!("Reconciled upgrade: {}", obj.name);
+                }
+                Err(e) => {
+                    tracing::error!("Upgrade reconciliation error: {:?}", e);
                 }
             }
         })

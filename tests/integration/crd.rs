@@ -91,3 +91,38 @@ pub async fn install_database_crd(client: Client) -> Result<(), CrdError> {
 
     Ok(())
 }
+
+/// Install the PostgresUpgrade CRD into the cluster
+pub async fn install_upgrade_crd(client: Client) -> Result<(), CrdError> {
+    let crd_yaml = include_str!("../../config/crd/postgres-upgrade.yaml");
+    let crd: CustomResourceDefinition = serde_yaml::from_str(crd_yaml)?;
+
+    let crds: Api<CustomResourceDefinition> = Api::all(client);
+    let params = PatchParams::apply("integration-test").force();
+
+    tracing::info!("Installing PostgresUpgrade CRD...");
+
+    crds.patch(
+        "postgresupgrades.postgres-operator.smoketurner.com",
+        &params,
+        &Patch::Apply(&crd),
+    )
+    .await?;
+
+    // Wait for CRD to be established (up to 30 seconds)
+    tracing::info!("Waiting for PostgresUpgrade CRD to be established...");
+
+    let establish = await_condition(
+        crds,
+        "postgresupgrades.postgres-operator.smoketurner.com",
+        conditions::is_crd_established(),
+    );
+
+    tokio::time::timeout(Duration::from_secs(30), establish)
+        .await
+        .map_err(|_| CrdError::EstablishmentTimeout)??;
+
+    tracing::info!("PostgresUpgrade CRD installed and established");
+
+    Ok(())
+}

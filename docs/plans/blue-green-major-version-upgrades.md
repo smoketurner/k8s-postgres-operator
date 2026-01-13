@@ -799,6 +799,103 @@ kubectl get postgresupgrade -A -o json | jq '.items[] | select(.status.rollback.
 
 ---
 
+## Implementation Status
+
+### Completed ✅
+
+#### Core Operator Implementation (Phases 1-7)
+All core upgrade operator components have been implemented:
+
+| Component | File | Status |
+|-----------|------|--------|
+| PostgresUpgrade CRD | `src/crd/postgres_upgrade.rs` | ✅ Complete |
+| Upgrade reconciler | `src/controller/upgrade_reconciler.rs` | ✅ Complete |
+| State machine | `src/controller/upgrade_state_machine.rs` | ✅ Complete |
+| Error classification | `src/controller/upgrade_error.rs` | ✅ Complete |
+| Replication setup | `src/resources/replication.rs` | ✅ Complete |
+| CRD manifest | `config/crd/postgres-upgrade.yaml` | ✅ Complete |
+| RBAC updates | `config/rbac/role.yaml` | ✅ Complete |
+| Main entry point | `src/main.rs` | ✅ Updated |
+| Lib exports | `src/lib.rs` | ✅ Updated |
+
+#### Integration Test Infrastructure
+Test helpers and fixtures have been created following existing patterns:
+
+| Component | File | Status |
+|-----------|------|--------|
+| PostgresUpgradeBuilder | `tests/common/fixtures.rs` | ✅ Complete |
+| Upgrade wait conditions | `tests/integration/wait.rs` | ✅ 16+ conditions |
+| CRD installation | `tests/integration/crd.rs` | ✅ `install_upgrade_crd()` |
+| Scoped operator | `tests/integration/operator.rs` | ✅ `start_with_upgrade()`, `start_all()` |
+| Test file | `tests/integration/upgrade_tests.rs` | ✅ 7 tests (Phase 1) |
+
+#### Phase 1 Integration Tests (Happy Path)
+
+| Test | Description | Status |
+|------|-------------|--------|
+| `test_upgrade_resource_created` | Basic CRD creation | ✅ Implemented |
+| `test_upgrade_source_cluster_not_found` | Source validation | ✅ Implemented |
+| `test_upgrade_same_version_rejected` | Same-version rejection | ✅ Implemented |
+| `test_upgrade_downgrade_rejected` | Downgrade rejection | ✅ Implemented |
+| `test_upgrade_creates_target_cluster` | Target cluster creation | ✅ Implemented |
+| `test_upgrade_starts_creating_target` | Phase progression | ✅ Implemented |
+| `test_upgrade_full_v16_to_v17` | Full E2E happy path | ✅ Implemented |
+
+### In Progress 🔄
+
+**Verification Phase**: The upgrade integration tests need to be executed against a real Kubernetes cluster to verify the upgrade mechanism works correctly.
+
+```bash
+# Run all upgrade tests
+cargo test --test integration upgrade -- --ignored --nocapture
+
+# Run specific test
+cargo test --test integration test_upgrade_full_v16_to_v17 -- --ignored --nocapture
+```
+
+### Remaining Work 📋
+
+#### Phase 2: Data Integrity Tests (After E2E Verification)
+- `test_upgrade_row_count_verification_passes`
+- `test_upgrade_row_count_with_data`
+- `test_upgrade_replication_lag_monitoring`
+
+#### Phase 3: Cutover Tests
+- `test_upgrade_manual_cutover`
+- `test_upgrade_sequence_sync_before_cutover`
+- `test_upgrade_cutover_completes`
+
+#### Phase 4: Rollback Tests
+- `test_upgrade_rollback_from_replicating`
+- `test_upgrade_rollback_restores_source`
+- `test_upgrade_rollback_cleans_replication`
+
+#### Phase 5: Error Handling Tests
+- `test_upgrade_phase_timeout`
+- `test_upgrade_transient_error_retries`
+
+#### Phase 6: Chaos/Failure Injection Tests
+- `test_upgrade_target_pod_restart_during_replication`
+- `test_upgrade_source_pod_restart_during_replication`
+- `test_upgrade_network_partition_simulation`
+- `test_upgrade_target_cluster_deleted_mid_upgrade`
+- `test_upgrade_source_scaled_to_zero`
+
+#### Phase 7: Webhooks (Phase 8 in original plan)
+- Upgrade validation webhook
+- Immutability enforcement
+- Concurrent upgrade blocking
+- Source modification blocking during upgrade
+
+#### Phase 8: Documentation (Phase 9 in original plan)
+- `docs/upgrades.md`
+- `docs/runbooks/upgrade-stuck.md`
+- `docs/runbooks/upgrade-verification-failed.md`
+- `docs/runbooks/upgrade-rollback.md`
+- Sample YAMLs
+
+---
+
 ## Part 3: Implementation Plan
 
 ### Phase 1: Foundation
@@ -872,33 +969,136 @@ kubectl get postgresupgrade -A -o json | jq '.items[] | select(.status.rollback.
 ```
 
 ### Integration Tests
+
+**Location**: `tests/integration/upgrade_tests.rs`
+
+#### Test Infrastructure (Implemented ✅)
+
+**PostgresUpgradeBuilder** (`tests/common/fixtures.rs`):
 ```rust
-#[tokio::test]
-async fn test_blue_green_upgrade_v16_to_v17() {
-    // 1. Create source cluster v16
-    // 2. Insert test data
-    // 3. Create PostgresUpgrade
-    // 4. Wait for ReadyForCutover
-    // 5. Verify row counts and LSN sync
-    // 6. Trigger cutover
-    // 7. Verify data in target
-    // 8. Verify services point to target
-}
+PostgresUpgradeBuilder::new("my-upgrade", "default")
+    .with_source_cluster("source-cluster")
+    .with_target_version(PostgresVersion::V17)
+    .with_manual_cutover()
+    .with_verification_passes(3)
+    .build()
+```
 
-#[tokio::test]
-async fn test_upgrade_rollback() {
-    // 1. Create upgrade to Completed state
-    // 2. Annotate with rollback=now
-    // 3. Verify services switch back to source
-    // 4. Verify phase is RolledBack
-}
+**Wait Conditions** (`tests/integration/wait.rs`):
+```rust
+// Phase-based conditions
+upgrade_is_phase(UpgradePhase::Replicating)
+upgrade_past_pending()
+upgrade_ready_for_cutover()
+upgrade_terminal()
 
-#[tokio::test]
-async fn test_concurrent_upgrade_blocked() {
-    // 1. Create first upgrade
-    // 2. Attempt to create second upgrade on same source
-    // 3. Verify webhook rejects second upgrade
+// Replication conditions
+upgrade_replication_lag_zero()
+upgrade_replication_lag_under(Duration::from_secs(30))
+
+// Verification conditions
+upgrade_verification_passed(3)
+upgrade_has_condition("ReadyForCutover", true)
+
+// Wait helper
+wait_for_upgrade_named(&api, "my-upgrade", upgrade_is_phase(UpgradePhase::Completed), timeout).await
+```
+
+**Scoped Operator** (`tests/integration/operator.rs`):
+```rust
+// Run cluster + upgrade controllers in same namespace
+let _operator = ScopedOperator::start_with_upgrade(client.clone(), ns.name()).await;
+
+// Run all three controllers (cluster, database, upgrade)
+let _operator = ScopedOperator::start_all(client.clone(), ns.name()).await;
+```
+
+#### Phase 1 Tests (Implemented ✅)
+
+| Test | Description | Verifies |
+|------|-------------|----------|
+| `test_upgrade_resource_created` | CRD accepted by API | Schema validation |
+| `test_upgrade_source_cluster_not_found` | Missing source → Pending/Failed | Source validation |
+| `test_upgrade_same_version_rejected` | v16→v16 rejected | Version validation |
+| `test_upgrade_downgrade_rejected` | v17→v16 rejected | Downgrade prevention |
+| `test_upgrade_creates_target_cluster` | Target cluster created | CreatingTarget phase |
+| `test_upgrade_starts_creating_target` | Progresses past Pending | Phase transitions |
+| `test_upgrade_full_v16_to_v17` | Full E2E happy path | Complete lifecycle |
+
+#### Happy Path Test Flow (`test_upgrade_full_v16_to_v17`)
+
+```rust
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Kubernetes cluster"]
+async fn test_upgrade_full_v16_to_v17() {
+    // 1. Setup
+    let cluster = init_test().await;
+    let client = cluster.new_client().await?;
+    let ns = TestNamespace::create(client.clone(), "upgrade-e2e").await?;
+    let _operator = ScopedOperator::start_with_upgrade(client.clone(), ns.name()).await;
+
+    // 2. Create source cluster v16
+    let source = PostgresClusterBuilder::single("source-cluster", ns.name())
+        .with_version(PostgresVersion::V16)
+        .with_storage("1Gi", None)
+        .without_tls()
+        .build();
+    wait_for_cluster(&cluster_api, "source-cluster", cluster_operational(1), ...).await?;
+
+    // 3. Verify source connectivity
+    verify_connection_with_retry(&creds, "127.0.0.1", pf.local_port(), ...).await?;
+
+    // 4. Create upgrade to v17
+    let upgrade = PostgresUpgradeBuilder::new("test-upgrade", ns.name())
+        .with_source_cluster("source-cluster")
+        .with_target_version(PostgresVersion::V17)
+        .with_manual_cutover()
+        .build();
+
+    // 5. Wait for cutover ready
+    wait_for_upgrade_named(&api, "test-upgrade",
+        upgrade_is_phase(UpgradePhase::WaitingForManualCutover),
+        UPGRADE_TIMEOUT).await?;
+
+    // 6. Trigger manual cutover
+    apply_cutover_annotation(&api, "test-upgrade").await?;
+
+    // 7. Wait for completion
+    wait_for_upgrade_named(&api, "test-upgrade",
+        upgrade_is_phase(UpgradePhase::Completed),
+        UPGRADE_PHASE_TIMEOUT).await?;
+
+    // 8. Verify target connectivity (v17)
+    let target_info = verify_connection_with_retry(...).await?;
+    target_info.assert_version(17);
+    target_info.assert_is_primary();
 }
+```
+
+#### Remaining Test Categories (To Be Implemented)
+
+See **Implementation Status > Remaining Work** section above for complete list.
+
+### Running Integration Tests
+
+```bash
+# Prerequisites
+# 1. Kubernetes cluster (kind, minikube, or real cluster)
+# 2. kubectl configured with cluster access
+# 3. cert-manager installed (for TLS tests)
+
+# Run all upgrade tests
+cargo test --test integration upgrade -- --ignored --nocapture
+
+# Run specific test
+cargo test --test integration test_upgrade_full_v16_to_v17 -- --ignored --nocapture
+
+# Run with debug logging
+RUST_LOG=debug cargo test --test integration upgrade -- --ignored --nocapture
+
+# Run quick validation tests only (faster feedback)
+cargo test --test integration test_upgrade_resource_created -- --ignored --nocapture
+cargo test --test integration test_upgrade_downgrade_rejected -- --ignored --nocapture
 ```
 
 ### Manual Verification
@@ -916,33 +1116,42 @@ async fn test_concurrent_upgrade_blocked() {
 ## Part 5: Files to Modify/Create
 
 ### New Files
-| File | Purpose |
-|------|---------|
-| `src/crd/postgres_upgrade.rs` | PostgresUpgrade CRD definition |
-| `src/controller/upgrade_reconciler.rs` | Upgrade reconciliation logic |
-| `src/controller/upgrade_state_machine.rs` | Upgrade phase transitions |
-| `src/controller/upgrade_error.rs` | Classified error types |
-| `src/resources/replication.rs` | Logical replication management |
-| `src/webhooks/policies/upgrade.rs` | Upgrade validation webhooks |
-| `tests/integration/upgrade_tests.rs` | Integration tests |
-| `config/crd/postgres-upgrade.yaml` | CRD manifest |
-| `config/samples/upgrade-v16-to-v17.yaml` | Sample upgrade |
-| `docs/upgrades.md` | Upgrade documentation |
-| `docs/runbooks/upgrade-stuck.md` | Runbook for stuck upgrades |
-| `docs/runbooks/upgrade-verification-failed.md` | Runbook for verification failures |
-| `docs/runbooks/upgrade-rollback.md` | Runbook for rollback procedure |
+| File | Purpose | Status |
+|------|---------|--------|
+| `src/crd/postgres_upgrade.rs` | PostgresUpgrade CRD definition | ✅ Complete |
+| `src/controller/upgrade_reconciler.rs` | Upgrade reconciliation logic | ✅ Complete |
+| `src/controller/upgrade_state_machine.rs` | Upgrade phase transitions | ✅ Complete |
+| `src/controller/upgrade_error.rs` | Classified error types | ✅ Complete |
+| `src/resources/replication.rs` | Logical replication management | ✅ Complete |
+| `src/webhooks/policies/upgrade.rs` | Upgrade validation webhooks | ⏳ Not started |
+| `tests/integration/upgrade_tests.rs` | Integration tests | ✅ Phase 1 done |
+| `config/crd/postgres-upgrade.yaml` | CRD manifest | ✅ Complete |
+| `config/samples/upgrade-v16-to-v17.yaml` | Sample upgrade | ⏳ Not started |
+| `docs/upgrades.md` | Upgrade documentation | ⏳ Not started |
+| `docs/runbooks/upgrade-stuck.md` | Runbook for stuck upgrades | ⏳ Not started |
+| `docs/runbooks/upgrade-verification-failed.md` | Runbook for verification failures | ⏳ Not started |
+| `docs/runbooks/upgrade-rollback.md` | Runbook for rollback procedure | ⏳ Not started |
 
 ### Modified Files
-| File | Changes |
-|------|---------|
-| `src/main.rs` | Register upgrade controller |
-| `src/lib.rs` | Export run_upgrade_controller |
-| `src/crd/mod.rs` | Export PostgresUpgrade |
-| `src/resources/patroni.rs` | Default `wal_level=logical` |
-| `src/resources/service.rs` | Support target override and atomic switching |
-| `src/webhooks/server.rs` | Register upgrade webhooks |
-| `Cargo.toml` | No new dependencies expected |
-| `config/rbac/role.yaml` | Add PostgresUpgrade permissions |
+| File | Changes | Status |
+|------|---------|--------|
+| `src/main.rs` | Register upgrade controller | ✅ Complete |
+| `src/lib.rs` | Export run_upgrade_controller | ✅ Complete |
+| `src/crd/mod.rs` | Export PostgresUpgrade | ✅ Complete |
+| `src/resources/patroni.rs` | Default `wal_level=logical` | ✅ Complete |
+| `src/resources/service.rs` | Support target override and atomic switching | ✅ Complete |
+| `src/webhooks/server.rs` | Register upgrade webhooks | ⏳ Not started |
+| `Cargo.toml` | No new dependencies expected | ✅ No changes needed |
+| `config/rbac/role.yaml` | Add PostgresUpgrade permissions | ✅ Complete |
+
+### Test Infrastructure Files (NEW)
+| File | Purpose | Status |
+|------|---------|--------|
+| `tests/common/fixtures.rs` | PostgresUpgradeBuilder | ✅ Complete |
+| `tests/integration/wait.rs` | Upgrade wait conditions | ✅ Complete |
+| `tests/integration/crd.rs` | `install_upgrade_crd()` | ✅ Complete |
+| `tests/integration/operator.rs` | `start_with_upgrade()`, `start_all()` | ✅ Complete |
+| `tests/integration/chaos.rs` | Chaos/failure injection helpers | ⏳ Not started |
 
 ---
 
@@ -955,6 +1164,46 @@ These are out of scope for initial implementation:
 3. **PrometheusRule templates** - Ready-to-use alerting configurations
 4. **Audit trail** - Detailed status.audit with actor/action/timestamp
 5. **Cost attribution** - Track resource usage during upgrade
+
+---
+
+## Next Steps
+
+### Immediate (Verification Phase)
+
+1. **Run Quick Validation Tests**
+   ```bash
+   # Start with fast tests that don't require full cluster creation
+   cargo test --test integration test_upgrade_resource_created -- --ignored --nocapture
+   cargo test --test integration test_upgrade_downgrade_rejected -- --ignored --nocapture
+   ```
+
+2. **Run Happy Path Test**
+   ```bash
+   # Full E2E test - creates v16 cluster, upgrades to v17, verifies connectivity
+   # Takes ~15-20 minutes
+   cargo test --test integration test_upgrade_full_v16_to_v17 -- --ignored --nocapture
+   ```
+
+3. **Debug Any Failures**
+   - Check operator logs: `RUST_LOG=debug cargo test ...`
+   - Examine upgrade status: `kubectl get postgresupgrade -n <test-ns> -o yaml`
+   - Check events: `kubectl get events -n <test-ns> --sort-by=.lastTimestamp`
+
+### After E2E Verification Passes
+
+1. Implement Phase 2 tests (Data Integrity)
+2. Implement Phase 3 tests (Cutover)
+3. Implement Phase 4 tests (Rollback)
+4. Implement Phase 5 tests (Error Handling)
+5. Implement Phase 6 tests (Chaos/Failure Injection)
+6. Add upgrade validation webhooks
+7. Create documentation and runbooks
+8. Create sample YAML files
+
+### Tracking Progress
+
+Update the **Implementation Status** section in this document as each phase is completed.
 
 ---
 

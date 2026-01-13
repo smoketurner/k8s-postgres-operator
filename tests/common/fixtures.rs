@@ -25,11 +25,13 @@
 
 use kube::core::ObjectMeta;
 use postgres_operator::crd::{
-    ClusterRef, ConnectionScalingMetric, CpuScalingMetric, DatabaseSpec, ExternalTrafficPolicy,
-    GrantSpec, IssuerKind, IssuerRef, MetricsSpec, NetworkPolicySpec, PgBouncerSpec,
-    PostgresCluster, PostgresClusterSpec, PostgresDatabase, PostgresDatabaseSpec, PostgresVersion,
-    ResourceList, ResourceRequirements, RolePrivilege, RoleSpec, ScalingMetrics, ScalingSpec,
-    ServiceSpec, ServiceType, StorageSpec, TLSSpec, TablePrivilege,
+    ClusterRef, ClusterReference, ConnectionScalingMetric, CpuScalingMetric, CutoverConfig,
+    CutoverMode, DatabaseSpec, ExternalTrafficPolicy, GrantSpec, IssuerKind, IssuerRef,
+    MetricsSpec, NetworkPolicySpec, PgBouncerSpec, PostgresCluster, PostgresClusterSpec,
+    PostgresDatabase, PostgresDatabaseSpec, PostgresUpgrade, PostgresUpgradeSpec, PostgresVersion,
+    PreChecksConfig, ResourceList, ResourceRequirements, RolePrivilege, RoleSpec, ScalingMetrics,
+    ScalingSpec, ServiceSpec, ServiceType, StorageSpec, TLSSpec, TablePrivilege,
+    TargetClusterOverrides, UpgradeStrategy, UpgradeTimeouts,
 };
 use std::collections::BTreeMap;
 
@@ -866,6 +868,184 @@ impl PostgresDatabaseBuilder {
                 roles: self.roles,
                 grants: self.grants,
                 extensions: self.extensions,
+            },
+            status: None,
+        }
+    }
+}
+
+// =============================================================================
+// PostgresUpgrade Builder
+// =============================================================================
+
+/// Builder for PostgresUpgrade test fixtures
+///
+/// Creates PostgresUpgrade resources for integration testing.
+/// Provides a fluent API to configure upgrade parameters.
+///
+/// # Example
+/// ```rust,ignore
+/// let upgrade = PostgresUpgradeBuilder::new("my-upgrade", "default")
+///     .with_source_cluster("source-cluster")
+///     .with_target_version(PostgresVersion::V17)
+///     .with_manual_cutover()
+///     .build();
+/// ```
+#[allow(dead_code)]
+pub struct PostgresUpgradeBuilder {
+    name: String,
+    namespace: String,
+    source_cluster: String,
+    source_namespace: Option<String>,
+    target_version: PostgresVersion,
+    cutover_mode: CutoverMode,
+    target_overrides: Option<TargetClusterOverrides>,
+    max_replication_lag_seconds: i32,
+    verify_row_counts: bool,
+    row_count_tolerance: i64,
+    min_verification_passes: i32,
+    target_cluster_ready_timeout: String,
+    initial_sync_timeout: String,
+}
+
+#[allow(dead_code)]
+impl PostgresUpgradeBuilder {
+    /// Create a new builder with required fields
+    ///
+    /// # Arguments
+    /// * `name` - Name of the PostgresUpgrade resource
+    /// * `namespace` - Namespace for the resource
+    pub fn new(name: &str, namespace: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            namespace: namespace.to_string(),
+            source_cluster: String::new(),
+            source_namespace: None,
+            target_version: PostgresVersion::V17,
+            cutover_mode: CutoverMode::Manual,
+            target_overrides: None,
+            max_replication_lag_seconds: 0,
+            verify_row_counts: true,
+            row_count_tolerance: 0,
+            min_verification_passes: 3,
+            target_cluster_ready_timeout: "30m".to_string(),
+            initial_sync_timeout: "24h".to_string(),
+        }
+    }
+
+    /// Set the source cluster name (required)
+    pub fn with_source_cluster(mut self, name: &str) -> Self {
+        self.source_cluster = name.to_string();
+        self
+    }
+
+    /// Set the source cluster namespace (for cross-namespace upgrades)
+    pub fn with_source_namespace(mut self, namespace: &str) -> Self {
+        self.source_namespace = Some(namespace.to_string());
+        self
+    }
+
+    /// Set the target PostgreSQL version
+    pub fn with_target_version(mut self, version: PostgresVersion) -> Self {
+        self.target_version = version;
+        self
+    }
+
+    /// Use manual cutover mode (default)
+    pub fn with_manual_cutover(mut self) -> Self {
+        self.cutover_mode = CutoverMode::Manual;
+        self
+    }
+
+    /// Use automatic cutover mode
+    pub fn with_automatic_cutover(mut self) -> Self {
+        self.cutover_mode = CutoverMode::Automatic;
+        self
+    }
+
+    /// Set target cluster overrides (replicas, resources, labels)
+    pub fn with_target_overrides(mut self, overrides: TargetClusterOverrides) -> Self {
+        self.target_overrides = Some(overrides);
+        self
+    }
+
+    /// Override target cluster replicas
+    pub fn with_target_replicas(mut self, replicas: i32) -> Self {
+        let overrides = self.target_overrides.get_or_insert_with(Default::default);
+        overrides.replicas = Some(replicas);
+        self
+    }
+
+    /// Set maximum allowed replication lag in seconds
+    pub fn with_max_replication_lag(mut self, seconds: i32) -> Self {
+        self.max_replication_lag_seconds = seconds;
+        self
+    }
+
+    /// Disable row count verification
+    pub fn without_row_count_verification(mut self) -> Self {
+        self.verify_row_counts = false;
+        self
+    }
+
+    /// Set row count tolerance
+    pub fn with_row_count_tolerance(mut self, tolerance: i64) -> Self {
+        self.row_count_tolerance = tolerance;
+        self
+    }
+
+    /// Set minimum verification passes required
+    pub fn with_verification_passes(mut self, passes: i32) -> Self {
+        self.min_verification_passes = passes;
+        self
+    }
+
+    /// Set target cluster ready timeout
+    pub fn with_target_ready_timeout(mut self, timeout: &str) -> Self {
+        self.target_cluster_ready_timeout = timeout.to_string();
+        self
+    }
+
+    /// Set initial sync timeout
+    pub fn with_initial_sync_timeout(mut self, timeout: &str) -> Self {
+        self.initial_sync_timeout = timeout.to_string();
+        self
+    }
+
+    /// Build the PostgresUpgrade resource
+    pub fn build(self) -> PostgresUpgrade {
+        PostgresUpgrade {
+            metadata: ObjectMeta {
+                name: Some(self.name),
+                namespace: Some(self.namespace),
+                ..Default::default()
+            },
+            spec: PostgresUpgradeSpec {
+                source_cluster: ClusterReference {
+                    name: self.source_cluster,
+                    namespace: self.source_namespace,
+                },
+                target_version: self.target_version,
+                target_cluster_overrides: self.target_overrides,
+                strategy: UpgradeStrategy {
+                    cutover: CutoverConfig {
+                        mode: self.cutover_mode,
+                        allowed_window: None,
+                    },
+                    pre_checks: PreChecksConfig {
+                        max_replication_lag_seconds: self.max_replication_lag_seconds,
+                        verify_row_counts: self.verify_row_counts,
+                        row_count_tolerance: self.row_count_tolerance,
+                        min_verification_passes: self.min_verification_passes,
+                        ..Default::default()
+                    },
+                    timeouts: UpgradeTimeouts {
+                        target_cluster_ready: self.target_cluster_ready_timeout,
+                        initial_sync: self.initial_sync_timeout,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
             },
             status: None,
         }

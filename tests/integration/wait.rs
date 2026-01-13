@@ -1,9 +1,10 @@
-//! Wait condition helpers for PostgresCluster and PostgresDatabase resources
+//! Wait condition helpers for PostgresCluster, PostgresDatabase, and PostgresUpgrade resources
 
 use kube::Api;
 use kube::runtime::wait::{Condition, await_condition};
 use postgres_operator::crd::{
     ClusterPhase, DatabaseConditionType, DatabasePhase, PostgresCluster, PostgresDatabase,
+    PostgresUpgrade, UpgradePhase,
 };
 use std::time::Duration;
 use thiserror::Error;
@@ -453,3 +454,259 @@ pub async fn wait_for_database_deletion(
 
 /// Timeout for database operations (shorter than cluster operations)
 pub const DATABASE_TIMEOUT: Duration = Duration::from_secs(60);
+
+// =============================================================================
+// PostgresUpgrade Wait Conditions
+// =============================================================================
+
+/// Condition that checks if PostgresUpgrade is in a specific phase
+pub fn upgrade_is_phase(expected: UpgradePhase) -> impl Condition<PostgresUpgrade> {
+    move |obj: Option<&PostgresUpgrade>| {
+        obj.and_then(|upgrade| upgrade.status.as_ref())
+            .map(|status| status.phase == expected)
+            .unwrap_or(false)
+    }
+}
+
+/// Condition that checks if PostgresUpgrade is NOT in a specific phase
+pub fn upgrade_not_phase(excluded: UpgradePhase) -> impl Condition<PostgresUpgrade> {
+    move |obj: Option<&PostgresUpgrade>| {
+        obj.and_then(|upgrade| upgrade.status.as_ref())
+            .map(|status| status.phase != excluded)
+            .unwrap_or(false)
+    }
+}
+
+/// Condition that checks if PostgresUpgrade is in a terminal phase (Completed, Failed, or RolledBack)
+pub fn upgrade_terminal() -> impl Condition<PostgresUpgrade> {
+    |obj: Option<&PostgresUpgrade>| {
+        obj.and_then(|upgrade| upgrade.status.as_ref())
+            .map(|status| status.phase.is_terminal())
+            .unwrap_or(false)
+    }
+}
+
+/// Condition that checks if replication lag is zero (fully synced)
+pub fn upgrade_replication_lag_zero() -> impl Condition<PostgresUpgrade> {
+    |obj: Option<&PostgresUpgrade>| {
+        obj.and_then(|upgrade| upgrade.status.as_ref())
+            .and_then(|status| status.replication.as_ref())
+            .and_then(|repl| repl.lag_bytes)
+            .map(|lag| lag == 0)
+            .unwrap_or(false)
+    }
+}
+
+/// Condition that checks if replication lag is populated
+pub fn upgrade_has_replication_status() -> impl Condition<PostgresUpgrade> {
+    |obj: Option<&PostgresUpgrade>| {
+        obj.and_then(|upgrade| upgrade.status.as_ref())
+            .and_then(|status| status.replication.as_ref())
+            .is_some()
+    }
+}
+
+/// Condition that checks if verification has reached minimum passes
+pub fn upgrade_verification_passes(min: i32) -> impl Condition<PostgresUpgrade> {
+    move |obj: Option<&PostgresUpgrade>| {
+        obj.and_then(|upgrade| upgrade.status.as_ref())
+            .and_then(|status| status.verification.as_ref())
+            .map(|verif| verif.consecutive_passes >= min)
+            .unwrap_or(false)
+    }
+}
+
+/// Condition that checks if row count verification has zero mismatches
+pub fn upgrade_verification_no_mismatches() -> impl Condition<PostgresUpgrade> {
+    |obj: Option<&PostgresUpgrade>| {
+        obj.and_then(|upgrade| upgrade.status.as_ref())
+            .and_then(|status| status.verification.as_ref())
+            .map(|verif| verif.tables_mismatched == 0)
+            .unwrap_or(false)
+    }
+}
+
+/// Condition that checks if sequences have been synced
+pub fn upgrade_sequences_synced() -> impl Condition<PostgresUpgrade> {
+    |obj: Option<&PostgresUpgrade>| {
+        obj.and_then(|upgrade| upgrade.status.as_ref())
+            .and_then(|status| status.sequences.as_ref())
+            .map(|seq| seq.synced)
+            .unwrap_or(false)
+    }
+}
+
+/// Condition that checks if target cluster is ready
+pub fn upgrade_target_ready() -> impl Condition<PostgresUpgrade> {
+    |obj: Option<&PostgresUpgrade>| {
+        obj.and_then(|upgrade| upgrade.status.as_ref())
+            .and_then(|status| status.target_cluster.as_ref())
+            .map(|target| target.ready)
+            .unwrap_or(false)
+    }
+}
+
+/// Condition that checks if source cluster is ready
+pub fn upgrade_source_ready() -> impl Condition<PostgresUpgrade> {
+    |obj: Option<&PostgresUpgrade>| {
+        obj.and_then(|upgrade| upgrade.status.as_ref())
+            .and_then(|status| status.source_cluster.as_ref())
+            .map(|source| source.ready)
+            .unwrap_or(false)
+    }
+}
+
+/// Condition that checks if upgrade has a specific condition type with given status
+pub fn upgrade_has_condition(type_: &str, expected_status: &str) -> impl Condition<PostgresUpgrade> {
+    let cond_type = type_.to_string();
+    let status = expected_status.to_string();
+    move |obj: Option<&PostgresUpgrade>| {
+        obj.and_then(|upgrade| upgrade.status.as_ref())
+            .map(|s| {
+                s.conditions
+                    .iter()
+                    .any(|c| c.type_ == cond_type && c.status == status)
+            })
+            .unwrap_or(false)
+    }
+}
+
+/// Condition that checks if observed_generation matches metadata.generation
+pub fn upgrade_generation_observed() -> impl Condition<PostgresUpgrade> {
+    |obj: Option<&PostgresUpgrade>| {
+        obj.map(|upgrade| {
+            let generation = upgrade.metadata.generation;
+            let observed = upgrade.status.as_ref().and_then(|s| s.observed_generation);
+            generation == observed
+        })
+        .unwrap_or(false)
+    }
+}
+
+/// Condition that checks if upgrade has an error message
+pub fn upgrade_has_error() -> impl Condition<PostgresUpgrade> {
+    |obj: Option<&PostgresUpgrade>| {
+        obj.and_then(|upgrade| upgrade.status.as_ref())
+            .and_then(|status| status.last_error.as_ref())
+            .is_some()
+    }
+}
+
+/// Composite condition: Upgrade is past Pending phase (validation passed)
+pub fn upgrade_past_pending() -> impl Condition<PostgresUpgrade> {
+    |obj: Option<&PostgresUpgrade>| {
+        obj.and_then(|upgrade| upgrade.status.as_ref())
+            .map(|status| status.phase != UpgradePhase::Pending)
+            .unwrap_or(false)
+    }
+}
+
+/// Composite condition: Upgrade is in a phase where replication is active
+pub fn upgrade_replicating_or_later() -> impl Condition<PostgresUpgrade> {
+    |obj: Option<&PostgresUpgrade>| {
+        obj.and_then(|upgrade| upgrade.status.as_ref())
+            .map(|status| {
+                matches!(
+                    status.phase,
+                    UpgradePhase::Replicating
+                        | UpgradePhase::Verifying
+                        | UpgradePhase::SyncingSequences
+                        | UpgradePhase::ReadyForCutover
+                        | UpgradePhase::WaitingForManualCutover
+                        | UpgradePhase::CuttingOver
+                        | UpgradePhase::HealthChecking
+                        | UpgradePhase::Completed
+                )
+            })
+            .unwrap_or(false)
+    }
+}
+
+/// Composite condition: Upgrade is ready for cutover (either ReadyForCutover or WaitingForManualCutover)
+pub fn upgrade_ready_for_cutover() -> impl Condition<PostgresUpgrade> {
+    |obj: Option<&PostgresUpgrade>| {
+        obj.and_then(|upgrade| upgrade.status.as_ref())
+            .map(|status| {
+                matches!(
+                    status.phase,
+                    UpgradePhase::ReadyForCutover | UpgradePhase::WaitingForManualCutover
+                )
+            })
+            .unwrap_or(false)
+    }
+}
+
+/// Wait for a PostgresUpgrade to reach a condition with timeout
+pub async fn wait_for_upgrade<C>(
+    api: &Api<PostgresUpgrade>,
+    name: &str,
+    condition: C,
+    timeout: Duration,
+) -> Result<PostgresUpgrade, WaitError>
+where
+    C: Condition<PostgresUpgrade>,
+{
+    wait_for_upgrade_named(api, name, condition, "condition", timeout).await
+}
+
+/// Wait for a PostgresUpgrade to reach a condition with timeout and named condition
+pub async fn wait_for_upgrade_named<C>(
+    api: &Api<PostgresUpgrade>,
+    name: &str,
+    condition: C,
+    condition_name: &str,
+    timeout: Duration,
+) -> Result<PostgresUpgrade, WaitError>
+where
+    C: Condition<PostgresUpgrade>,
+{
+    let cond = await_condition(api.clone(), name, condition);
+    let cond_desc = format!("{} for upgrade '{}'", condition_name, name);
+
+    let result = tokio::time::timeout(timeout, cond)
+        .await
+        .map_err(|_| WaitError::timeout(&cond_desc))?
+        .map_err(WaitError::Watch)?;
+
+    result.ok_or(WaitError::ResourceNotFound)
+}
+
+/// Wait for a PostgresUpgrade to be completely deleted
+pub async fn wait_for_upgrade_deletion(
+    api: &Api<PostgresUpgrade>,
+    name: &str,
+    timeout: Duration,
+) -> Result<(), WaitError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let poll_interval = Duration::from_millis(500);
+
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(WaitError::timeout(format!(
+                "deletion of upgrade '{}'",
+                name
+            )));
+        }
+
+        match api.get(name).await {
+            Ok(_) => {
+                // Resource still exists, wait and retry
+                tokio::time::sleep(poll_interval).await;
+            }
+            Err(kube::Error::Api(ref ae)) if ae.code == 404 => {
+                // Resource is gone, success!
+                return Ok(());
+            }
+            Err(e) => {
+                // Unexpected error
+                return Err(WaitError::KubeError(e));
+            }
+        }
+    }
+}
+
+/// Timeout for upgrade operations (longer due to cluster creation)
+pub const UPGRADE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Short timeout for upgrade phase transitions
+pub const UPGRADE_PHASE_TIMEOUT: Duration = Duration::from_secs(300);
