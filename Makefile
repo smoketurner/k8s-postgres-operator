@@ -52,8 +52,8 @@ test-integration: install ## Run integration tests (requires running cluster)
 
 install: install-crd install-rbac ## Install CRD and RBAC onto the cluster
 
-install-crd: ## Install the CRD
-	$(KUBECTL) apply -f config/crd/postgres-cluster.yaml
+install-crd: ## Install the CRDs
+	$(KUBECTL) apply -f config/crd/
 
 install-rbac: ## Install RBAC (creates namespace if needed)
 	$(KUBECTL) apply -f config/deploy/namespace.yaml
@@ -61,8 +61,8 @@ install-rbac: ## Install RBAC (creates namespace if needed)
 
 uninstall: uninstall-rbac uninstall-crd ## Uninstall CRD and RBAC from the cluster
 
-uninstall-crd: ## Uninstall the CRD
-	$(KUBECTL) delete -f config/crd/postgres-cluster.yaml --ignore-not-found
+uninstall-crd: ## Uninstall the CRDs
+	$(KUBECTL) delete -f config/crd/ --ignore-not-found
 
 uninstall-rbac: ## Uninstall RBAC
 	$(KUBECTL) delete -f config/rbac/ --ignore-not-found

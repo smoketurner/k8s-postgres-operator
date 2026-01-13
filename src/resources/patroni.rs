@@ -32,10 +32,13 @@ use crate::resources::backup;
 use crate::resources::common::{owner_reference, patroni_cluster_labels, patroni_labels};
 
 /// Default PostgreSQL parameters for HA operation
+///
+/// Note: wal_level=logical is set by default to support major version upgrades
+/// using logical replication. This has minimal overhead compared to 'replica'.
 const DEFAULT_POSTGRESQL_PARAMS: &[(&str, &str)] = &[
     ("max_connections", "100"),
     ("shared_buffers", "128MB"),
-    ("wal_level", "replica"),
+    ("wal_level", "logical"),
     ("hot_standby", "on"),
     ("max_wal_senders", "10"),
     ("max_replication_slots", "10"),

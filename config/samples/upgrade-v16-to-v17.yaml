@@ -1,0 +1,94 @@
+# Sample PostgresUpgrade: Upgrade from PostgreSQL 16 to 17
+#
+# This example demonstrates a blue-green major version upgrade using
+# logical replication for near-zero downtime.
+#
+# Prerequisites:
+# - A running PostgresCluster named "my-cluster" with version 16
+# - The cluster must be in Running state
+# - wal_level=logical on source (enabled by default in this operator)
+#
+# Usage:
+# 1. Apply this manifest: kubectl apply -f upgrade-v16-to-v17.yaml
+# 2. Monitor progress: kubectl get postgresupgrade my-cluster-upgrade -w
+# 3. When ReadyForCutover, trigger cutover (for Manual mode):
+#    kubectl annotate postgresupgrade my-cluster-upgrade \
+#      postgres-operator.smoketurner.com/cutover=now
+# 4. To rollback (if needed before completion):
+#    kubectl annotate postgresupgrade my-cluster-upgrade \
+#      postgres-operator.smoketurner.com/rollback=now
+#
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
+kind: PostgresUpgrade
+metadata:
+  name: my-cluster-upgrade
+spec:
+  # Reference to the source cluster to upgrade
+  sourceCluster:
+    name: my-cluster
+    # namespace: default  # Optional, defaults to same namespace
+
+  # Target PostgreSQL version
+  targetVersion: "17"
+
+  # Optional overrides for target cluster
+  # targetClusterOverrides:
+  #   name: my-cluster-v17  # Custom name (defaults to my-cluster-v17)
+  #   replicas: 3           # Override replica count
+  #   resources:            # Override resource requests/limits
+  #     requests:
+  #       cpu: "500m"
+  #       memory: "1Gi"
+
+  strategy:
+    # Strategy type (only BlueGreen is currently supported)
+    strategyType: BlueGreen
+
+    # Cutover configuration
+    cutover:
+      # Manual: Requires annotation to trigger cutover
+      # Automatic: Cutover automatically when conditions are met
+      mode: Manual
+
+      # Optional maintenance window for automatic cutover
+      # allowedWindow:
+      #   startTime: "02:00"
+      #   endTime: "04:00"
+      #   timezone: "UTC"
+
+    # Pre-cutover checks
+    preChecks:
+      # Maximum allowed replication lag (0 = fully synced)
+      maxReplicationLagSeconds: 0
+
+      # Number of consecutive verification passes required
+      minVerificationPasses: 3
+
+      # Time between verification checks
+      verificationInterval: "1m"
+
+      # Require a recent backup before cutover
+      requireBackupWithin: "1h"
+
+      # Time to wait for connections to drain
+      drainConnectionsTimeout: "5m"
+
+      # Allow small row count differences (0 = exact match)
+      rowCountTolerance: 0
+
+    # Phase timeouts
+    timeouts:
+      targetClusterReady: "30m"
+      initialSync: "24h"
+      replicationCatchup: "1h"
+      verification: "30m"
+      cutover: "15m"
+
+    # Post-cutover actions
+    postCutover:
+      # Duration to monitor health after cutover
+      healthCheckDuration: "5m"
+
+      # Whether to automatically delete source cluster after success
+      # CAUTION: Enable only when you're confident in the upgrade
+      cleanupSourceCluster: false

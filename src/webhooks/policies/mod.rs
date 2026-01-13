@@ -6,11 +6,17 @@ pub(crate) mod backup;
 pub(crate) mod immutability;
 pub(crate) mod production;
 pub(crate) mod tls;
+pub mod upgrade;
 
 pub use backup::validate_backup;
 pub use immutability::validate_immutability;
 pub use production::validate_production;
 pub use tls::validate_tls;
+pub use upgrade::{
+    UpgradeValidationContext, UpgradeValidationResult, validate_no_concurrent_upgrade,
+    validate_source_cluster, validate_upgrade_immutability, validate_upgrade_sync,
+    validate_version_direction,
+};
 
 use crate::crd::PostgresCluster;
 

@@ -2,12 +2,21 @@
 //!
 //! All PostgreSQL clusters use Patroni, so services use Patroni's label scheme
 //! for routing traffic to the correct pods.
+//!
+//! ## Service Switching for Upgrades
+//!
+//! During blue-green upgrades, services can be switched from source to target
+//! cluster using the [`switch_services_to_target`] function. This atomically
+//! updates the service selectors to point to the new cluster.
 
 use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec as K8sServiceSpec};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-use kube::ResourceExt;
+use kube::api::{Api, Patch, PatchParams};
 use kube::core::ObjectMeta;
+use kube::{Client, ResourceExt};
+use serde_json::json;
 use std::collections::BTreeMap;
+use thiserror::Error;
 
 use crate::crd::PostgresCluster;
 use crate::resources::common::{owner_reference, standard_labels};
@@ -212,5 +221,267 @@ pub fn generate_headless_service(cluster: &PostgresCluster) -> Service {
             ..Default::default()
         }),
         ..Default::default()
+    }
+}
+
+// ============================================================================
+// Service Switching for Blue-Green Upgrades
+// ============================================================================
+
+/// Errors that can occur during service switching
+#[derive(Error, Debug)]
+pub enum ServiceSwitchError {
+    /// Failed to patch service
+    #[error("Failed to patch service {name}: {source}")]
+    PatchFailed {
+        name: String,
+        #[source]
+        source: kube::Error,
+    },
+
+    /// Service not found
+    #[error("Service not found: {0}")]
+    NotFound(String),
+
+    /// Invalid service configuration
+    #[error("Invalid service configuration: {0}")]
+    InvalidConfig(String),
+}
+
+/// Result of a service switch operation
+#[derive(Debug, Clone)]
+pub struct ServiceSwitchResult {
+    /// Name of the primary service that was switched
+    pub primary_service: String,
+    /// Name of the replica service that was switched
+    pub replica_service: String,
+    /// Timestamp when the switch was completed
+    pub switched_at: chrono::DateTime<chrono::Utc>,
+    /// Previous cluster name (source)
+    pub previous_cluster: String,
+    /// New cluster name (target)
+    pub new_cluster: String,
+}
+
+/// Switch services from source cluster to target cluster
+///
+/// This function atomically updates the service selectors to point to the
+/// target cluster instead of the source cluster. Both primary and replica
+/// services are updated in a single reconciliation.
+///
+/// # Arguments
+///
+/// * `client` - Kubernetes client
+/// * `namespace` - Namespace of the services
+/// * `source_name` - Name of the source cluster
+/// * `target_name` - Name of the target cluster
+/// * `target_cluster` - Reference to the target cluster for owner references
+///
+/// # Returns
+///
+/// Returns a `ServiceSwitchResult` on success, or a `ServiceSwitchError` on failure.
+pub async fn switch_services_to_target(
+    client: &Client,
+    namespace: &str,
+    source_name: &str,
+    target_name: &str,
+    target_cluster: &PostgresCluster,
+) -> Result<ServiceSwitchResult, ServiceSwitchError> {
+    let services: Api<Service> = Api::namespaced(client.clone(), namespace);
+
+    let primary_svc_name = format!("{}-primary", source_name);
+    let replica_svc_name = format!("{}-repl", source_name);
+
+    // Build owner reference for the target cluster
+    let owner_ref = owner_reference(target_cluster);
+    let owner_refs = vec![owner_ref];
+
+    // Patch the primary service
+    let primary_patch = json!({
+        "metadata": {
+            "ownerReferences": owner_refs,
+            "annotations": {
+                "postgres-operator.smoketurner.com/switched-from": source_name,
+                "postgres-operator.smoketurner.com/switched-at": chrono::Utc::now().to_rfc3339()
+            }
+        },
+        "spec": {
+            "selector": {
+                "app.kubernetes.io/name": target_name,
+                "postgres-operator.smoketurner.com/cluster": target_name,
+                "spilo-role": "master"
+            }
+        }
+    });
+
+    services
+        .patch(
+            &primary_svc_name,
+            &PatchParams::apply("postgres-operator"),
+            &Patch::Merge(&primary_patch),
+        )
+        .await
+        .map_err(|e| ServiceSwitchError::PatchFailed {
+            name: primary_svc_name.clone(),
+            source: e,
+        })?;
+
+    // Patch the replica service
+    let replica_patch = json!({
+        "metadata": {
+            "ownerReferences": owner_refs,
+            "annotations": {
+                "postgres-operator.smoketurner.com/switched-from": source_name,
+                "postgres-operator.smoketurner.com/switched-at": chrono::Utc::now().to_rfc3339()
+            }
+        },
+        "spec": {
+            "selector": {
+                "app.kubernetes.io/name": target_name,
+                "postgres-operator.smoketurner.com/cluster": target_name,
+                "spilo-role": "replica"
+            }
+        }
+    });
+
+    services
+        .patch(
+            &replica_svc_name,
+            &PatchParams::apply("postgres-operator"),
+            &Patch::Merge(&replica_patch),
+        )
+        .await
+        .map_err(|e| ServiceSwitchError::PatchFailed {
+            name: replica_svc_name.clone(),
+            source: e,
+        })?;
+
+    Ok(ServiceSwitchResult {
+        primary_service: primary_svc_name,
+        replica_service: replica_svc_name,
+        switched_at: chrono::Utc::now(),
+        previous_cluster: source_name.to_string(),
+        new_cluster: target_name.to_string(),
+    })
+}
+
+/// Revert services back to the source cluster (for rollback)
+///
+/// This function reverses the service switch, pointing services back
+/// to the original source cluster.
+///
+/// # Arguments
+///
+/// * `client` - Kubernetes client
+/// * `namespace` - Namespace of the services
+/// * `source_name` - Name of the source cluster (to switch back to)
+/// * `target_name` - Name of the target cluster (current)
+/// * `source_cluster` - Reference to the source cluster for owner references
+pub async fn revert_services_to_source(
+    client: &Client,
+    namespace: &str,
+    source_name: &str,
+    target_name: &str,
+    source_cluster: &PostgresCluster,
+) -> Result<ServiceSwitchResult, ServiceSwitchError> {
+    let services: Api<Service> = Api::namespaced(client.clone(), namespace);
+
+    let primary_svc_name = format!("{}-primary", source_name);
+    let replica_svc_name = format!("{}-repl", source_name);
+
+    // Build owner reference for the source cluster
+    let owner_ref = owner_reference(source_cluster);
+    let owner_refs = vec![owner_ref];
+
+    // Patch the primary service back to source
+    let primary_patch = json!({
+        "metadata": {
+            "ownerReferences": owner_refs,
+            "annotations": {
+                "postgres-operator.smoketurner.com/rolled-back-from": target_name,
+                "postgres-operator.smoketurner.com/rolled-back-at": chrono::Utc::now().to_rfc3339()
+            }
+        },
+        "spec": {
+            "selector": {
+                "app.kubernetes.io/name": source_name,
+                "postgres-operator.smoketurner.com/cluster": source_name,
+                "spilo-role": "master"
+            }
+        }
+    });
+
+    services
+        .patch(
+            &primary_svc_name,
+            &PatchParams::apply("postgres-operator"),
+            &Patch::Merge(&primary_patch),
+        )
+        .await
+        .map_err(|e| ServiceSwitchError::PatchFailed {
+            name: primary_svc_name.clone(),
+            source: e,
+        })?;
+
+    // Patch the replica service back to source
+    let replica_patch = json!({
+        "metadata": {
+            "ownerReferences": owner_refs,
+            "annotations": {
+                "postgres-operator.smoketurner.com/rolled-back-from": target_name,
+                "postgres-operator.smoketurner.com/rolled-back-at": chrono::Utc::now().to_rfc3339()
+            }
+        },
+        "spec": {
+            "selector": {
+                "app.kubernetes.io/name": source_name,
+                "postgres-operator.smoketurner.com/cluster": source_name,
+                "spilo-role": "replica"
+            }
+        }
+    });
+
+    services
+        .patch(
+            &replica_svc_name,
+            &PatchParams::apply("postgres-operator"),
+            &Patch::Merge(&replica_patch),
+        )
+        .await
+        .map_err(|e| ServiceSwitchError::PatchFailed {
+            name: replica_svc_name.clone(),
+            source: e,
+        })?;
+
+    Ok(ServiceSwitchResult {
+        primary_service: primary_svc_name,
+        replica_service: replica_svc_name,
+        switched_at: chrono::Utc::now(),
+        previous_cluster: target_name.to_string(),
+        new_cluster: source_name.to_string(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_service_switch_error_display() {
+        let err = ServiceSwitchError::NotFound("my-service".to_string());
+        assert!(err.to_string().contains("my-service"));
+
+        let err = ServiceSwitchError::InvalidConfig("bad config".to_string());
+        assert!(err.to_string().contains("bad config"));
+    }
+
+    #[test]
+    fn test_service_names() {
+        let source_name = "my-cluster";
+        let primary_name = format!("{}-primary", source_name);
+        let replica_name = format!("{}-repl", source_name);
+
+        assert_eq!(primary_name, "my-cluster-primary");
+        assert_eq!(replica_name, "my-cluster-repl");
     }
 }

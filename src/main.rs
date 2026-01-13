@@ -10,7 +10,7 @@ use tracing::{error, info, warn};
 
 use postgres_operator::health::{HealthState, run_health_server};
 use postgres_operator::{WEBHOOK_CERT_PATH, WEBHOOK_KEY_PATH, run_webhook_server};
-use postgres_operator::{run_controller, run_database_controller};
+use postgres_operator::{run_controller, run_database_controller, run_upgrade_controller};
 
 /// Lease configuration
 const LEASE_NAME: &str = "postgres-operator-leader";
@@ -183,6 +183,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(
         "Watching PostgresDatabase resources (apiVersion: postgres-operator.smoketurner.com/v1alpha1)"
     );
+    info!(
+        "Watching PostgresUpgrade resources (apiVersion: postgres-operator.smoketurner.com/v1alpha1)"
+    );
 
     // Start cluster controller (only runs as leader)
     let controller_handle = {
@@ -198,6 +201,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let db_client = client.clone();
         tokio::spawn(async move {
             run_database_controller(db_client).await;
+        })
+    };
+
+    // Start upgrade controller (only runs as leader)
+    let upgrade_controller_handle = {
+        let upgrade_client = client.clone();
+        tokio::spawn(async move {
+            run_upgrade_controller(upgrade_client).await;
         })
     };
 
@@ -223,6 +234,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         result = database_controller_handle => {
             if let Err(e) = result {
                 error!("Database controller task panicked: {}", e);
+            }
+        }
+        result = upgrade_controller_handle => {
+            if let Err(e) = result {
+                error!("Upgrade controller task panicked: {}", e);
             }
         }
         result = health_handle => {

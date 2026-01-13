@@ -6,9 +6,11 @@ pub mod webhooks;
 
 pub use controller::{
     BackoffConfig, Context, DatabaseContext, DatabaseError, Error, FINALIZER, Result,
-    database_error_policy, error_policy, reconcile, reconcile_database,
+    UPGRADE_FINALIZER, UpgradeBackoffConfig, UpgradeContext, UpgradeError, UpgradeResult,
+    database_error_policy, error_policy, reconcile, reconcile_database, reconcile_upgrade,
+    upgrade_error_policy,
 };
-pub use crd::{PostgresCluster, PostgresDatabase};
+pub use crd::{PostgresCluster, PostgresDatabase, PostgresUpgrade};
 pub use health::{HealthState, Metrics};
 pub use webhooks::{
     WEBHOOK_CERT_PATH, WEBHOOK_KEY_PATH, WEBHOOK_PORT, WebhookError, run_webhook_server,
@@ -132,4 +134,49 @@ pub async fn run_database_controller(client: Client) {
         .await;
 
     tracing::error!("Database controller stream ended unexpectedly");
+}
+
+/// Run the upgrade controller
+///
+/// This controller watches PostgresUpgrade resources and manages blue-green
+/// major version upgrades using logical replication.
+pub async fn run_upgrade_controller(client: Client) {
+    tracing::info!("Starting controller for PostgresUpgrade resources");
+
+    let ctx = Arc::new(UpgradeContext::new(client.clone()));
+
+    // Set up APIs for the controller
+    let upgrades: Api<PostgresUpgrade> = Api::all(client.clone());
+
+    // Configure watcher
+    let watcher_config = WatcherConfig::default().any_semantic();
+
+    // Create and run the controller
+    // Watch PostgresUpgrade resources
+    // Note: Target clusters are NOT owned by the upgrade resource (by design)
+    // to ensure they survive upgrade deletion
+    Controller::new(upgrades, watcher_config)
+        .run(reconcile_upgrade, upgrade_error_policy, ctx)
+        .for_each(|result| async move {
+            match result {
+                Ok((obj, _action)) => {
+                    tracing::debug!("Reconciled upgrade: {}", obj.name);
+                }
+                Err(e) => {
+                    let is_not_found = matches!(
+                        &e,
+                        kube::runtime::controller::Error::ReconcilerFailed(err, _)
+                            if format!("{:?}", err).contains("NotFound")
+                    );
+                    if is_not_found {
+                        tracing::debug!("Upgrade object no longer exists: {:?}", e);
+                    } else {
+                        tracing::error!("Upgrade reconciliation error: {:?}", e);
+                    }
+                }
+            }
+        })
+        .await;
+
+    tracing::error!("Upgrade controller stream ended unexpectedly");
 }

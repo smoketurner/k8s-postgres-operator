@@ -51,6 +51,7 @@ mod database_tests;
 mod functional_tests;
 mod scaling_tests;
 mod tls_tests;
+mod upgrade_tests;
 
 // Re-export common test utilities
 pub use assertions::*;

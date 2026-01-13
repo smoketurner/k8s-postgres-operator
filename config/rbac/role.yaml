@@ -59,6 +59,34 @@ rules:
     verbs:
       - update
 
+  # PostgresUpgrade resources
+  - apiGroups:
+      - postgres-operator.smoketurner.com
+    resources:
+      - postgresupgrades
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - postgres-operator.smoketurner.com
+    resources:
+      - postgresupgrades/status
+    verbs:
+      - get
+      - update
+      - patch
+  - apiGroups:
+      - postgres-operator.smoketurner.com
+    resources:
+      - postgresupgrades/finalizers
+    verbs:
+      - update
+
   # Core resources
   - apiGroups:
       - ""

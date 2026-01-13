@@ -5,6 +5,7 @@ pub mod network_policy;
 pub mod patroni;
 pub mod pdb;
 pub mod pgbouncer;
+pub mod replication;
 pub mod scaled_object;
 pub mod secret;
 pub mod service;
