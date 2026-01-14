@@ -675,9 +675,7 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
             .status
             .as_ref()
             .and_then(|s| s.observed_generation)
-            .map_or(true, |observed| {
-                cluster.metadata.generation.map_or(false, |g| g != observed)
-            });
+            .is_none_or(|observed| cluster.metadata.generation.is_some_and(|g| g != observed));
         if should_emit_event {
             ctx.publish_warning_event(
                 cluster,
@@ -1733,7 +1731,11 @@ async fn handle_deletion(cluster: &PostgresCluster, ctx: &Context, ns: &str) -> 
                     }
                 });
                 sts_api
-                    .patch(&name, &PatchParams::apply("postgres-operator"), &Patch::Merge(&patch))
+                    .patch(
+                        &name,
+                        &PatchParams::apply("postgres-operator"),
+                        &Patch::Merge(&patch),
+                    )
                     .await?;
 
                 // Requeue to check pod termination
@@ -1757,7 +1759,10 @@ async fn handle_deletion(cluster: &PostgresCluster, ctx: &Context, ns: &str) -> 
 
     // Phase 3: Delete Patroni DCS endpoints
     // Now safe - no Patroni pods running to recreate them
-    info!("All pods terminated, cleaning up DCS endpoints for {}", name);
+    info!(
+        "All pods terminated, cleaning up DCS endpoints for {}",
+        name
+    );
     delete_patroni_dcs_endpoints(ctx, ns, &name).await;
 
     ctx.publish_normal_event(
@@ -1782,9 +1787,7 @@ fn check_deletion_timeout(cluster: &PostgresCluster) -> Option<Duration> {
     let elapsed = Utc::now().signed_duration_since(deletion_time);
 
     // Convert to std::time::Duration (handle negative)
-    let elapsed_std = elapsed
-        .to_std()
-        .unwrap_or(Duration::ZERO);
+    let elapsed_std = elapsed.to_std().unwrap_or(Duration::ZERO);
 
     if elapsed_std.as_secs() > DELETION_TIMEOUT_SECS as u64 {
         Some(elapsed_std)
