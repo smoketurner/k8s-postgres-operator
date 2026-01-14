@@ -6,8 +6,8 @@
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::post};
 use k8s_openapi::api::core::v1::Namespace;
 use kube::api::ListParams;
-use kube::{Api, Client, ResourceExt};
-use serde::{Deserialize, Serialize};
+use kube::core::admission::{AdmissionRequest, AdmissionResponse, AdmissionReview, Operation};
+use kube::{Api, Client, Resource, ResourceExt};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -17,73 +17,6 @@ use super::policies::{
     validate_upgrade_sync,
 };
 use crate::crd::{ClusterPhase, PostgresCluster, PostgresUpgrade, UpgradePhase};
-
-/// Kubernetes AdmissionReview request
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AdmissionReview {
-    pub api_version: String,
-    pub kind: String,
-    pub request: Option<AdmissionRequest>,
-}
-
-/// AdmissionRequest contains the details of the admission request
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AdmissionRequest {
-    pub uid: String,
-    pub kind: GroupVersionKind,
-    pub resource: GroupVersionResource,
-    pub operation: String,
-    pub namespace: Option<String>,
-    pub name: Option<String>,
-    pub object: Option<serde_json::Value>,
-    pub old_object: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GroupVersionKind {
-    pub group: String,
-    pub version: String,
-    pub kind: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GroupVersionResource {
-    pub group: String,
-    pub version: String,
-    pub resource: String,
-}
-
-/// AdmissionReview response
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AdmissionReviewResponse {
-    pub api_version: String,
-    pub kind: String,
-    pub response: AdmissionResponse,
-}
-
-/// AdmissionResponse contains the result
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AdmissionResponse {
-    pub uid: String,
-    pub allowed: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<AdmissionStatus>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AdmissionStatus {
-    pub code: i32,
-    pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
 
 /// Shared state for webhook handlers
 pub(crate) struct WebhookState {
@@ -107,78 +40,60 @@ pub(crate) fn create_webhook_router(state: Arc<WebhookState>) -> Router {
 /// Validate PostgresCluster admission webhook handler
 pub(crate) async fn validate_postgres_cluster(
     State(state): State<Arc<WebhookState>>,
-    Json(review): Json<AdmissionReview>,
+    Json(review): Json<AdmissionReview<PostgresCluster>>,
 ) -> impl IntoResponse {
-    let request = match review.request {
-        Some(req) => req,
-        None => {
-            error!("Admission review missing request");
+    let request: AdmissionRequest<PostgresCluster> = match review.try_into() {
+        Ok(req) => req,
+        Err(e) => {
+            error!(error = %e, "Admission review missing or invalid request");
             return (
                 StatusCode::BAD_REQUEST,
-                Json(create_response(
-                    "",
-                    false,
-                    "Missing request in AdmissionReview",
-                    None,
-                )),
+                Json(
+                    AdmissionResponse::invalid(format!(
+                        "Missing request in AdmissionReview: {}",
+                        e
+                    ))
+                    .into_review(),
+                ),
             );
         }
     };
 
-    let uid = request.uid.clone();
+    let uid = &request.uid;
     info!(
         uid = %uid,
-        operation = %request.operation,
+        operation = ?request.operation,
         namespace = ?request.namespace,
         name = ?request.name,
         "Processing admission request"
     );
 
-    // Parse the new object
-    let cluster: PostgresCluster = match request.object {
-        Some(obj) => match serde_json::from_value(obj) {
-            Ok(c) => c,
-            Err(e) => {
-                error!(error = %e, "Failed to parse PostgresCluster");
-                return (
-                    StatusCode::OK,
-                    Json(create_response(
-                        &uid,
-                        false,
-                        &format!("Failed to parse object: {}", e),
-                        None,
-                    )),
-                );
-            }
-        },
+    // DELETE operations are always allowed
+    if request.operation == Operation::Delete {
+        info!(uid = %uid, "DELETE operation allowed");
+        return (
+            StatusCode::OK,
+            Json(AdmissionResponse::from(&request).into_review()),
+        );
+    }
+
+    // Get the new object (typed as PostgresCluster)
+    let cluster: PostgresCluster = match &request.object {
+        Some(obj) => obj.clone(),
         None => {
-            // DELETE operations may not have object
-            if request.operation == "DELETE" {
-                return (StatusCode::OK, Json(create_response(&uid, true, "", None)));
-            }
             return (
                 StatusCode::OK,
-                Json(create_response(
-                    &uid,
-                    false,
+                Json(deny_with_reason(
+                    &request,
                     "Missing object in request",
-                    None,
+                    "InvalidRequest",
                 )),
             );
         }
     };
 
-    // Parse the old object for UPDATE operations
-    let old_cluster: Option<PostgresCluster> = match &request.old_object {
-        Some(obj) => match serde_json::from_value(obj.clone()) {
-            Ok(c) => Some(c),
-            Err(e) => {
-                warn!(error = %e, "Failed to parse old PostgresCluster, treating as CREATE");
-                None
-            }
-        },
-        None => None,
-    };
+    // Get the old object for UPDATE operations (already typed)
+    let old_cluster: Option<&PostgresCluster> = request.old_object.as_ref();
 
     // Get namespace labels for production policy
     let namespace_labels = match &request.namespace {
@@ -187,7 +102,7 @@ pub(crate) async fn validate_postgres_cluster(
     };
 
     // Create validation context
-    let ctx = ValidationContext::new(&cluster, old_cluster.as_ref(), namespace_labels);
+    let ctx = ValidationContext::new(&cluster, old_cluster, namespace_labels);
 
     // Run all validations
     let result = validate_all(&ctx);
@@ -202,21 +117,20 @@ pub(crate) async fn validate_postgres_cluster(
         warn!(uid = %uid, reason = %reason, message = %message, "Admission request denied");
         return (
             StatusCode::OK,
-            Json(create_response(&uid, false, &message, Some(&reason))),
+            Json(deny_with_reason(&request, &message, &reason)),
         );
     }
 
     // Check if cluster has an active upgrade in progress (block modifications during upgrade)
-    if request.operation == "UPDATE" {
+    if request.operation == Operation::Update {
         if let Some(ns) = &request.namespace
-            && let Some(cluster_name) = &request.name
             && let Some((reason, message)) =
-                check_cluster_upgrade_in_progress(&state.client, ns, cluster_name).await
+                check_cluster_upgrade_in_progress(&state.client, ns, &request.name).await
         {
             warn!(uid = %uid, reason = %reason, message = %message, "Admission request denied - upgrade in progress");
             return (
                 StatusCode::OK,
-                Json(create_response(&uid, false, &message, Some(&reason))),
+                Json(deny_with_reason(&request, &message, &reason)),
             );
         }
 
@@ -225,13 +139,16 @@ pub(crate) async fn validate_postgres_cluster(
             warn!(uid = %uid, reason = %reason, message = %message, "Admission request denied - cluster superseded");
             return (
                 StatusCode::OK,
-                Json(create_response(&uid, false, &message, Some(&reason))),
+                Json(deny_with_reason(&request, &message, &reason)),
             );
         }
     }
 
     info!(uid = %uid, "Admission request allowed");
-    (StatusCode::OK, Json(create_response(&uid, true, "", None)))
+    (
+        StatusCode::OK,
+        Json(AdmissionResponse::from(&request).into_review()),
+    )
 }
 
 /// Get namespace labels for policy decisions
@@ -348,80 +265,60 @@ fn check_cluster_superseded(cluster: &PostgresCluster) -> Option<(String, String
 /// Validate PostgresUpgrade admission webhook handler
 pub(crate) async fn validate_postgres_upgrade(
     State(state): State<Arc<WebhookState>>,
-    Json(review): Json<AdmissionReview>,
+    Json(review): Json<AdmissionReview<PostgresUpgrade>>,
 ) -> impl IntoResponse {
-    let request = match review.request {
-        Some(req) => req,
-        None => {
-            error!("Admission review missing request");
+    let request: AdmissionRequest<PostgresUpgrade> = match review.try_into() {
+        Ok(req) => req,
+        Err(e) => {
+            error!(error = %e, "Admission review missing or invalid request");
             return (
                 StatusCode::BAD_REQUEST,
-                Json(create_response(
-                    "",
-                    false,
-                    "Missing request in AdmissionReview",
-                    None,
-                )),
+                Json(
+                    AdmissionResponse::invalid(format!(
+                        "Missing request in AdmissionReview: {}",
+                        e
+                    ))
+                    .into_review(),
+                ),
             );
         }
     };
 
-    let uid = request.uid.clone();
+    let uid = &request.uid;
     info!(
         uid = %uid,
-        operation = %request.operation,
+        operation = ?request.operation,
         namespace = ?request.namespace,
         name = ?request.name,
         "Processing PostgresUpgrade admission request"
     );
 
     // DELETE operations are always allowed
-    if request.operation == "DELETE" {
+    if request.operation == Operation::Delete {
         info!(uid = %uid, "DELETE operation allowed");
-        return (StatusCode::OK, Json(create_response(&uid, true, "", None)));
+        return (
+            StatusCode::OK,
+            Json(AdmissionResponse::from(&request).into_review()),
+        );
     }
 
-    // Parse the new object
-    let upgrade: PostgresUpgrade = match request.object {
-        Some(obj) => match serde_json::from_value(obj) {
-            Ok(u) => u,
-            Err(e) => {
-                error!(error = %e, "Failed to parse PostgresUpgrade");
-                return (
-                    StatusCode::OK,
-                    Json(create_response(
-                        &uid,
-                        false,
-                        &format!("Failed to parse object: {}", e),
-                        None,
-                    )),
-                );
-            }
-        },
+    // Get the new object (typed as PostgresUpgrade)
+    let upgrade: PostgresUpgrade = match &request.object {
+        Some(obj) => obj.clone(),
         None => {
             return (
                 StatusCode::OK,
-                Json(create_response(
-                    &uid,
-                    false,
+                Json(deny_with_reason(
+                    &request,
                     "Missing object in request",
-                    None,
+                    "InvalidRequest",
                 )),
             );
         }
     };
 
-    // Parse the old object for UPDATE operations
-    let old_upgrade: Option<PostgresUpgrade> = match &request.old_object {
-        Some(obj) => match serde_json::from_value(obj.clone()) {
-            Ok(u) => Some(u),
-            Err(e) => {
-                warn!(error = %e, "Failed to parse old PostgresUpgrade, treating as CREATE");
-                None
-            }
-        },
-        None => None,
-    };
+    // Get the old object for UPDATE operations (already typed)
+    let old_upgrade: Option<&PostgresUpgrade> = request.old_object.as_ref();
 
     // Fetch the source cluster for validation
     let namespace = upgrade.namespace().unwrap_or_else(|| "default".to_string());
@@ -439,8 +336,7 @@ pub(crate) async fn validate_postgres_upgrade(
     .await;
 
     // Create validation context
-    let ctx =
-        UpgradeValidationContext::new(&upgrade, old_upgrade.as_ref(), source_cluster.as_ref());
+    let ctx = UpgradeValidationContext::new(&upgrade, old_upgrade, source_cluster.as_ref());
 
     // Run synchronous validations
     let result = validate_upgrade_sync(&ctx);
@@ -455,14 +351,14 @@ pub(crate) async fn validate_postgres_upgrade(
         warn!(uid = %uid, reason = %reason, message = %message, "PostgresUpgrade admission denied");
         return (
             StatusCode::OK,
-            Json(create_response(&uid, false, &message, Some(&reason))),
+            Json(deny_with_reason(&request, &message, &reason)),
         );
     }
 
     // Run async validation for concurrent upgrades (only on CREATE)
-    if request.operation == "CREATE" {
+    if request.operation == Operation::Create {
         let concurrent_result =
-            validate_no_concurrent_upgrade(&state.client, &upgrade, old_upgrade.as_ref()).await;
+            validate_no_concurrent_upgrade(&state.client, &upgrade, old_upgrade).await;
 
         if !concurrent_result.allowed {
             let reason = concurrent_result
@@ -474,13 +370,16 @@ pub(crate) async fn validate_postgres_upgrade(
             warn!(uid = %uid, reason = %reason, message = %message, "PostgresUpgrade admission denied - concurrent upgrade");
             return (
                 StatusCode::OK,
-                Json(create_response(&uid, false, &message, Some(&reason))),
+                Json(deny_with_reason(&request, &message, &reason)),
             );
         }
     }
 
     info!(uid = %uid, "PostgresUpgrade admission request allowed");
-    (StatusCode::OK, Json(create_response(&uid, true, "", None)))
+    (
+        StatusCode::OK,
+        Json(AdmissionResponse::from(&request).into_review()),
+    )
 }
 
 /// Fetch the source cluster for upgrade validation
@@ -505,30 +404,22 @@ async fn get_source_cluster(
     }
 }
 
-/// Create an AdmissionReview response
-fn create_response(
-    uid: &str,
-    allowed: bool,
+/// Create a denied AdmissionResponse with both reason and message
+///
+/// The kube-rs `AdmissionResponse::deny()` only takes a message, but Kubernetes
+/// admission responses support both a machine-readable `reason` and a human-readable
+/// `message`. This helper provides both for better observability by including
+/// the reason in the message.
+fn deny_with_reason<T: Resource<DynamicType = ()>>(
+    request: &AdmissionRequest<T>,
     message: &str,
-    reason: Option<&str>,
-) -> AdmissionReviewResponse {
-    AdmissionReviewResponse {
-        api_version: "admission.k8s.io/v1".to_string(),
-        kind: "AdmissionReview".to_string(),
-        response: AdmissionResponse {
-            uid: uid.to_string(),
-            allowed,
-            status: if allowed {
-                None
-            } else {
-                Some(AdmissionStatus {
-                    code: 403,
-                    message: message.to_string(),
-                    reason: reason.map(String::from),
-                })
-            },
-        },
-    }
+    reason: &str,
+) -> AdmissionReview<kube::core::DynamicObject> {
+    // Include reason in the message for visibility since kube-rs deny() doesn't have a separate reason field
+    let full_message = format!("[{}] {}", reason, message);
+    AdmissionResponse::from(request)
+        .deny(full_message)
+        .into_review()
 }
 
 /// Default path to webhook TLS certificate
@@ -598,23 +489,87 @@ impl std::error::Error for WebhookError {}
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    use kube::core::admission::Operation;
+    use serde_json::json;
 
-    #[test]
-    fn test_create_allowed_response() {
-        let resp = create_response("test-uid", true, "", None);
-        assert_eq!(resp.response.uid, "test-uid");
-        assert!(resp.response.allowed);
-        assert!(resp.response.status.is_none());
+    /// Helper to create a minimal AdmissionRequest for testing
+    fn create_test_request() -> AdmissionRequest<PostgresCluster> {
+        let review_json = json!({
+            "apiVersion": "admission.k8s.io/v1",
+            "kind": "AdmissionReview",
+            "request": {
+                "uid": "test-uid",
+                "kind": {
+                    "group": "postgres-operator.smoketurner.com",
+                    "version": "v1alpha1",
+                    "kind": "PostgresCluster"
+                },
+                "resource": {
+                    "group": "postgres-operator.smoketurner.com",
+                    "version": "v1alpha1",
+                    "resource": "postgresclusters"
+                },
+                "requestKind": {
+                    "group": "postgres-operator.smoketurner.com",
+                    "version": "v1alpha1",
+                    "kind": "PostgresCluster"
+                },
+                "requestResource": {
+                    "group": "postgres-operator.smoketurner.com",
+                    "version": "v1alpha1",
+                    "resource": "postgresclusters"
+                },
+                "operation": "CREATE",
+                "namespace": "default",
+                "name": "test-cluster",
+                "object": null,
+                "oldObject": null,
+                "dryRun": false,
+                "userInfo": {
+                    "username": "test-user"
+                }
+            }
+        });
+
+        let review: AdmissionReview<PostgresCluster> = serde_json::from_value(review_json).unwrap();
+        review.try_into().unwrap()
     }
 
     #[test]
-    fn test_create_denied_response() {
-        let resp = create_response("test-uid", false, "Test error", Some("TestReason"));
-        assert_eq!(resp.response.uid, "test-uid");
-        assert!(!resp.response.allowed);
-        let status = resp.response.status.unwrap();
-        assert_eq!(status.code, 403);
-        assert_eq!(status.message, "Test error");
-        assert_eq!(status.reason, Some("TestReason".to_string()));
+    fn test_allowed_response() {
+        let request = create_test_request();
+        let response = AdmissionResponse::from(&request);
+
+        assert_eq!(response.uid, "test-uid");
+        assert!(response.allowed);
+    }
+
+    #[test]
+    fn test_denied_response_with_reason() {
+        let request = create_test_request();
+        let review = deny_with_reason(&request, "Test error", "TestReason");
+
+        // Verify the JSON serialization has correct structure
+        let json = serde_json::to_value(&review).unwrap();
+
+        assert_eq!(json["response"]["uid"].as_str(), Some("test-uid"));
+        assert_eq!(json["response"]["allowed"].as_bool(), Some(false));
+        // kube-rs uses "status" for the result field in JSON
+        // The status field structure depends on kube-rs serialization
+        assert!(
+            json["response"]["status"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("TestReason") && m.contains("Test error")),
+            "Message should contain reason and error text"
+        );
+    }
+
+    #[test]
+    fn test_operation_enum_comparison() {
+        // Verify operation enum works as expected
+        assert_eq!(Operation::Create, Operation::Create);
+        assert_eq!(Operation::Update, Operation::Update);
+        assert_eq!(Operation::Delete, Operation::Delete);
+        assert_ne!(Operation::Create, Operation::Delete);
     }
 }

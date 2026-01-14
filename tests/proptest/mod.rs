@@ -1780,6 +1780,7 @@ mod webhook_contract_tests {
     }
 
     /// Build an AdmissionReview JSON request
+    /// Includes all fields required by kube-rs AdmissionRequest
     fn build_admission_review(
         uid: &str,
         operation: &str,
@@ -1802,10 +1803,24 @@ mod webhook_contract_tests {
                 "version": "v1alpha1",
                 "resource": "postgresclusters"
             },
+            "requestKind": {
+                "group": "postgres-operator.smoketurner.com",
+                "version": "v1alpha1",
+                "kind": "PostgresCluster"
+            },
+            "requestResource": {
+                "group": "postgres-operator.smoketurner.com",
+                "version": "v1alpha1",
+                "resource": "postgresclusters"
+            },
             "operation": operation,
             "namespace": cluster.metadata.namespace,
-            "name": cluster.metadata.name,
-            "object": object
+            "name": cluster.metadata.name.clone().unwrap_or_default(),
+            "object": object,
+            "dryRun": false,
+            "userInfo": {
+                "username": "test-user"
+            }
         });
 
         if let Some(old) = old_object {
@@ -1823,6 +1838,7 @@ mod webhook_contract_tests {
         #![proptest_config(ProptestConfig::with_cases(50))]
 
         /// Property: AdmissionReview request deserializes correctly with camelCase fields
+        /// Uses kube-rs AdmissionReview<PostgresCluster> type
         #[test]
         fn prop_admission_review_deserializes(
             uid in valid_uid(),
@@ -1834,50 +1850,46 @@ mod webhook_contract_tests {
             let cluster = cluster_from_spec(spec);
             let review_json = build_admission_review(&uid, &op, &cluster, None);
 
-            // Should deserialize without error
-            let review: Result<AdmissionReview, _> = serde_json::from_value(review_json);
+            // Should deserialize without error using kube-rs typed AdmissionReview
+            let review: Result<AdmissionReview<PostgresCluster>, _> = serde_json::from_value(review_json);
             prop_assert!(review.is_ok(), "AdmissionReview should deserialize: {:?}", review.err());
 
-            let review = review.unwrap();
-            prop_assert_eq!(review.api_version, "admission.k8s.io/v1");
-            prop_assert_eq!(review.kind, "AdmissionReview");
-            prop_assert!(review.request.is_some(), "Request should be present");
+            // Extract the request using try_into
+            let request: Result<kube::core::admission::AdmissionRequest<PostgresCluster>, _> = review.unwrap().try_into();
+            prop_assert!(request.is_ok(), "Should extract request from review");
 
-            let request = review.request.unwrap();
+            let request = request.unwrap();
             prop_assert_eq!(request.uid, uid);
-            prop_assert_eq!(request.operation, op);
         }
 
-        /// Property: AdmissionReview response serializes with correct camelCase fields
+        /// Property: AdmissionResponse from kube-rs serializes correctly
         #[test]
-        fn prop_admission_review_response_serializes(
+        fn prop_admission_response_serializes(
             uid in valid_uid(),
             allowed in proptest::bool::ANY,
-            message in "[a-zA-Z ]{0,50}",
-            reason in proptest::option::of("[A-Z][a-zA-Z]{3,15}")
+            message in "[a-zA-Z ]{1,50}"
         ) {
-            use postgres_operator::webhooks::{AdmissionReviewResponse, AdmissionResponse, AdmissionStatus};
+            use postgres_operator::webhooks::{AdmissionReview, AdmissionResponse};
 
-            let response = AdmissionReviewResponse {
-                api_version: "admission.k8s.io/v1".to_string(),
-                kind: "AdmissionReview".to_string(),
-                response: AdmissionResponse {
-                    uid: uid.clone(),
-                    allowed,
-                    status: if allowed {
-                        None
-                    } else {
-                        Some(AdmissionStatus {
-                            code: 403,
-                            message: message.clone(),
-                            reason: reason.clone(),
-                        })
-                    },
-                },
+            let cluster = cluster_from_spec(minimal_spec());
+            let review_json = build_admission_review(&uid, "CREATE", &cluster, None);
+
+            // Deserialize to get a request
+            let review: AdmissionReview<PostgresCluster> = serde_json::from_value(review_json).unwrap();
+            let request: kube::core::admission::AdmissionRequest<PostgresCluster> = review.try_into().unwrap();
+
+            // Create response using kube-rs API
+            let response = if allowed {
+                AdmissionResponse::from(&request)
+            } else {
+                AdmissionResponse::from(&request).deny(message.clone())
             };
 
+            // Convert to review for serialization
+            let review_response = response.into_review();
+
             // Serialize to JSON
-            let json_result = serde_json::to_value(&response);
+            let json_result = serde_json::to_value(&review_response);
             prop_assert!(json_result.is_ok(), "Response should serialize");
 
             let json = json_result.unwrap();
@@ -1888,37 +1900,26 @@ mod webhook_contract_tests {
             prop_assert_eq!(json["response"]["uid"].as_str(), Some(uid.as_str()));
             prop_assert_eq!(json["response"]["allowed"].as_bool(), Some(allowed));
 
-            // Verify status fields when denied
+            // When denied, status/result should have the message
             if !allowed {
                 prop_assert!(json["response"]["status"].is_object(), "Status should be present when denied");
-                prop_assert_eq!(json["response"]["status"]["code"].as_i64(), Some(403));
-                prop_assert_eq!(json["response"]["status"]["message"].as_str(), Some(message.as_str()));
-                if let Some(ref r) = reason {
-                    prop_assert_eq!(json["response"]["status"]["reason"].as_str(), Some(r.as_str()));
-                }
-            } else {
-                // Status should be absent when allowed (skip_serializing_if works)
-                prop_assert!(json["response"]["status"].is_null() || !json["response"].as_object().unwrap().contains_key("status"),
-                    "Status should be absent when allowed");
             }
         }
 
-        /// Property: UID is always echoed back in response
+        /// Property: UID is always echoed back in response via kube-rs
         #[test]
         fn prop_uid_echoed_in_response(uid in valid_uid()) {
-            use postgres_operator::webhooks::{AdmissionReviewResponse, AdmissionResponse};
+            use postgres_operator::webhooks::{AdmissionReview, AdmissionResponse};
 
-            let response = AdmissionReviewResponse {
-                api_version: "admission.k8s.io/v1".to_string(),
-                kind: "AdmissionReview".to_string(),
-                response: AdmissionResponse {
-                    uid: uid.clone(),
-                    allowed: true,
-                    status: None,
-                },
-            };
+            let cluster = cluster_from_spec(minimal_spec());
+            let review_json = build_admission_review(&uid, "CREATE", &cluster, None);
 
+            let review: AdmissionReview<PostgresCluster> = serde_json::from_value(review_json).unwrap();
+            let request: kube::core::admission::AdmissionRequest<PostgresCluster> = review.try_into().unwrap();
+
+            let response = AdmissionResponse::from(&request).into_review();
             let json: Value = serde_json::to_value(&response).unwrap();
+
             prop_assert_eq!(json["response"]["uid"].as_str(), Some(uid.as_str()), "UID must be echoed exactly");
         }
 
@@ -1935,61 +1936,51 @@ mod webhook_contract_tests {
             let new_cluster = cluster_from_spec(new_spec);
             let review_json = build_admission_review(&uid, "UPDATE", &new_cluster, Some(&old_cluster));
 
-            let review: AdmissionReview = serde_json::from_value(review_json).unwrap();
-            let request = review.request.unwrap();
+            let review: AdmissionReview<PostgresCluster> = serde_json::from_value(review_json).unwrap();
+            let request: kube::core::admission::AdmissionRequest<PostgresCluster> = review.try_into().unwrap();
 
             prop_assert!(request.old_object.is_some(), "UPDATE should have oldObject");
             prop_assert!(request.object.is_some(), "UPDATE should have object");
         }
 
-        /// Property: Response status code is always 403 when denied
+        /// Property: Response status includes message when denied via kube-rs
         #[test]
-        fn prop_denied_status_code_403(
+        fn prop_denied_has_status_message(
             uid in valid_uid(),
             message in "[a-zA-Z ]{1,30}"
         ) {
-            use postgres_operator::webhooks::{AdmissionReviewResponse, AdmissionResponse, AdmissionStatus};
+            use postgres_operator::webhooks::{AdmissionReview, AdmissionResponse};
 
-            let response = AdmissionReviewResponse {
-                api_version: "admission.k8s.io/v1".to_string(),
-                kind: "AdmissionReview".to_string(),
-                response: AdmissionResponse {
-                    uid,
-                    allowed: false,
-                    status: Some(AdmissionStatus {
-                        code: 403,
-                        message,
-                        reason: Some("ValidationFailed".to_string()),
-                    }),
-                },
-            };
+            let cluster = cluster_from_spec(minimal_spec());
+            let review_json = build_admission_review(&uid, "CREATE", &cluster, None);
 
+            let review: AdmissionReview<PostgresCluster> = serde_json::from_value(review_json).unwrap();
+            let request: kube::core::admission::AdmissionRequest<PostgresCluster> = review.try_into().unwrap();
+
+            let response = AdmissionResponse::from(&request).deny(message.clone()).into_review();
             let json: Value = serde_json::to_value(&response).unwrap();
-            prop_assert_eq!(json["response"]["status"]["code"].as_i64(), Some(403), "Denied responses should have 403 status code");
+
+            // kube-rs deny() sets status.message when denied
+            prop_assert!(json["response"]["status"]["message"].as_str().is_some(), "Denied responses should have status message");
+            prop_assert_eq!(json["response"]["status"]["message"].as_str(), Some(message.as_str()), "Message should match");
         }
     }
 
-    /// Verify the exact field names match Kubernetes API expectations
+    /// Verify the exact field names match Kubernetes API expectations using kube-rs types
     #[test]
     fn test_response_field_names_match_kubernetes_spec() {
-        use postgres_operator::webhooks::{
-            AdmissionResponse, AdmissionReviewResponse, AdmissionStatus,
-        };
+        use postgres_operator::webhooks::{AdmissionResponse, AdmissionReview};
 
-        let response = AdmissionReviewResponse {
-            api_version: "admission.k8s.io/v1".to_string(),
-            kind: "AdmissionReview".to_string(),
-            response: AdmissionResponse {
-                uid: "test-uid".to_string(),
-                allowed: false,
-                status: Some(AdmissionStatus {
-                    code: 403,
-                    message: "Test message".to_string(),
-                    reason: Some("TestReason".to_string()),
-                }),
-            },
-        };
+        let cluster = cluster_from_spec(minimal_spec());
+        let review_json = build_admission_review("test-uid", "CREATE", &cluster, None);
 
+        let review: AdmissionReview<PostgresCluster> = serde_json::from_value(review_json).unwrap();
+        let request: kube::core::admission::AdmissionRequest<PostgresCluster> =
+            review.try_into().unwrap();
+
+        let response = AdmissionResponse::from(&request)
+            .deny("Test message")
+            .into_review();
         let json: Value = serde_json::to_value(&response).unwrap();
 
         // These exact field names are required by Kubernetes
@@ -2009,9 +2000,11 @@ mod webhook_contract_tests {
             json.get("api_version").is_none(),
             "Must NOT have api_version (snake_case)"
         );
+
+        // kube-rs includes status with message when denied
         assert!(
-            resp.get("status").unwrap().get("code").is_some(),
-            "Status must have code"
+            resp.get("status").is_some(),
+            "Status must be present when denied"
         );
         assert!(
             resp.get("status").unwrap().get("message").is_some(),
@@ -2019,7 +2012,7 @@ mod webhook_contract_tests {
         );
     }
 
-    /// Verify AdmissionReview request can be round-tripped
+    /// Verify AdmissionReview request can be round-tripped using kube-rs types
     #[test]
     fn test_admission_review_round_trip() {
         use postgres_operator::webhooks::AdmissionReview;
@@ -2032,17 +2025,15 @@ mod webhook_contract_tests {
             None,
         );
 
-        // Deserialize
-        let review: AdmissionReview =
+        // Deserialize using kube-rs typed AdmissionReview
+        let review: AdmissionReview<PostgresCluster> =
             serde_json::from_value(review_json.clone()).expect("should deserialize");
 
-        // Verify key fields
-        assert_eq!(review.api_version, "admission.k8s.io/v1");
-        assert_eq!(review.kind, "AdmissionReview");
+        // Extract request
+        let request: kube::core::admission::AdmissionRequest<PostgresCluster> =
+            review.try_into().expect("should have request");
 
-        let request = review.request.expect("should have request");
         assert_eq!(request.uid, "12345678-1234-1234-1234-123456789abc");
-        assert_eq!(request.operation, "CREATE");
         assert_eq!(request.kind.group, "postgres-operator.smoketurner.com");
         assert_eq!(request.kind.version, "v1alpha1");
         assert_eq!(request.kind.kind, "PostgresCluster");

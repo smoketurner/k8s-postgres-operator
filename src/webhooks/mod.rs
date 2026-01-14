@@ -15,8 +15,5 @@ pub use server::{
     WEBHOOK_CERT_PATH, WEBHOOK_KEY_PATH, WEBHOOK_PORT, WebhookError, run_webhook_server,
 };
 
-// Re-export admission review types for contract testing
-pub use server::{
-    AdmissionRequest, AdmissionResponse, AdmissionReview, AdmissionReviewResponse, AdmissionStatus,
-    GroupVersionKind, GroupVersionResource,
-};
+// Re-export kube-rs admission types for contract testing
+pub use kube::core::admission::{AdmissionRequest, AdmissionResponse, AdmissionReview, Operation};
