@@ -185,38 +185,71 @@ make fmt && make lint && make test
 
 ```
 ├── src/
-│   ├── main.rs              # Entry point, leader election
-│   ├── lib.rs               # Controller setup, exports
+│   ├── main.rs                    # Entry point, leader election
+│   ├── lib.rs                     # Controller setup, exports
+│   ├── health.rs                  # Health/metrics server
 │   ├── controller/
-│   │   ├── mod.rs           # Module exports
-│   │   ├── reconciler.rs    # Main reconciliation loop
-│   │   ├── state_machine.rs # Cluster lifecycle FSM
-│   │   ├── status.rs        # Status/condition management
-│   │   ├── context.rs       # Shared context
-│   │   └── error.rs         # Error types, backoff
+│   │   ├── mod.rs                 # Module exports
+│   │   ├── cluster_reconciler.rs  # PostgresCluster reconciliation loop
+│   │   ├── cluster_state_machine.rs # Cluster lifecycle FSM
+│   │   ├── cluster_error.rs       # Cluster error types, backoff
+│   │   ├── database_reconciler.rs # PostgresDatabase reconciliation
+│   │   ├── upgrade_reconciler.rs  # PostgresUpgrade reconciliation
+│   │   ├── upgrade_state_machine.rs # Upgrade lifecycle FSM
+│   │   ├── upgrade_error.rs       # Upgrade error types
+│   │   ├── status.rs              # Status/condition management
+│   │   ├── context.rs             # Shared context
+│   │   ├── validation.rs          # Spec validation logic
+│   │   ├── cleanup.rs             # Resource cleanup utilities
+│   │   ├── replication_lag.rs     # Replication lag monitoring
+│   │   └── backup_status.rs       # Backup status collection
 │   ├── crd/
-│   │   ├── mod.rs           # Module exports
-│   │   └── postgres_cluster.rs  # CRD types
+│   │   ├── mod.rs                 # Module exports
+│   │   ├── postgres_cluster.rs    # PostgresCluster CRD
+│   │   ├── postgres_database.rs   # PostgresDatabase CRD
+│   │   └── postgres_upgrade.rs    # PostgresUpgrade CRD
 │   ├── resources/
-│   │   ├── mod.rs           # Module exports
-│   │   ├── common.rs        # Labels, owner refs
-│   │   ├── patroni.rs       # StatefulSet, ConfigMap, RBAC
-│   │   ├── service.rs       # Services
-│   │   ├── secret.rs        # Credentials
-│   │   ├── pdb.rs           # PodDisruptionBudget
-│   │   └── pgbouncer.rs     # PgBouncer Deployment
-│   └── health.rs            # Health/metrics server
+│   │   ├── mod.rs                 # Module exports
+│   │   ├── common.rs              # Labels, owner refs
+│   │   ├── patroni.rs             # StatefulSet, ConfigMap, RBAC
+│   │   ├── service.rs             # Services
+│   │   ├── secret.rs              # Credentials
+│   │   ├── pdb.rs                 # PodDisruptionBudget
+│   │   ├── pgbouncer.rs           # PgBouncer Deployment
+│   │   ├── certificate.rs         # cert-manager Certificate
+│   │   ├── backup.rs              # WAL-G backup configuration
+│   │   ├── scaled_object.rs       # KEDA ScaledObject
+│   │   ├── network_policy.rs      # NetworkPolicy
+│   │   ├── sql.rs                 # SQL execution via pod exec
+│   │   ├── postgres_client.rs     # PostgreSQL client connections
+│   │   ├── replication.rs         # Logical replication setup
+│   │   └── port_forward.rs        # Port-forward API
+│   └── webhooks/
+│       ├── mod.rs                 # Module exports
+│       ├── server.rs              # Webhook HTTP server
+│       └── policies/
+│           ├── mod.rs             # Policy exports
+│           ├── backup.rs          # Backup encryption policy
+│           ├── tls.rs             # TLS configuration policy
+│           ├── immutability.rs    # Immutable field protection
+│           ├── production.rs      # Production namespace rules
+│           └── upgrade.rs         # Upgrade validation
 ├── tests/
-│   ├── unit/                # Unit tests
-│   ├── integration/         # Integration tests
-│   └── proptest/            # Property-based tests
+│   ├── unit/                      # Unit tests
+│   ├── integration/               # Integration tests
+│   └── proptest/                  # Property-based tests
 ├── config/
-│   ├── crd/                 # CRD YAML
-│   ├── rbac/                # RBAC manifests
-│   ├── deploy/              # Deployment manifests
-│   └── samples/             # Example PostgresClusters
-└── charts/
-    └── postgres-operator/   # Helm chart
+│   ├── crd/                       # CRD YAML
+│   ├── rbac/                      # RBAC manifests
+│   ├── deploy/                    # Deployment manifests
+│   └── samples/                   # Example PostgresClusters
+└── docs/
+    ├── api-reference.md           # CRD field reference
+    ├── architecture.md            # Design decisions
+    ├── backup-restore.md          # Backup configuration
+    ├── development.md             # This file
+    ├── operations.md              # Day-2 operations
+    └── upgrades.md                # Major version upgrades
 ```
 
 ## Debugging

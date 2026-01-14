@@ -76,10 +76,11 @@ pub async fn reconcile_database(
     db: Arc<PostgresDatabase>,
     ctx: Arc<DatabaseContext>,
 ) -> Result<Action> {
+    let start_time = std::time::Instant::now();
     let name = db.name_any();
     let namespace = db.namespace().ok_or(DatabaseError::MissingNamespace)?;
 
-    debug!("Reconciling PostgresDatabase");
+    info!("Reconciling PostgresDatabase");
 
     // Check if being deleted
     if db.metadata.deletion_timestamp.is_some() {
@@ -225,11 +226,24 @@ pub async fn reconcile_database(
             )
             .await?;
 
-            info!(name = %name, namespace = %namespace, "PostgresDatabase is ready");
+            let duration_secs = start_time.elapsed().as_secs_f64();
+            info!(
+                name = %name,
+                namespace = %namespace,
+                "Reconciliation completed successfully in {:.3}s (phase: Ready)",
+                duration_secs
+            );
             Ok(Action::requeue(Duration::from_secs(300))) // Recheck every 5 minutes
         }
         Err(e) => {
-            error!(name = %name, namespace = %namespace, error = %e, "Failed to provision database");
+            let duration_secs = start_time.elapsed().as_secs_f64();
+            error!(
+                name = %name,
+                namespace = %namespace,
+                error = %e,
+                "Reconciliation failed after {:.3}s",
+                duration_secs
+            );
 
             // Update status to Failed
             update_status(

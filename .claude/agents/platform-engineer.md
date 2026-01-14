@@ -145,6 +145,7 @@ This is a Kubernetes operator for PostgreSQL using:
 Key CRDs at `postgres-operator.smoketurner.com/v1alpha1`:
 - `PostgresCluster`: Manages PostgreSQL clusters with HA
 - `PostgresDatabase`: Self-service database/role provisioning within clusters
+- `PostgresUpgrade`: Blue-green major version upgrades with logical replication
 
 ### Security Enforcement via Webhooks
 

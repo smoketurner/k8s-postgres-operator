@@ -3,6 +3,7 @@
 This document provides a complete reference for the operator's custom resources:
 - [PostgresCluster](#postgrescluster) - Manages PostgreSQL clusters with high availability
 - [PostgresDatabase](#postgresdatabase) - Declarative database and role provisioning
+- [PostgresUpgrade](#postgresupgrade) - Blue-green major version upgrades with logical replication
 
 ## PostgresCluster
 
@@ -854,4 +855,232 @@ stringData:
   port: "5432"
   database: myapp
   uri: postgresql://myapp_owner:<password>@my-cluster-primary.default.svc:5432/myapp
+```
+
+---
+
+## PostgresUpgrade
+
+The `PostgresUpgrade` resource enables near-zero downtime major version upgrades using blue-green deployment with logical replication.
+
+```yaml
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
+kind: PostgresUpgrade
+metadata:
+  name: my-cluster-upgrade
+spec:
+  sourceCluster:
+    name: my-cluster
+  targetVersion: "17"
+  strategy:
+    cutover:
+      mode: Manual
+```
+
+For detailed upgrade procedures, see the [Upgrades Guide](upgrades.md).
+
+### PostgresUpgradeSpec
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `sourceCluster` | [ClusterReference](#clusterreference) | Yes | Reference to the source cluster to upgrade |
+| `targetVersion` | string | Yes | Target PostgreSQL version ("15", "16", or "17") |
+| `targetClusterOverrides` | [TargetClusterOverrides](#targetclusteroverrides) | No | Override settings for the target cluster |
+| `strategy` | [UpgradeStrategy](#upgradestrategy) | No | Upgrade strategy configuration |
+
+### ClusterReference
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | Yes | - | Name of the PostgresCluster |
+| `namespace` | string | No | Same namespace | Namespace of the PostgresCluster |
+
+### TargetClusterOverrides
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `replicas` | integer | No | Override replica count for target cluster |
+| `resources` | [ResourceRequirements](#resourcerequirements) | No | Override resources for target cluster |
+| `labels` | map[string]string | No | Additional labels for target cluster |
+
+### UpgradeStrategy
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `strategyType` | string | No | BlueGreen | Currently only "BlueGreen" is supported |
+| `cutover` | [CutoverConfig](#cutoverconfig) | No | - | Cutover behavior configuration |
+| `preChecks` | [PreChecksConfig](#prechecksconfig) | No | - | Pre-cutover safety checks |
+| `timeouts` | [UpgradeTimeouts](#upgradetimeouts) | No | - | Phase timeout configuration |
+| `postCutover` | [PostCutoverConfig](#postcutoverconfig) | No | - | Post-cutover behavior |
+
+### CutoverConfig
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `mode` | string | No | Manual | "Manual" requires annotation, "Automatic" proceeds when checks pass |
+| `allowedWindow` | [MaintenanceWindow](#maintenancewindow) | No | - | Time window for automatic cutover |
+
+### MaintenanceWindow
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `startTime` | string | Yes | - | Start time in 24h format (e.g., "02:00") |
+| `endTime` | string | Yes | - | End time in 24h format (e.g., "04:00") |
+| `timezone` | string | No | UTC | Timezone (e.g., "America/New_York") |
+
+### PreChecksConfig
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `maxReplicationLagSeconds` | integer | No | 0 | Maximum replication lag before cutover |
+| `verifyRowCounts` | boolean | No | true | Verify row counts match |
+| `rowCountTolerance` | integer | No | 0 | Tolerance for row count differences |
+| `minVerificationPasses` | integer | No | 3 | Consecutive verification passes required |
+| `verificationInterval` | string | No | "1m" | Time between verification passes |
+| `requireBackupWithin` | string | No | "1h" | Recent backup required for automatic cutover |
+| `drainConnectionsTimeout` | string | No | "5m" | Timeout for draining connections |
+
+### UpgradeTimeouts
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `targetClusterReady` | string | No | "30m" | Timeout for target cluster to become ready |
+| `initialSync` | string | No | "24h" | Timeout for initial data sync |
+| `replicationCatchup` | string | No | "1h" | Timeout for replication to catch up |
+| `verification` | string | No | "30m" | Timeout for verification to pass |
+
+### PostCutoverConfig
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `keepSourceCluster` | boolean | No | true | Always true - source never auto-deleted |
+| `minRetentionPeriod` | string | No | "24h" | Minimum retention before cleanup allowed |
+| `healthCheckInterval` | string | No | "1m" | Interval between post-cutover health checks |
+| `healthCheckDuration` | string | No | "10m" | Duration of post-cutover health checking |
+
+### PostgresUpgradeStatus
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `phase` | string | Current upgrade phase |
+| `observedGeneration` | integer | Last observed spec generation |
+| `startedAt` | string | When the upgrade started (RFC3339) |
+| `completedAt` | string | When the upgrade completed (RFC3339) |
+| `phaseStartedAt` | string | When the current phase started (RFC3339) |
+| `message` | string | Status message for current phase |
+| `sourceCluster` | [ClusterStatus](#clusterstatus-upgrade) | Source cluster status |
+| `targetCluster` | [ClusterStatus](#clusterstatus-upgrade) | Target cluster status |
+| `replication` | [ReplicationStatus](#replicationstatus) | Replication status |
+| `verification` | [VerificationStatus](#verificationstatus) | Row count verification status |
+| `sequences` | [SequenceSyncStatus](#sequencesyncstatus) | Sequence synchronization status |
+| `rollback` | [RollbackStatus](#rollbackstatus) | Rollback feasibility status |
+| `conditions` | []Condition | Kubernetes-style conditions |
+
+### Upgrade Phase Values
+
+| Phase | Description |
+|-------|-------------|
+| Pending | Validating source cluster and configuration |
+| CreatingTarget | Creating target cluster with new version |
+| ConfiguringReplication | Setting up logical replication |
+| Replicating | Data replication in progress |
+| Verifying | Verifying row counts match |
+| SyncingSequences | Synchronizing sequences |
+| ReadyForCutover | All checks passed, ready for cutover |
+| WaitingForManualCutover | Manual mode: waiting for annotation |
+| CuttingOver | Switching traffic to target cluster |
+| HealthChecking | Post-cutover health verification |
+| Completed | Upgrade completed successfully |
+| Failed | Upgrade failed (see conditions) |
+| RolledBack | Rolled back to source cluster |
+
+### ReplicationStatus
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | string | Replication state: NotConfigured, Syncing, Active, Synced, Stopped, Error |
+| `lagBytes` | integer | Replication lag in bytes |
+| `lagSeconds` | integer | Replication lag in seconds |
+| `lsnInSync` | boolean | Whether LSN positions are synchronized |
+| `sourceLsn` | string | Current WAL LSN on source |
+| `targetLsn` | string | Received WAL LSN on target |
+
+### VerificationStatus
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `lastCheckTime` | string | Last verification time (RFC3339) |
+| `tablesVerified` | integer | Number of tables verified |
+| `tablesMatched` | integer | Number of tables with matching counts |
+| `tablesMismatched` | integer | Number of tables with mismatches |
+| `consecutivePasses` | integer | Consecutive successful passes |
+
+### SequenceSyncStatus
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `synced` | boolean | Whether sequences have been synced |
+| `syncedCount` | integer | Number of sequences synced |
+| `failedCount` | integer | Number of sequences that failed |
+| `syncedAt` | string | When sequences were synced (RFC3339) |
+
+### RollbackStatus
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `feasible` | boolean | Whether rollback is currently possible |
+| `reason` | string | Reason for feasibility/infeasibility |
+| `dataLossRisk` | boolean | Whether rollback would cause data loss |
+
+### Upgrade Annotations
+
+| Annotation | Value | Description |
+|------------|-------|-------------|
+| `postgres-operator.smoketurner.com/cutover` | "now" | Trigger manual cutover |
+| `postgres-operator.smoketurner.com/rollback` | "now" | Trigger rollback to source |
+
+**Example (manual cutover):**
+
+```yaml
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
+kind: PostgresUpgrade
+metadata:
+  name: my-cluster-upgrade
+spec:
+  sourceCluster:
+    name: my-cluster
+  targetVersion: "17"
+  strategy:
+    strategyType: BlueGreen
+    cutover:
+      mode: Manual
+    preChecks:
+      maxReplicationLagSeconds: 0
+      verifyRowCounts: true
+      minVerificationPasses: 3
+    timeouts:
+      targetClusterReady: "30m"
+      initialSync: "24h"
+```
+
+**Example (automatic cutover with maintenance window):**
+
+```yaml
+apiVersion: postgres-operator.smoketurner.com/v1alpha1
+kind: PostgresUpgrade
+metadata:
+  name: my-cluster-upgrade
+spec:
+  sourceCluster:
+    name: my-cluster
+  targetVersion: "17"
+  strategy:
+    cutover:
+      mode: Automatic
+      allowedWindow:
+        startTime: "02:00"
+        endTime: "04:00"
+        timezone: "UTC"
+    preChecks:
+      requireBackupWithin: "1h"
 ```

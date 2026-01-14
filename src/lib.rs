@@ -44,9 +44,8 @@ where
 ///
 /// This ensures consistent behavior across all controllers:
 /// - `any_semantic()`: More reliable resource discovery in test environments
-/// - `streaming_lists()`: Reduces memory spike during initial list (Kubernetes 1.27+)
 fn default_watcher_config() -> WatcherConfig {
-    WatcherConfig::default().any_semantic().streaming_lists()
+    WatcherConfig::default().any_semantic()
 }
 
 /// Create a filtered stream for a resource type with standard optimizations.
@@ -147,10 +146,13 @@ pub async fn run_controller_scoped(
                     // ObjectNotFound/NotFound errors are expected after deletion when
                     // related watch events trigger reconciliation for a deleted object.
                     // Log these at debug level instead of error.
-                    let is_not_found = matches!(
-                        &e,
-                        kube::runtime::controller::Error::ReconcilerFailed(err, _) if err.is_not_found()
-                    );
+                    let is_not_found = match &e {
+                        kube::runtime::controller::Error::ObjectNotFound(_) => true,
+                        kube::runtime::controller::Error::ReconcilerFailed(err, _) => {
+                            err.is_not_found()
+                        }
+                        _ => false,
+                    };
                     if is_not_found {
                         tracing::debug!("Object no longer exists (likely deleted): {:?}", e);
                     } else {
@@ -208,11 +210,13 @@ pub async fn run_database_controller_scoped(client: Client, namespace: Option<&s
                     tracing::debug!("Reconciled database: {}", obj.name);
                 }
                 Err(e) => {
-                    let is_not_found = matches!(
-                        &e,
-                        kube::runtime::controller::Error::ReconcilerFailed(err, _)
-                            if format!("{:?}", err).contains("NotFound")
-                    );
+                    let is_not_found = match &e {
+                        kube::runtime::controller::Error::ObjectNotFound(_) => true,
+                        kube::runtime::controller::Error::ReconcilerFailed(err, _) => {
+                            format!("{:?}", err).contains("NotFound")
+                        }
+                        _ => false,
+                    };
                     if is_not_found {
                         tracing::debug!("Database object no longer exists: {:?}", e);
                     } else {
@@ -268,11 +272,13 @@ pub async fn run_upgrade_controller_scoped(client: Client, namespace: Option<&st
                     tracing::debug!("Reconciled upgrade: {}", obj.name);
                 }
                 Err(e) => {
-                    let is_not_found = matches!(
-                        &e,
-                        kube::runtime::controller::Error::ReconcilerFailed(err, _)
-                            if format!("{:?}", err).contains("NotFound")
-                    );
+                    let is_not_found = match &e {
+                        kube::runtime::controller::Error::ObjectNotFound(_) => true,
+                        kube::runtime::controller::Error::ReconcilerFailed(err, _) => {
+                            format!("{:?}", err).contains("NotFound")
+                        }
+                        _ => false,
+                    };
                     if is_not_found {
                         tracing::debug!("Upgrade object no longer exists: {:?}", e);
                     } else {

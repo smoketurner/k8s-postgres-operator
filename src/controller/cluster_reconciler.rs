@@ -238,9 +238,18 @@ pub async fn reconcile(cluster: Arc<PostgresCluster>, ctx: Arc<Context>) -> Resu
     match result {
         Ok(action) => {
             ctx.record_reconcile(&ns, &name, duration_secs);
+            // Get the current phase after reconciliation (may have changed)
+            let clusters: Api<PostgresCluster> = Api::namespaced(ctx.client.clone(), &ns);
+            let final_phase = clusters
+                .get_opt(&name)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|c| c.status.map(|s| s.phase))
+                .unwrap_or(current_phase);
             info!(
-                "Reconciliation completed successfully in {:.3}s",
-                duration_secs
+                "Reconciliation completed successfully in {:.3}s (phase: {:?})",
+                duration_secs, final_phase
             );
             Ok(action)
         }
@@ -577,7 +586,7 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
     let status_manager = StatusManager::new(cluster, ctx, ns);
     let state_machine = ClusterStateMachine::new();
 
-    info!(
+    debug!(
         "Reconciling PostgreSQL cluster with Patroni ({} replicas)",
         cluster.spec.replicas
     );
@@ -656,18 +665,28 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
             debug!("Applied cert-manager Certificate for cluster {}", name);
         }
     } else {
-        // TLS explicitly disabled - warn about security implications
-        warn!(
+        // TLS explicitly disabled - log at debug level (event provides visibility)
+        debug!(
             "TLS is disabled for cluster {} - connections will be unencrypted",
             name
         );
-        ctx.publish_warning_event(
-            cluster,
-            "TLSDisabled",
-            "Security",
-            Some("TLS is disabled - PostgreSQL connections will be unencrypted".to_string()),
-        )
-        .await;
+        // Only emit event on spec changes (new generation) or first reconciliation
+        let should_emit_event = cluster
+            .status
+            .as_ref()
+            .and_then(|s| s.observed_generation)
+            .map_or(true, |observed| {
+                cluster.metadata.generation.map_or(false, |g| g != observed)
+            });
+        if should_emit_event {
+            ctx.publish_warning_event(
+                cluster,
+                "TLSDisabled",
+                "Security",
+                Some("TLS is disabled - PostgreSQL connections will be unencrypted".to_string()),
+            )
+            .await;
+        }
     }
 
     // Validate backup configuration if enabled
@@ -1523,7 +1542,7 @@ async fn reconcile_keda_resources(
 ) -> Result<()> {
     let name = cluster.name_any();
 
-    info!(cluster = %name, "Reconciling KEDA resources");
+    debug!(cluster = %name, "Reconciling KEDA resources");
 
     // Reader auto-scaling (ScaledObject)
     if let Some(scaled_obj) = scaled_object::generate_scaled_object(cluster) {
@@ -1642,7 +1661,24 @@ async fn add_finalizer(cluster: &PostgresCluster, ctx: &Context, ns: &str) -> Re
     Ok(())
 }
 
-/// Handle deletion of the PostgresCluster
+/// Maximum time to wait for pods to terminate during deletion (5 minutes)
+const DELETION_TIMEOUT_SECS: i64 = 300;
+
+/// Poll interval when waiting for pods to terminate
+const DELETION_POLL_INTERVAL: Duration = Duration::from_secs(3);
+
+/// Handle deletion of the PostgresCluster with phased cleanup.
+///
+/// This implements a multi-phase deletion to prevent the race condition where
+/// Patroni pods recreate DCS endpoints after the operator deletes them.
+///
+/// Phases:
+/// 1. Scale down StatefulSet to 0 replicas
+/// 2. Wait for all pods to terminate
+/// 3. Delete Patroni DCS endpoints (safe now - no pods to recreate them)
+/// 4. Remove finalizer
+///
+/// This is idempotent - each phase checks preconditions before proceeding.
 async fn handle_deletion(cluster: &PostgresCluster, ctx: &Context, ns: &str) -> Result<Action> {
     let name = cluster.name_any();
     info!("Handling deletion of {}", name);
@@ -1653,31 +1689,142 @@ async fn handle_deletion(cluster: &PostgresCluster, ctx: &Context, ns: &str) -> 
         warn!("Failed to update status to Deleting: {}", e);
     }
 
-    // Emit event for deletion
+    // Check for deletion timeout - if stuck too long, force cleanup
+    if let Some(elapsed) = check_deletion_timeout(cluster) {
+        warn!(
+            "Deletion of {} stuck for {:?}, forcing cleanup",
+            name, elapsed
+        );
+        ctx.publish_warning_event(
+            cluster,
+            "DeletionTimeout",
+            "Delete",
+            Some(format!(
+                "Deletion stuck for {:?}, forcing endpoint cleanup",
+                elapsed
+            )),
+        )
+        .await;
+
+        // Force delete endpoints and remove finalizer
+        delete_patroni_dcs_endpoints(ctx, ns, &name).await;
+        remove_finalizer(cluster, ctx, ns).await?;
+        return Ok(Action::await_change());
+    }
+
+    // Phase 1: Scale down the StatefulSet to 0 replicas
+    let sts_api: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), ns);
+    match sts_api.get_opt(&name).await? {
+        Some(sts) => {
+            let replicas = sts.spec.as_ref().and_then(|s| s.replicas).unwrap_or(0);
+            if replicas > 0 {
+                info!("Scaling down StatefulSet {} for deletion", name);
+                ctx.publish_normal_event(
+                    cluster,
+                    "ClusterDeleting",
+                    "Delete",
+                    Some(format!("Scaling down cluster {} for deletion", name)),
+                )
+                .await;
+
+                let patch = serde_json::json!({
+                    "spec": {
+                        "replicas": 0
+                    }
+                });
+                sts_api
+                    .patch(&name, &PatchParams::apply("postgres-operator"), &Patch::Merge(&patch))
+                    .await?;
+
+                // Requeue to check pod termination
+                return Ok(Action::requeue(DELETION_POLL_INTERVAL));
+            }
+        }
+        None => {
+            debug!("StatefulSet {} already deleted", name);
+        }
+    }
+
+    // Phase 2: Wait for all pods to terminate
+    let pods_remaining = count_cluster_pods(ctx, ns, &name).await?;
+    if pods_remaining > 0 {
+        info!(
+            "Waiting for {} pod(s) to terminate for cluster {}",
+            pods_remaining, name
+        );
+        return Ok(Action::requeue(DELETION_POLL_INTERVAL));
+    }
+
+    // Phase 3: Delete Patroni DCS endpoints
+    // Now safe - no Patroni pods running to recreate them
+    info!("All pods terminated, cleaning up DCS endpoints for {}", name);
+    delete_patroni_dcs_endpoints(ctx, ns, &name).await;
+
     ctx.publish_normal_event(
         cluster,
-        "ClusterDeleting",
+        "DcsCleanupComplete",
         "Delete",
-        Some(format!("Cluster {} is being deleted", name)),
+        Some(format!("Cleaned up DCS endpoints for cluster {}", name)),
     )
     .await;
 
-    // Delete Patroni DCS endpoints that are created by Patroni at runtime
-    // These are NOT owned by the PostgresCluster and won't be garbage collected
-    // If left behind, they cause new clusters with the same name to get stuck
-    //
-    // Patroni creates these endpoints for its Kubernetes DCS backend:
-    // - <scope>        : Primary endpoint for leader election
-    // - <scope>-config : Stores cluster configuration
-    // - <scope>-leader : Stores the leader key
-    // - <scope>-sync   : For synchronous replication coordination
+    // Phase 4: Remove the finalizer
+    remove_finalizer(cluster, ctx, ns).await?;
+
+    Ok(Action::await_change())
+}
+
+/// Check if deletion has been stuck for too long.
+/// Returns Some(duration) if timeout exceeded, None otherwise.
+fn check_deletion_timeout(cluster: &PostgresCluster) -> Option<Duration> {
+    let deletion_ts = cluster.metadata.deletion_timestamp.as_ref()?;
+    let deletion_time: DateTime<Utc> = deletion_ts.0;
+    let elapsed = Utc::now().signed_duration_since(deletion_time);
+
+    // Convert to std::time::Duration (handle negative)
+    let elapsed_std = elapsed
+        .to_std()
+        .unwrap_or(Duration::ZERO);
+
+    if elapsed_std.as_secs() > DELETION_TIMEOUT_SECS as u64 {
+        Some(elapsed_std)
+    } else {
+        None
+    }
+}
+
+/// Count pods belonging to this cluster.
+async fn count_cluster_pods(ctx: &Context, ns: &str, cluster_name: &str) -> Result<i32> {
+    let pods_api: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
+    let label_selector = format!("postgres-operator.smoketurner.com/cluster={}", cluster_name);
+
+    let pods = pods_api
+        .list(&ListParams::default().labels(&label_selector))
+        .await?;
+
+    Ok(i32::try_from(pods.items.len()).unwrap_or(0))
+}
+
+/// Delete all Patroni DCS endpoints for a cluster.
+///
+/// Patroni creates these endpoints for its Kubernetes DCS backend:
+/// - <scope>        : Primary endpoint for leader election
+/// - <scope>-config : Stores cluster configuration
+/// - <scope>-leader : Stores the leader key
+/// - <scope>-sync   : For synchronous replication coordination
+///
+/// These are NOT owned by the PostgresCluster and must be explicitly deleted
+/// to prevent new clusters with the same name from seeing stale data.
+async fn delete_patroni_dcs_endpoints(ctx: &Context, ns: &str, cluster_name: &str) {
     let endpoints_api: Api<Endpoints> = Api::namespaced(ctx.client.clone(), ns);
+
     for suffix in ["", "-config", "-leader", "-sync"] {
         let endpoint_name = if suffix.is_empty() {
-            name.clone()
+            cluster_name.to_string()
         } else {
-            format!("{}{}", name, suffix)
+            format!("{}{}", cluster_name, suffix)
         };
+
         match endpoints_api
             .delete(&endpoint_name, &DeleteParams::default())
             .await
@@ -1686,7 +1833,6 @@ async fn handle_deletion(cluster: &PostgresCluster, ctx: &Context, ns: &str) -> 
                 debug!("Deleted Patroni DCS endpoint: {}", endpoint_name);
             }
             Err(kube::Error::Api(err)) if err.code == 404 => {
-                // Endpoint doesn't exist, that's fine
                 debug!("Patroni endpoint {} not found, skipping", endpoint_name);
             }
             Err(e) => {
@@ -1694,39 +1840,42 @@ async fn handle_deletion(cluster: &PostgresCluster, ctx: &Context, ns: &str) -> 
             }
         }
     }
+}
 
-    // Kubernetes will garbage collect owned resources via owner references
-    // Just remove the finalizer to allow deletion to proceed
-
-    if has_finalizer(cluster) {
-        let api: Api<PostgresCluster> = Api::namespaced(ctx.client.clone(), ns);
-
-        let patch = serde_json::json!({
-            "metadata": {
-                "finalizers": null
-            }
-        });
-
-        match api
-            .patch(
-                &name,
-                &PatchParams::apply("postgres-operator"),
-                &Patch::Merge(&patch),
-            )
-            .await
-        {
-            Ok(_) => {
-                info!("Removed finalizer from {}", name);
-            }
-            Err(e) if is_namespace_not_found_error(&e) => {
-                // Namespace is gone - use special cleanup procedure
-                cleanup_stuck_resource::<PostgresCluster>(ctx.client.clone(), &name, ns).await?;
-            }
-            Err(e) => return Err(Error::KubeError(e)),
-        }
+/// Remove the finalizer from a cluster.
+async fn remove_finalizer(cluster: &PostgresCluster, ctx: &Context, ns: &str) -> Result<()> {
+    if !has_finalizer(cluster) {
+        return Ok(());
     }
 
-    Ok(Action::await_change())
+    let name = cluster.name_any();
+    let api: Api<PostgresCluster> = Api::namespaced(ctx.client.clone(), ns);
+
+    let patch = serde_json::json!({
+        "metadata": {
+            "finalizers": null
+        }
+    });
+
+    match api
+        .patch(
+            &name,
+            &PatchParams::apply("postgres-operator"),
+            &Patch::Merge(&patch),
+        )
+        .await
+    {
+        Ok(_) => {
+            info!("Removed finalizer from {}", name);
+            Ok(())
+        }
+        Err(e) if is_namespace_not_found_error(&e) => {
+            // Namespace is gone - use special cleanup procedure
+            cleanup_stuck_resource::<PostgresCluster>(ctx.client.clone(), &name, ns).await?;
+            Ok(())
+        }
+        Err(e) => Err(Error::KubeError(e)),
+    }
 }
 
 /// Check if a cluster has been stuck in Creating state for too long

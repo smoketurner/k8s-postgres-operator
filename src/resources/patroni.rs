@@ -14,10 +14,10 @@ use k8s_openapi::api::apps::v1::{
 };
 use k8s_openapi::api::core::v1::{
     Affinity, ConfigMap, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, EnvVarSource,
-    HTTPGetAction, PersistentVolumeClaim, PersistentVolumeClaimSpec, PodAffinityTerm,
-    PodAntiAffinity, PodSpec, PodTemplateSpec, Probe, ResourceRequirements, SecretKeySelector,
-    SecretVolumeSource, SecurityContext, ServiceAccount, Volume, VolumeMount,
-    WeightedPodAffinityTerm,
+    ExecAction, HTTPGetAction, Lifecycle, LifecycleHandler, PersistentVolumeClaim,
+    PersistentVolumeClaimSpec, PodAffinityTerm, PodAntiAffinity, PodSpec, PodTemplateSpec, Probe,
+    ResourceRequirements, SecretKeySelector, SecretVolumeSource, SecurityContext, ServiceAccount,
+    Volume, VolumeMount, WeightedPodAffinityTerm,
 };
 use k8s_openapi::api::rbac::v1::{Role, RoleBinding, RoleRef, Subject};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -754,6 +754,26 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster, keda_managed: boo
             allow_privilege_escalation: Some(false),
             ..Default::default()
         }),
+        // PreStop hook for graceful Patroni shutdown
+        // This ensures Patroni releases its DCS lock before the pod terminates,
+        // preventing stale lock data that would block new clusters with the same name
+        lifecycle: Some(Lifecycle {
+            pre_stop: Some(LifecycleHandler {
+                exec: Some(ExecAction {
+                    command: Some(vec![
+                        "/bin/sh".to_string(),
+                        "-c".to_string(),
+                        // Pause Patroni to prevent failover during shutdown,
+                        // then signal graceful shutdown via the REST API
+                        "curl -s -XPATCH -d '{\"paused\": true}' http://localhost:8008/config || true; \
+                         curl -s -XPOST http://localhost:8008/shutdown || true; \
+                         sleep 5".to_string(),
+                    ]),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
         ..Default::default()
     };
 
@@ -857,7 +877,8 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster, keda_managed: boo
                     init_containers: Some(vec![init_container]),
                     containers: vec![container],
                     volumes: Some(volumes),
-                    termination_grace_period_seconds: Some(30),
+                    // Increased to 60s to allow Patroni preStop hook to complete gracefully
+                    termination_grace_period_seconds: Some(60),
                     affinity: Some(generate_anti_affinity(&name)),
                     security_context: Some(k8s_openapi::api::core::v1::PodSecurityContext {
                         fs_group: Some(103), // postgres group

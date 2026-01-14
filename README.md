@@ -11,6 +11,7 @@ A Kubernetes operator for managing PostgreSQL clusters with high availability us
 - **Connection Pooling**: Optional PgBouncer sidecar for connection pooling
 - **TLS by Default**: Encrypted connections with automatic cert-manager integration
 - **Cloud Backups**: Continuous WAL archiving and scheduled base backups to S3 or S3-compatible storage with point-in-time recovery (PITR)
+- **Major Version Upgrades**: Near-zero downtime upgrades using blue-green deployment with logical replication
 - **Metrics**: Prometheus-compatible metrics endpoint
 - **Zero-Downtime Updates**: Rolling updates with PodDisruptionBudgets
 
@@ -92,6 +93,7 @@ For detailed documentation, see the [docs/](docs/) directory:
 - **[Backup & Restore](docs/backup-restore.md)** - Cloud backup configuration, PITR, restore procedures
 - **[Development](docs/development.md)** - Building, testing, contributing
 - **[Operations](docs/operations.md)** - Day-2 operations, scaling, troubleshooting, maintenance
+- **[Upgrades](docs/upgrades.md)** - Major version upgrades using blue-green deployment
 
 Sample configurations are available in [`config/samples/`](config/samples/).
 

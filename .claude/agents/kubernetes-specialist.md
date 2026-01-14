@@ -290,12 +290,19 @@ Additional CRDs in this operator:
   - Provisions roles with credentials
   - Generates Kubernetes secrets for applications
   - Separate reconciler at `src/controller/database_reconciler.rs`
+- PostgresUpgrade: Blue-green major version upgrades
+  - Near-zero downtime upgrades using logical replication
+  - Manual or automatic cutover modes with maintenance windows
+  - Row count verification and sequence synchronization
+  - Rollback support via annotation
+  - Separate reconciler at `src/controller/upgrade_reconciler.rs`
 
 ValidatingAdmissionWebhooks (`src/webhooks/`):
 - Enforce backup encryption requirements
 - Validate TLS configuration (cert-manager issuer required)
 - Block immutable field changes (storage shrink, version downgrade)
 - Apply production-specific rules for "prod" namespaces
+- Validate upgrade resources (version compatibility, source cluster state)
 - Server implementation at `src/webhooks/server.rs`
 
 KEDA auto-scaling integration (`src/resources/scaled_object.rs`):

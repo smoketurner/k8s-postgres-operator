@@ -82,12 +82,16 @@ Error handling for Kubernetes operators:
 - Emit Kubernetes events for significant errors
 
 Multi-controller pattern in this project:
-- `src/controller/reconciler.rs`: PostgresCluster reconciliation
+- `src/controller/cluster_reconciler.rs`: PostgresCluster reconciliation
 - `src/controller/database_reconciler.rs`: PostgresDatabase reconciliation
   - Executes SQL via pod exec for database/role provisioning
   - Generates secrets with connection information
   - Uses separate controller for lifecycle management
-- Both run concurrently in main.rs with shared Context
+- `src/controller/upgrade_reconciler.rs`: PostgresUpgrade reconciliation
+  - Manages blue-green major version upgrades via logical replication
+  - Handles upgrade state machine transitions
+  - Coordinates cutover and rollback operations
+- All three run concurrently in main.rs with shared Context
 
 Webhook server implementation (`src/webhooks/`):
 - HTTP server handling AdmissionReview requests
@@ -96,6 +100,7 @@ Webhook server implementation (`src/webhooks/`):
   - `policies/tls.rs`: TLS configuration validation
   - `policies/immutability.rs`: Immutable field protection
   - `policies/production.rs`: Production namespace rules
+  - `policies/upgrade.rs`: Upgrade validation (version compatibility, source cluster state)
 - Returns AdmissionResponse with allowed/denied + reason
 
 SQL execution pattern (`src/resources/sql.rs`):

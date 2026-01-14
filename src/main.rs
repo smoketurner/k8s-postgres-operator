@@ -177,16 +177,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     };
 
-    info!(
-        "Watching PostgresCluster resources (apiVersion: postgres-operator.smoketurner.com/v1alpha1)"
-    );
-    info!(
-        "Watching PostgresDatabase resources (apiVersion: postgres-operator.smoketurner.com/v1alpha1)"
-    );
-    info!(
-        "Watching PostgresUpgrade resources (apiVersion: postgres-operator.smoketurner.com/v1alpha1)"
-    );
-
     // Start cluster controller (only runs as leader)
     let controller_handle = {
         let health_state = health_state.clone();

@@ -112,14 +112,35 @@ Features:
 - Apply grants to control table/schema access
 - Enable PostgreSQL extensions
 
+#### PostgresUpgrade (`postgres_upgrade.rs`)
+`PostgresUpgrade` custom resource for blue-green major version upgrades using logical replication:
+- **Spec**: `sourceCluster`, `targetVersion`, `targetClusterOverrides`, `strategy`
+- **Status**: `phase`, `observedGeneration`, `startedAt`, `completedAt`, `replication`, `verification`, `sequences`, `rollback`, `conditions`
+
+API version: `postgres-operator.smoketurner.com/v1alpha1`
+
+Features:
+- Near-zero downtime major version upgrades (15→16, 16→17, etc.)
+- Blue-green deployment using PostgreSQL logical replication
+- Row count verification before cutover
+- Manual or automatic cutover modes with maintenance windows
+- Sequence synchronization after source goes read-only
+- Rollback support via annotation
+
+See `docs/upgrades.md` for detailed upgrade procedures.
+
 ### Controller (`src/controller/`)
-- `reconciler.rs`: Main PostgresCluster reconciliation loop - handles finalizers, spec change detection, resource application, state transitions
+- `cluster_reconciler.rs`: Main PostgresCluster reconciliation loop - handles finalizers, spec change detection, resource application, state transitions
+- `cluster_state_machine.rs`: Formal FSM with states (Pending, Creating, Running, Updating, Scaling, Degraded, Recovering, Failed, Deleting) and guarded transitions
+- `cluster_error.rs`: Custom errors with exponential backoff configuration
 - `database_reconciler.rs`: PostgresDatabase reconciliation - database/role provisioning via SQL execution, secret generation
-- `state_machine.rs`: Formal FSM with states (Pending, Creating, Running, Updating, Scaling, Degraded, Recovering, Failed, Deleting) and guarded transitions
+- `upgrade_reconciler.rs`: PostgresUpgrade reconciliation - manages blue-green upgrade lifecycle
+- `upgrade_state_machine.rs`: Upgrade FSM with phases (Pending, CreatingTarget, ConfiguringReplication, Replicating, Verifying, SyncingSequences, ReadyForCutover, CuttingOver, HealthChecking, Completed, Failed, RolledBack)
+- `upgrade_error.rs`: Upgrade-specific errors with backoff configuration
 - `context.rs`: Shared context with Kubernetes client and event recorder
 - `status.rs`: Condition management (Ready, Progressing, Degraded, ConfigurationValid, ReplicasReady, ResourceResizeInProgress)
-- `error.rs`: Custom errors with exponential backoff configuration
 - `validation.rs`: Spec validation logic
+- `cleanup.rs`: Resource cleanup utilities for graceful deletion
 - `replication_lag.rs`: Replication lag monitoring via Patroni REST API
 - `backup_status.rs`: Backup status collection from WAL-G
 
@@ -136,6 +157,9 @@ Each module generates Kubernetes resources:
 - `scaled_object.rs`: KEDA ScaledObject for auto-scaling (CPU/connection metrics)
 - `network_policy.rs`: NetworkPolicy generation for cluster access control
 - `sql.rs`: SQL execution via pod exec for database provisioning
+- `postgres_client.rs`: PostgreSQL client connection handling for direct SQL execution
+- `replication.rs`: Logical replication configuration for upgrades (publication/subscription setup)
+- `port_forward.rs`: Kubernetes port-forward API for establishing connections to pods
 
 ### Webhooks (`src/webhooks/`)
 ValidatingAdmissionWebhook for policy enforcement:
@@ -144,6 +168,7 @@ ValidatingAdmissionWebhook for policy enforcement:
 - `policies/tls.rs`: Requires cert-manager issuer reference when TLS enabled
 - `policies/immutability.rs`: Prevents changing immutable fields (storage size, version downgrades)
 - `policies/production.rs`: Production-specific requirements for namespaces containing "prod"
+- `policies/upgrade.rs`: Validates PostgresUpgrade resources (version compatibility, source cluster state)
 
 ### Key Patterns
 - **Finalizer pattern** for graceful deletion
@@ -251,3 +276,4 @@ For detailed documentation, see:
 - `docs/operations.md` - Day-2 operations, monitoring, troubleshooting
 - `docs/api-reference.md` - CRD field reference
 - `docs/backup-restore.md` - WAL-G backup configuration (encryption required)
+- `docs/upgrades.md` - Blue-green major version upgrades using logical replication

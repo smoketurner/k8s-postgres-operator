@@ -44,7 +44,7 @@ The PostgreSQL Operator is a Kubernetes controller that manages PostgreSQL clust
 
 The controller is the heart of the operator, implementing the reconciliation loop.
 
-#### Reconciler (`reconciler.rs`)
+#### Cluster Reconciler (`cluster_reconciler.rs`)
 
 The reconciler handles the main reconciliation logic:
 
@@ -80,7 +80,7 @@ async fn reconcile(cluster: Arc<PostgresCluster>, ctx: Arc<Context>) -> Result<A
 }
 ```
 
-#### State Machine (`state_machine.rs`)
+#### Cluster State Machine (`cluster_state_machine.rs`)
 
 The operator implements a formal finite state machine (FSM) for cluster lifecycle management:
 

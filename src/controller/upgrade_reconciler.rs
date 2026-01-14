@@ -79,7 +79,7 @@ pub async fn reconcile_upgrade(
 ) -> Result<Action, UpgradeError> {
     let start_time = std::time::Instant::now();
     let ns = upgrade.namespace().unwrap_or_default();
-    let _name = upgrade.name_any();
+    let name = upgrade.name_any();
 
     info!("Reconciling PostgresUpgrade");
 
@@ -281,7 +281,24 @@ pub async fn reconcile_upgrade(
     };
 
     let duration_secs = start_time.elapsed().as_secs_f64();
-    debug!("Reconciliation completed in {:.3}s", duration_secs);
+    match &result {
+        Ok(_) => {
+            // Get the current phase after reconciliation (may have changed)
+            let upgrades: Api<PostgresUpgrade> = Api::namespaced(ctx.client.clone(), &ns);
+            let final_phase = upgrades
+                .get_opt(&name)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|u| u.status.map(|s| s.phase))
+                .unwrap_or(current_phase);
+            info!(
+                "Reconciliation completed successfully in {:.3}s (phase: {:?})",
+                duration_secs, final_phase
+            );
+        }
+        Err(e) => error!("Reconciliation failed after {:.3}s: {}", duration_secs, e),
+    }
 
     result
 }
