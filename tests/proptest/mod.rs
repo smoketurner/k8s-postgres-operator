@@ -20,7 +20,7 @@ use proptest::prelude::*;
 use postgres_operator::controller::cluster_state_machine::{
     ClusterEvent, ClusterStateMachine, TransitionContext,
 };
-use postgres_operator::controller::validation::{validate_spec, validate_version_upgrade};
+use postgres_operator::controller::cluster_validation::{validate_spec, validate_version_upgrade};
 use postgres_operator::crd::{
     ClusterPhase, ConnectionScalingMetric, CpuScalingMetric, IssuerKind, IssuerRef, PgBouncerSpec,
     PostgresCluster, PostgresClusterSpec, PostgresClusterStatus, PostgresVersion, ResourceList,

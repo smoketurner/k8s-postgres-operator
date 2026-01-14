@@ -23,15 +23,17 @@ use serde::de::DeserializeOwned;
 use tokio::io::AsyncReadExt;
 use tracing::{debug, error, info, instrument, warn};
 
-use crate::controller::backup_status::{BackupEvent, BackupStatusCollector, detect_backup_events};
 use crate::controller::cleanup::{cleanup_stuck_resource, is_namespace_not_found_error};
+use crate::controller::cluster_backup_status::{
+    BackupEvent, BackupStatusCollector, detect_backup_events,
+};
 use crate::controller::cluster_error::{BackoffConfig, Error, Result};
+use crate::controller::cluster_replication_lag::collect_replication_lag;
 use crate::controller::cluster_state_machine::{
     ClusterEvent, ClusterStateMachine, TransitionContext, TransitionResult, determine_event,
 };
+use crate::controller::cluster_status::{StatusManager, spec_changed};
 use crate::controller::context::Context;
-use crate::controller::replication_lag::collect_replication_lag;
-use crate::controller::status::{StatusManager, spec_changed};
 use crate::crd::{ClusterPhase, PostgresCluster};
 use crate::resources::{
     backup, certificate, network_policy, patroni, pdb, pgbouncer, scaled_object, secret, service,
@@ -602,7 +604,7 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
     if is_spec_changed
         && let Some(status) = &cluster.status
         && let Some(current_version) = &status.current_version
-        && let Err(e) = crate::controller::validation::validate_version_upgrade(
+        && let Err(e) = crate::controller::cluster_validation::validate_version_upgrade(
             current_version,
             cluster.spec.version.as_str(),
         )

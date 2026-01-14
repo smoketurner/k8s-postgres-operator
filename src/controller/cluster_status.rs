@@ -259,7 +259,9 @@ impl<'a> StatusManager<'a> {
         replica_pods: Vec<String>,
         version: &str,
         backup_status: Option<BackupStatus>,
-        replication_lag_status: Option<&crate::controller::replication_lag::ReplicationLagStatus>,
+        replication_lag_status: Option<
+            &crate::controller::cluster_replication_lag::ReplicationLagStatus,
+        >,
     ) -> Result<()> {
         let generation = self.cluster.metadata.generation;
         let existing_conditions = self

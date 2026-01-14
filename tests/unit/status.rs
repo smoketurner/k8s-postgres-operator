@@ -1,6 +1,6 @@
 //! Unit tests for status management
 
-use postgres_operator::controller::status::{
+use postgres_operator::controller::cluster_status::{
     ConditionBuilder, condition_status, condition_types, get_replica_pod_names, spec_changed,
 };
 use postgres_operator::crd::{

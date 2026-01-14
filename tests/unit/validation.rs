@@ -1,6 +1,6 @@
 //! Unit tests for validation logic
 
-use postgres_operator::controller::validation::{
+use postgres_operator::controller::cluster_validation::{
     MAX_REPLICAS, MIN_REPLICAS, validate_spec, validate_spec_change, validate_version_upgrade,
 };
 use postgres_operator::crd::{
