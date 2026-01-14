@@ -13,6 +13,7 @@ use kube::runtime::controller::Action;
 use kube::{Client, Resource, ResourceExt};
 use tracing::{debug, error, info, warn};
 
+use crate::controller::cleanup::{cleanup_stuck_resource, is_namespace_not_found_error};
 use crate::crd::{
     ClusterPhase, DatabaseCondition, DatabaseConditionType, DatabaseConnectionInfo, DatabasePhase,
     GrantSpec, PostgresCluster, PostgresDatabase, PostgresDatabaseStatus, RoleSpec,
@@ -500,21 +501,21 @@ async fn handle_deletion(
             if let Ok(conn) =
                 PostgresConnection::connect_primary(&ctx.client, namespace, &cluster_name).await
             {
-                // Drop roles first (they depend on the database)
+                // Drop the database first (owner role owns it, so database must go first)
+                if let Err(e) = drop_database(&conn, &db.spec.database.name).await {
+                    warn!(database = %db.spec.database.name, error = %e, "Failed to drop database during cleanup");
+                }
+
+                // Drop roles (they were granted access to the database)
                 for role_spec in &db.spec.roles {
                     if let Err(e) = drop_role(&conn, &role_spec.name).await {
                         warn!(role = %role_spec.name, error = %e, "Failed to drop role during cleanup");
                     }
                 }
 
-                // Drop the owner role if it was created by us
+                // Drop the owner role last (after database is dropped)
                 if let Err(e) = drop_role(&conn, &db.spec.database.owner).await {
                     warn!(role = %db.spec.database.owner, error = %e, "Failed to drop owner role during cleanup");
-                }
-
-                // Drop the database
-                if let Err(e) = drop_database(&conn, &db.spec.database.name).await {
-                    warn!(database = %db.spec.database.name, error = %e, "Failed to drop database during cleanup");
                 }
             }
         } else {
@@ -609,15 +610,23 @@ async fn remove_finalizer(
         }
     });
 
-    databases
+    match databases
         .patch(
             &name,
             &PatchParams::apply("postgres-operator"),
             &Patch::Merge(&patch),
         )
-        .await?;
-
-    Ok(())
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(e) if is_namespace_not_found_error(&e) => {
+            // Namespace is gone - use special cleanup procedure
+            cleanup_stuck_resource::<PostgresDatabase>(ctx.client.clone(), &name, namespace)
+                .await?;
+            Ok(())
+        }
+        Err(e) => Err(DatabaseError::KubeError(e)),
+    }
 }
 
 /// Update the status of the PostgresDatabase resource

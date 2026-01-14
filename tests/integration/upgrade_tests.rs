@@ -2537,7 +2537,10 @@ async fn test_upgrade_source_marked_superseded() {
         .origin
         .as_ref()
         .expect("target should have origin reference");
-    assert_eq!(origin.name, "source", "Origin should reference source cluster");
+    assert_eq!(
+        origin.name, "source",
+        "Origin should reference source cluster"
+    );
     assert!(
         origin.upgrade_name.as_deref() == Some("test-upgrade"),
         "Origin should reference upgrade name"

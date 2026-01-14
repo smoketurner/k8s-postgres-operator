@@ -24,6 +24,7 @@ use tokio::io::AsyncReadExt;
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::controller::backup_status::{BackupEvent, BackupStatusCollector, detect_backup_events};
+use crate::controller::cleanup::{cleanup_stuck_resource, is_namespace_not_found_error};
 use crate::controller::context::Context;
 use crate::controller::error::{BackoffConfig, Error, Result};
 use crate::controller::replication_lag::collect_replication_lag;
@@ -1706,14 +1707,23 @@ async fn handle_deletion(cluster: &PostgresCluster, ctx: &Context, ns: &str) -> 
             }
         });
 
-        api.patch(
-            &name,
-            &PatchParams::apply("postgres-operator"),
-            &Patch::Merge(&patch),
-        )
-        .await?;
-
-        info!("Removed finalizer from {}", name);
+        match api
+            .patch(
+                &name,
+                &PatchParams::apply("postgres-operator"),
+                &Patch::Merge(&patch),
+            )
+            .await
+        {
+            Ok(_) => {
+                info!("Removed finalizer from {}", name);
+            }
+            Err(e) if is_namespace_not_found_error(&e) => {
+                // Namespace is gone - use special cleanup procedure
+                cleanup_stuck_resource::<PostgresCluster>(ctx.client.clone(), &name, ns).await?;
+            }
+            Err(e) => return Err(Error::KubeError(e)),
+        }
     }
 
     Ok(Action::await_change())

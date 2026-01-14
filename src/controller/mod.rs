@@ -1,4 +1,5 @@
 pub(crate) mod backup_status;
+pub mod cleanup;
 pub mod context;
 pub mod database_reconciler;
 pub mod error;

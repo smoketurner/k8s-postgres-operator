@@ -439,14 +439,19 @@ pub(crate) async fn validate_postgres_upgrade(
     .await;
 
     // Create validation context
-    let ctx = UpgradeValidationContext::new(&upgrade, old_upgrade.as_ref(), source_cluster.as_ref());
+    let ctx =
+        UpgradeValidationContext::new(&upgrade, old_upgrade.as_ref(), source_cluster.as_ref());
 
     // Run synchronous validations
     let result = validate_upgrade_sync(&ctx);
 
     if !result.allowed {
-        let reason = result.reason.unwrap_or_else(|| "ValidationFailed".to_string());
-        let message = result.message.unwrap_or_else(|| "Validation failed".to_string());
+        let reason = result
+            .reason
+            .unwrap_or_else(|| "ValidationFailed".to_string());
+        let message = result
+            .message
+            .unwrap_or_else(|| "Validation failed".to_string());
         warn!(uid = %uid, reason = %reason, message = %message, "PostgresUpgrade admission denied");
         return (
             StatusCode::OK,

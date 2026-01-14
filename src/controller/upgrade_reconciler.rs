@@ -21,11 +21,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use kube::api::{Api, Patch, PatchParams};
+use kube::api::{Api, DeleteParams, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, error, info, instrument, warn};
 
+use crate::controller::cleanup::{cleanup_stuck_resource, is_namespace_not_found_error};
 use crate::controller::upgrade_error::{UpgradeBackoffConfig, UpgradeError, UpgradeResult};
 use crate::controller::upgrade_state_machine::{
     UpgradeEvent, UpgradeStateMachine, UpgradeTransitionContext, UpgradeTransitionResult,
@@ -95,6 +96,99 @@ pub async fn reconcile_upgrade(
 
     // Get current phase from status
     let current_phase = upgrade.status.as_ref().map(|s| s.phase).unwrap_or_default();
+
+    // Check if source cluster exists - delete orphaned upgrades
+    let source_name = &upgrade.spec.source_cluster.name;
+    let source_ns = upgrade
+        .spec
+        .source_cluster
+        .namespace
+        .as_deref()
+        .unwrap_or(&ns);
+
+    let clusters_api: Api<PostgresCluster> = Api::namespaced(ctx.client.clone(), source_ns);
+    let source_lookup = clusters_api.get_opt(source_name).await;
+
+    // Check if source is gone (either not found, or namespace itself is gone)
+    let source_is_gone = match &source_lookup {
+        Ok(None) => true,
+        Err(e) if is_namespace_not_found_error(e) => true,
+        _ => false,
+    };
+
+    if source_is_gone {
+        // Source cluster no longer exists
+        // Completed upgrades are kept as historical records (source was intentionally superseded)
+        // All other phases indicate an orphaned upgrade that should be cleaned up
+        if current_phase != UpgradePhase::Completed {
+            info!(
+                "Source cluster {}/{} not found, deleting orphaned upgrade {}",
+                source_ns,
+                source_name,
+                upgrade.name_any()
+            );
+
+            // Remove finalizer first to allow deletion
+            if has_finalizer(&upgrade) {
+                let api: Api<PostgresUpgrade> = Api::namespaced(ctx.client.clone(), &ns);
+                let patch = serde_json::json!({
+                    "metadata": {
+                        "finalizers": null
+                    }
+                });
+                match api
+                    .patch(
+                        &upgrade.name_any(),
+                        &PatchParams::apply("postgres-operator"),
+                        &Patch::Merge(&patch),
+                    )
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(e) if is_namespace_not_found_error(&e) => {
+                        // Namespace is gone - use special cleanup procedure
+                        cleanup_stuck_resource::<PostgresUpgrade>(
+                            ctx.client.clone(),
+                            &upgrade.name_any(),
+                            &ns,
+                        )
+                        .await
+                        .map_err(UpgradeError::KubeError)?;
+                        return Ok(Action::await_change());
+                    }
+                    Err(e) => return Err(UpgradeError::KubeError(e)),
+                }
+            }
+
+            // Delete the orphaned upgrade
+            let api: Api<PostgresUpgrade> = Api::namespaced(ctx.client.clone(), &ns);
+            match api
+                .delete(&upgrade.name_any(), &DeleteParams::default())
+                .await
+            {
+                Ok(_) => {}
+                Err(e) if is_namespace_not_found_error(&e) => {
+                    // Namespace is gone - use special cleanup procedure
+                    cleanup_stuck_resource::<PostgresUpgrade>(
+                        ctx.client.clone(),
+                        &upgrade.name_any(),
+                        &ns,
+                    )
+                    .await
+                    .map_err(UpgradeError::KubeError)?;
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to delete orphaned upgrade {}: {}",
+                        upgrade.name_any(),
+                        e
+                    );
+                }
+            }
+
+            return Ok(Action::await_change());
+        }
+    }
 
     // Build transition context from current state
     let transition_ctx = build_transition_context(&upgrade, &ctx, &ns).await?;
@@ -766,6 +860,15 @@ async fn run_verification(
         PostgresConnection::connect_primary(&ctx.client, source_ns, source_name).await?;
     let target_conn = PostgresConnection::connect_primary(&ctx.client, ns, &target_name).await?;
 
+    // Refresh statistics on both clusters for accurate row counts
+    // pg_stat_user_tables.n_live_tup is an estimate that needs ANALYZE to update
+    replication::refresh_statistics(&source_conn)
+        .await
+        .map_err(|e| UpgradeError::SqlError(format!("Failed to refresh source stats: {}", e)))?;
+    replication::refresh_statistics(&target_conn)
+        .await
+        .map_err(|e| UpgradeError::SqlError(format!("Failed to refresh target stats: {}", e)))?;
+
     let verification = replication::verify_row_counts(&source_conn, &target_conn, tolerance)
         .await
         .map_err(|e| UpgradeError::SqlError(e.to_string()))?;
@@ -923,11 +1026,7 @@ async fn mark_source_superseded(
     });
 
     clusters_api
-        .patch_status(
-            source_name,
-            &PatchParams::default(),
-            &Patch::Merge(&patch),
-        )
+        .patch_status(source_name, &PatchParams::default(), &Patch::Merge(&patch))
         .await?;
 
     info!(
@@ -970,11 +1069,7 @@ async fn set_target_origin(
     });
 
     clusters_api
-        .patch_status(
-            &target_name,
-            &PatchParams::default(),
-            &Patch::Merge(&patch),
-        )
+        .patch_status(&target_name, &PatchParams::default(), &Patch::Merge(&patch))
         .await?;
 
     info!(
@@ -1082,14 +1177,29 @@ async fn handle_deletion(
             }
         });
 
-        api.patch(
-            &upgrade.name_any(),
-            &PatchParams::apply("postgres-operator"),
-            &Patch::Merge(&patch),
-        )
-        .await?;
-
-        info!("Removed finalizer from upgrade {}", upgrade.name_any());
+        match api
+            .patch(
+                &upgrade.name_any(),
+                &PatchParams::apply("postgres-operator"),
+                &Patch::Merge(&patch),
+            )
+            .await
+        {
+            Ok(_) => {
+                info!("Removed finalizer from upgrade {}", upgrade.name_any());
+            }
+            Err(e) if is_namespace_not_found_error(&e) => {
+                // Namespace is gone - use special cleanup procedure
+                cleanup_stuck_resource::<PostgresUpgrade>(
+                    ctx.client.clone(),
+                    &upgrade.name_any(),
+                    ns,
+                )
+                .await
+                .map_err(UpgradeError::KubeError)?;
+            }
+            Err(e) => return Err(UpgradeError::KubeError(e)),
+        }
     }
 
     Ok(Action::await_change())

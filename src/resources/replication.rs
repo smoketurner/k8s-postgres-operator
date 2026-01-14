@@ -556,6 +556,19 @@ pub async fn check_lsn_sync(
 // Data Verification
 // =============================================================================
 
+/// Refresh table statistics for accurate row count verification
+///
+/// This runs ANALYZE on all tables to update pg_stat_user_tables.n_live_tup
+/// which is used for approximate row count comparisons. Without this, recently
+/// inserted data may not be reflected in the statistics.
+#[instrument(skip(conn))]
+pub async fn refresh_statistics(conn: &PostgresConnection) -> ReplicationResult<()> {
+    debug!("Running ANALYZE to refresh table statistics");
+    conn.batch_execute("ANALYZE").await?;
+    debug!("Table statistics refreshed");
+    Ok(())
+}
+
 /// Verify row counts between source and target clusters
 ///
 /// This compares row counts for all user tables in both clusters.

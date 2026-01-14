@@ -366,11 +366,7 @@ impl<'a> StatusManager<'a> {
                 .status
                 .as_ref()
                 .and_then(|s| s.successor.clone()),
-            origin: self
-                .cluster
-                .status
-                .as_ref()
-                .and_then(|s| s.origin.clone()),
+            origin: self.cluster.status.as_ref().and_then(|s| s.origin.clone()),
         };
 
         self.update(status).await
@@ -459,11 +455,7 @@ impl<'a> StatusManager<'a> {
                 .status
                 .as_ref()
                 .and_then(|s| s.successor.clone()),
-            origin: self
-                .cluster
-                .status
-                .as_ref()
-                .and_then(|s| s.origin.clone()),
+            origin: self.cluster.status.as_ref().and_then(|s| s.origin.clone()),
         };
 
         self.update(status).await
@@ -563,11 +555,7 @@ impl<'a> StatusManager<'a> {
                 .status
                 .as_ref()
                 .and_then(|s| s.successor.clone()),
-            origin: self
-                .cluster
-                .status
-                .as_ref()
-                .and_then(|s| s.origin.clone()),
+            origin: self.cluster.status.as_ref().and_then(|s| s.origin.clone()),
         };
 
         self.update(status).await
@@ -719,11 +707,7 @@ impl<'a> StatusManager<'a> {
                 .status
                 .as_ref()
                 .and_then(|s| s.successor.clone()),
-            origin: self
-                .cluster
-                .status
-                .as_ref()
-                .and_then(|s| s.origin.clone()),
+            origin: self.cluster.status.as_ref().and_then(|s| s.origin.clone()),
         };
 
         self.update(status).await
