@@ -48,7 +48,7 @@ pub enum ClusterError {
 #[derive(Error, Debug)]
 pub enum CrdError {
     #[error("Failed to parse CRD YAML: {0}")]
-    ParseError(#[from] serde_yaml::Error),
+    ParseError(#[from] serde_saphyr::Error),
 
     #[error("Kubernetes API error: {0}")]
     KubeError(#[from] kube::Error),
@@ -128,7 +128,7 @@ async fn install_crd_from_yaml(
     crd_name: &str,
     display_name: &str,
 ) -> Result<(), CrdError> {
-    let crd: CustomResourceDefinition = serde_yaml::from_str(crd_yaml)?;
+    let crd: CustomResourceDefinition = serde_saphyr::from_str(crd_yaml)?;
     let crds: Api<CustomResourceDefinition> = Api::all(client);
     let params = PatchParams::apply("integration-test").force();
 

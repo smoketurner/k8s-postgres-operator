@@ -147,8 +147,8 @@ fn generate_spilo_config(cluster: &PostgresCluster) -> String {
         postgresql: PostgresqlConfig { parameters: params },
     };
 
-    // Serialize to YAML using serde_yaml for type-safe generation
-    serde_yaml::to_string(&config).unwrap_or_default()
+    // Serialize to YAML using serde_saphyr for type-safe generation
+    serde_saphyr::to_string(&config).unwrap_or_default()
 }
 
 /// Generate Patroni YAML configuration for ConfigMap

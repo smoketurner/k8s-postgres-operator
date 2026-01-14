@@ -1604,11 +1604,11 @@ mod spilo_config_tests {
     }
 
     /// Helper to convert a YAML value to a string, handling both string and numeric types
-    fn yaml_value_to_string(value: Option<&serde_yaml::Value>) -> Option<String> {
+    fn yaml_value_to_string(value: Option<&serde_json::Value>) -> Option<String> {
         value.map(|v| match v {
-            serde_yaml::Value::String(s) => s.clone(),
-            serde_yaml::Value::Number(n) => n.to_string(),
-            serde_yaml::Value::Bool(b) => b.to_string(),
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
             _ => format!("{:?}", v),
         })
     }
@@ -1619,7 +1619,7 @@ mod spilo_config_tests {
         let config = get_spilo_config(&cluster);
 
         // Should parse as valid YAML
-        let parsed: Result<serde_yaml::Value, _> = serde_yaml::from_str(&config);
+        let parsed: Result<serde_json::Value, _> = serde_saphyr::from_str(&config);
         assert!(
             parsed.is_ok(),
             "Spilo config should be valid YAML: {}",
@@ -1632,7 +1632,7 @@ mod spilo_config_tests {
         let cluster = create_test_cluster("my-cluster", "default", 1);
         let config = get_spilo_config(&cluster);
 
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&config).unwrap();
+        let parsed: serde_json::Value = serde_saphyr::from_str(&config).unwrap();
         assert!(
             parsed.get("bootstrap").is_some(),
             "Should have bootstrap section"
@@ -1670,7 +1670,7 @@ mod spilo_config_tests {
         let cluster = create_test_cluster("my-cluster", "default", 1);
         let config = get_spilo_config(&cluster);
 
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&config).unwrap();
+        let parsed: serde_json::Value = serde_saphyr::from_str(&config).unwrap();
         assert!(
             parsed.get("postgresql").is_some(),
             "Should have postgresql section"
@@ -1690,7 +1690,7 @@ mod spilo_config_tests {
         let cluster = create_test_cluster("my-cluster", "default", 1);
         let config = get_spilo_config(&cluster);
 
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&config).unwrap();
+        let parsed: serde_json::Value = serde_saphyr::from_str(&config).unwrap();
         let params = parsed.get("postgresql").unwrap().get("parameters").unwrap();
 
         assert_eq!(
@@ -1705,7 +1705,7 @@ mod spilo_config_tests {
         let cluster = create_test_cluster("my-cluster", "default", 1);
         let config = get_spilo_config(&cluster);
 
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&config).unwrap();
+        let parsed: serde_json::Value = serde_saphyr::from_str(&config).unwrap();
         let params = parsed.get("postgresql").unwrap().get("parameters").unwrap();
 
         assert_eq!(
@@ -1720,7 +1720,7 @@ mod spilo_config_tests {
         let cluster = create_test_cluster("my-cluster", "default", 1);
         let config = get_spilo_config(&cluster);
 
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&config).unwrap();
+        let parsed: serde_json::Value = serde_saphyr::from_str(&config).unwrap();
         let params = parsed.get("postgresql").unwrap().get("parameters").unwrap();
 
         assert_eq!(
@@ -1738,7 +1738,7 @@ mod spilo_config_tests {
             .build();
         let config = get_spilo_config(&cluster);
 
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&config).unwrap();
+        let parsed: serde_json::Value = serde_saphyr::from_str(&config).unwrap();
         let params = parsed.get("postgresql").unwrap().get("parameters").unwrap();
 
         assert_eq!(
@@ -1767,7 +1767,7 @@ mod spilo_config_tests {
             .build();
         let config = get_spilo_config(&cluster);
 
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&config).unwrap();
+        let parsed: serde_json::Value = serde_saphyr::from_str(&config).unwrap();
         let params = parsed.get("postgresql").unwrap().get("parameters").unwrap();
 
         assert_eq!(
@@ -1789,7 +1789,7 @@ mod spilo_config_tests {
             .build();
         let config = get_spilo_config(&cluster);
 
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&config).unwrap();
+        let parsed: serde_json::Value = serde_saphyr::from_str(&config).unwrap();
 
         let bootstrap_params = parsed
             .get("bootstrap")
@@ -1822,7 +1822,7 @@ mod spilo_config_tests {
         assert!(cluster.spec.postgresql_params.is_empty());
 
         let config = get_spilo_config(&cluster);
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&config).unwrap();
+        let parsed: serde_json::Value = serde_saphyr::from_str(&config).unwrap();
 
         let params = parsed.get("postgresql").unwrap().get("parameters").unwrap();
 
