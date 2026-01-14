@@ -419,3 +419,14 @@ spec:
                       message:
                         type: string
                         description: Human-readable message
+                retryCount:
+                  type: integer
+                  description: Current retry count for exponential backoff
+                  format: int32
+                lastError:
+                  type: string
+                  description: Last error message encountered during reconciliation
+                lastErrorTime:
+                  type: string
+                  description: Timestamp of the last error
+                  format: date-time
