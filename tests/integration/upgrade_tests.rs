@@ -102,7 +102,7 @@ async fn test_upgrade_resource_created() {
 /// Test: Verify upgrade fails validation when source cluster doesn't exist
 ///
 /// This test creates an upgrade referencing a non-existent source cluster
-/// and verifies the upgrade stays in pending or moves to failed state.
+/// and verifies the upgrade moves to Failed state with an appropriate error message.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Kubernetes cluster"]
 async fn test_upgrade_source_cluster_not_found() {
@@ -127,7 +127,7 @@ async fn test_upgrade_source_cluster_not_found() {
     // Wait for the controller to process and fail validation
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    // The upgrade should stay in Pending phase (source not found)
+    // The upgrade should move to Failed phase since source doesn't exist
     let upgraded = api.get("test-upgrade").await.expect("get upgrade");
 
     let phase = upgraded
@@ -136,14 +136,32 @@ async fn test_upgrade_source_cluster_not_found() {
         .map(|s| &s.phase)
         .unwrap_or(&UpgradePhase::Pending);
 
-    // Should be Pending or Failed due to missing source
+    // Should be Failed due to missing source cluster
     assert!(
-        matches!(phase, UpgradePhase::Pending | UpgradePhase::Failed),
-        "Expected Pending or Failed phase, got {:?}",
+        matches!(phase, UpgradePhase::Failed),
+        "Expected Failed phase for missing source cluster, got {:?}",
         phase
     );
 
-    tracing::info!("Upgrade correctly stayed in {:?} phase", phase);
+    // Verify error message mentions the missing source
+    let error_message = upgraded
+        .status
+        .as_ref()
+        .and_then(|s| s.last_error.as_ref())
+        .map(|s| s.as_str())
+        .unwrap_or("");
+
+    assert!(
+        error_message.contains("not found") || error_message.contains("nonexistent-cluster"),
+        "Expected error message to mention missing source, got: {}",
+        error_message
+    );
+
+    tracing::info!(
+        "Upgrade correctly failed with phase: {:?}, error: {}",
+        phase,
+        error_message
+    );
 
     // Clean up
     api.delete("test-upgrade", &DeleteParams::default())

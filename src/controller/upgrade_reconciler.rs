@@ -119,13 +119,47 @@ pub async fn reconcile_upgrade(
     if source_is_gone {
         // Source cluster no longer exists
         // Completed upgrades are kept as historical records (source was intentionally superseded)
-        // All other phases indicate an orphaned upgrade that should be cleaned up
-        if current_phase != UpgradePhase::Completed {
+        if current_phase == UpgradePhase::Completed {
+            // Keep completed upgrades for historical tracking
+        } else if current_phase == UpgradePhase::Pending {
+            // For Pending phase, the upgrade never started - move to Failed with an error
+            // This gives users visibility into why the upgrade failed rather than silently deleting
             info!(
-                "Source cluster {}/{} not found, deleting orphaned upgrade {}",
+                "Source cluster {}/{} not found, failing upgrade {}",
                 source_ns,
                 source_name,
                 upgrade.name_any()
+            );
+
+            let api: Api<PostgresUpgrade> = Api::namespaced(ctx.client.clone(), &ns);
+            let now = Utc::now().to_rfc3339();
+            let patch = serde_json::json!({
+                "status": {
+                    "phase": UpgradePhase::Failed,
+                    "phaseStartedAt": now,
+                    "completedAt": now,
+                    "lastError": format!("Source cluster {}/{} not found", source_ns, source_name),
+                    "message": format!("Upgrade failed: source cluster {}/{} does not exist", source_ns, source_name)
+                }
+            });
+
+            api.patch_status(
+                &upgrade.name_any(),
+                &PatchParams::default(),
+                &Patch::Merge(&patch),
+            )
+            .await?;
+
+            return Ok(Action::await_change());
+        } else {
+            // For in-progress upgrades (past Pending), the source was deleted mid-upgrade
+            // This is an orphaned upgrade that should be cleaned up
+            info!(
+                "Source cluster {}/{} not found, deleting orphaned upgrade {} (was in {:?} phase)",
+                source_ns,
+                source_name,
+                upgrade.name_any(),
+                current_phase
             );
 
             // Remove finalizer first to allow deletion
