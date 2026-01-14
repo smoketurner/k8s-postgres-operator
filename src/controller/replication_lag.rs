@@ -436,7 +436,7 @@ fn process_patroni_cluster_info(
             lag_bytes,
             lag_time,
             exceeds_threshold,
-            last_measured: Some(chrono::Utc::now().to_rfc3339()),
+            last_measured: Some(jiff::Timestamp::now().to_string()),
             state: member.state,
         });
 

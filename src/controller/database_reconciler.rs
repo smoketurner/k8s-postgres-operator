@@ -111,7 +111,7 @@ pub async fn reconcile_database(
                 vec![DatabaseCondition {
                     condition_type: DatabaseConditionType::ClusterReady,
                     status: "False".to_string(),
-                    last_transition_time: Some(chrono::Utc::now().to_rfc3339()),
+                    last_transition_time: Some(jiff::Timestamp::now().to_string()),
                     reason: Some("ClusterNotFound".to_string()),
                     message: Some(format!("Cluster {}/{} not found", ns, cluster_name)),
                 }],
@@ -150,7 +150,7 @@ pub async fn reconcile_database(
             vec![DatabaseCondition {
                 condition_type: DatabaseConditionType::ClusterReady,
                 status: "False".to_string(),
-                last_transition_time: Some(chrono::Utc::now().to_rfc3339()),
+                last_transition_time: Some(jiff::Timestamp::now().to_string()),
                 reason: Some("ClusterNotReady".to_string()),
                 message: Some(format!(
                     "Cluster {} is in phase {}",
@@ -188,35 +188,35 @@ pub async fn reconcile_database(
                     DatabaseCondition {
                         condition_type: DatabaseConditionType::ClusterReady,
                         status: "True".to_string(),
-                        last_transition_time: Some(chrono::Utc::now().to_rfc3339()),
+                        last_transition_time: Some(jiff::Timestamp::now().to_string()),
                         reason: Some("ClusterRunning".to_string()),
                         message: None,
                     },
                     DatabaseCondition {
                         condition_type: DatabaseConditionType::DatabaseCreated,
                         status: "True".to_string(),
-                        last_transition_time: Some(chrono::Utc::now().to_rfc3339()),
+                        last_transition_time: Some(jiff::Timestamp::now().to_string()),
                         reason: Some("DatabaseProvisioned".to_string()),
                         message: None,
                     },
                     DatabaseCondition {
                         condition_type: DatabaseConditionType::RolesCreated,
                         status: "True".to_string(),
-                        last_transition_time: Some(chrono::Utc::now().to_rfc3339()),
+                        last_transition_time: Some(jiff::Timestamp::now().to_string()),
                         reason: Some("RolesProvisioned".to_string()),
                         message: None,
                     },
                     DatabaseCondition {
                         condition_type: DatabaseConditionType::SecretsCreated,
                         status: "True".to_string(),
-                        last_transition_time: Some(chrono::Utc::now().to_rfc3339()),
+                        last_transition_time: Some(jiff::Timestamp::now().to_string()),
                         reason: Some("SecretsCreated".to_string()),
                         message: None,
                     },
                     DatabaseCondition {
                         condition_type: DatabaseConditionType::Ready,
                         status: "True".to_string(),
-                        last_transition_time: Some(chrono::Utc::now().to_rfc3339()),
+                        last_transition_time: Some(jiff::Timestamp::now().to_string()),
                         reason: Some("Ready".to_string()),
                         message: None,
                     },
@@ -254,7 +254,7 @@ pub async fn reconcile_database(
                 vec![DatabaseCondition {
                     condition_type: DatabaseConditionType::Ready,
                     status: "False".to_string(),
-                    last_transition_time: Some(chrono::Utc::now().to_rfc3339()),
+                    last_transition_time: Some(jiff::Timestamp::now().to_string()),
                     reason: Some("ProvisioningFailed".to_string()),
                     message: Some(e.to_string()),
                 }],

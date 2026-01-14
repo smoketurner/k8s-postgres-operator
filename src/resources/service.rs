@@ -256,7 +256,7 @@ pub struct ServiceSwitchResult {
     /// Name of the replica service that was switched
     pub replica_service: String,
     /// Timestamp when the switch was completed
-    pub switched_at: chrono::DateTime<chrono::Utc>,
+    pub switched_at: jiff::Timestamp,
     /// Previous cluster name (source)
     pub previous_cluster: String,
     /// New cluster name (target)
@@ -302,7 +302,7 @@ pub async fn switch_services_to_target(
             "ownerReferences": owner_refs,
             "annotations": {
                 "postgres-operator.smoketurner.com/switched-from": source_name,
-                "postgres-operator.smoketurner.com/switched-at": chrono::Utc::now().to_rfc3339()
+                "postgres-operator.smoketurner.com/switched-at": jiff::Timestamp::now().to_string()
             }
         },
         "spec": {
@@ -332,7 +332,7 @@ pub async fn switch_services_to_target(
             "ownerReferences": owner_refs,
             "annotations": {
                 "postgres-operator.smoketurner.com/switched-from": source_name,
-                "postgres-operator.smoketurner.com/switched-at": chrono::Utc::now().to_rfc3339()
+                "postgres-operator.smoketurner.com/switched-at": jiff::Timestamp::now().to_string()
             }
         },
         "spec": {
@@ -359,7 +359,7 @@ pub async fn switch_services_to_target(
     Ok(ServiceSwitchResult {
         primary_service: primary_svc_name,
         replica_service: replica_svc_name,
-        switched_at: chrono::Utc::now(),
+        switched_at: jiff::Timestamp::now(),
         previous_cluster: source_name.to_string(),
         new_cluster: target_name.to_string(),
     })
@@ -399,7 +399,7 @@ pub async fn revert_services_to_source(
             "ownerReferences": owner_refs,
             "annotations": {
                 "postgres-operator.smoketurner.com/rolled-back-from": target_name,
-                "postgres-operator.smoketurner.com/rolled-back-at": chrono::Utc::now().to_rfc3339()
+                "postgres-operator.smoketurner.com/rolled-back-at": jiff::Timestamp::now().to_string()
             }
         },
         "spec": {
@@ -429,7 +429,7 @@ pub async fn revert_services_to_source(
             "ownerReferences": owner_refs,
             "annotations": {
                 "postgres-operator.smoketurner.com/rolled-back-from": target_name,
-                "postgres-operator.smoketurner.com/rolled-back-at": chrono::Utc::now().to_rfc3339()
+                "postgres-operator.smoketurner.com/rolled-back-at": jiff::Timestamp::now().to_string()
             }
         },
         "spec": {
@@ -456,7 +456,7 @@ pub async fn revert_services_to_source(
     Ok(ServiceSwitchResult {
         primary_service: primary_svc_name,
         replica_service: replica_svc_name,
-        switched_at: chrono::Utc::now(),
+        switched_at: jiff::Timestamp::now(),
         previous_cluster: target_name.to_string(),
         new_cluster: source_name.to_string(),
     })

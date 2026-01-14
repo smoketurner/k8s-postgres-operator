@@ -187,7 +187,7 @@ impl BackupStatusCollector {
                 );
                 // Store error in status
                 status.last_error = Some(format!("Failed to list backups: {}", e));
-                status.last_error_time = Some(chrono::Utc::now().to_rfc3339());
+                status.last_error_time = Some(jiff::Timestamp::now().to_string());
             }
         }
 

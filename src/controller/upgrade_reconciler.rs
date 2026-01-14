@@ -20,7 +20,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
+use jiff::{SignedDuration, Timestamp};
 use kube::api::{Api, DeleteParams, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
@@ -132,7 +132,7 @@ pub async fn reconcile_upgrade(
             );
 
             let api: Api<PostgresUpgrade> = Api::namespaced(ctx.client.clone(), &ns);
-            let now = Utc::now().to_rfc3339();
+            let now = Timestamp::now().to_string();
             let patch = serde_json::json!({
                 "status": {
                     "phase": UpgradePhase::Failed,
@@ -987,7 +987,7 @@ async fn execute_cutover(
     let api: Api<PostgresUpgrade> = Api::namespaced(ctx.client.clone(), ns);
     let patch = serde_json::json!({
         "status": {
-            "cutoverStartedAt": Utc::now().to_rfc3339(),
+            "cutoverStartedAt": Timestamp::now().to_string(),
             "message": format!("Cutover initiated: switching services from {} to {}", source_name, target_name)
         }
     });
@@ -1066,7 +1066,7 @@ async fn mark_source_superseded(
         name: target_name.clone(),
         namespace: Some(ns.to_string()),
         upgrade_name: Some(upgrade.name_any()),
-        created_at: Some(Utc::now().to_rfc3339()),
+        created_at: Some(Timestamp::now().to_string()),
     };
 
     let patch = serde_json::json!({
@@ -1110,7 +1110,7 @@ async fn set_target_origin(
         name: source_name.clone(),
         namespace: Some(source_ns.to_string()),
         upgrade_name: Some(upgrade.name_any()),
-        created_at: Some(Utc::now().to_rfc3339()),
+        created_at: Some(Timestamp::now().to_string()),
     };
 
     let patch = serde_json::json!({
@@ -1301,7 +1301,7 @@ async fn update_phase(
     phase: UpgradePhase,
 ) -> UpgradeResult<()> {
     let api: Api<PostgresUpgrade> = Api::namespaced(ctx.client.clone(), ns);
-    let now = Utc::now().to_rfc3339();
+    let now = Timestamp::now().to_string();
 
     // Build status object conditionally
     let is_terminal = matches!(
@@ -1389,7 +1389,7 @@ async fn update_replication_status(
         lag_bytes: Some(lag.lag_bytes),
         lag_seconds: lag.lag_seconds,
         lsn_in_sync: Some(lag.in_sync),
-        last_sync_time: Some(Utc::now().to_rfc3339()),
+        last_sync_time: Some(Timestamp::now().to_string()),
         publication_name: None,
         subscription_name: None,
     };
@@ -1448,7 +1448,7 @@ async fn update_verification_status(
         .collect();
 
     let verification_status = VerificationStatus {
-        last_check_time: Some(Utc::now().to_rfc3339()),
+        last_check_time: Some(Timestamp::now().to_string()),
         tables_verified: verification.tables_checked,
         tables_matched: verification.tables_matched,
         tables_mismatched: verification.tables_mismatched,
@@ -1495,7 +1495,7 @@ async fn update_sequence_sync_status(
         synced_count: result.synced_count,
         failed_count: result.failed_count,
         failed_sequences,
-        synced_at: Some(Utc::now().to_rfc3339()),
+        synced_at: Some(Timestamp::now().to_string()),
     };
 
     let patch = serde_json::json!({
@@ -1575,8 +1575,8 @@ fn is_within_maintenance_window(upgrade: &PostgresUpgrade) -> bool {
     };
 
     // Parse current time and window times
-    let now = Utc::now();
-    let current_time = now.format("%H:%M").to_string();
+    let now = jiff::Zoned::now();
+    let current_time = now.strftime("%H:%M").to_string();
 
     // Simple time comparison (assumes same-day window)
     current_time >= window.start_time && current_time <= window.end_time
@@ -1593,8 +1593,8 @@ fn is_phase_timeout_elapsed(upgrade: &PostgresUpgrade) -> bool {
         None => return false,
     };
 
-    let started = match chrono::DateTime::parse_from_rfc3339(phase_started_at) {
-        Ok(dt) => dt.with_timezone(&Utc),
+    let started = match phase_started_at.parse::<Timestamp>() {
+        Ok(ts) => ts,
         Err(_) => return false,
     };
 
@@ -1605,37 +1605,39 @@ fn is_phase_timeout_elapsed(upgrade: &PostgresUpgrade) -> bool {
         .unwrap_or(&UpgradePhase::Pending);
 
     let timeout = get_phase_timeout(upgrade, current_phase);
-    let elapsed = Utc::now().signed_duration_since(started);
+    let now_secs = Timestamp::now().as_second();
+    let started_secs = started.as_second();
+    let elapsed_secs = now_secs.saturating_sub(started_secs);
 
-    elapsed > timeout
+    elapsed_secs > timeout.as_secs()
 }
 
 /// Get timeout for a specific phase
-fn get_phase_timeout(upgrade: &PostgresUpgrade, phase: &UpgradePhase) -> chrono::Duration {
+fn get_phase_timeout(upgrade: &PostgresUpgrade, phase: &UpgradePhase) -> SignedDuration {
     let timeouts = &upgrade.spec.strategy.timeouts;
 
     let duration_str = match phase {
         UpgradePhase::CreatingTarget => &timeouts.target_cluster_ready,
         UpgradePhase::Replicating => &timeouts.initial_sync,
         UpgradePhase::Verifying => &timeouts.verification,
-        _ => return chrono::Duration::hours(1), // Default timeout
+        _ => return SignedDuration::from_hours(1), // Default timeout
     };
 
-    parse_duration(duration_str).unwrap_or_else(|| chrono::Duration::hours(1))
+    parse_duration(duration_str).unwrap_or_else(|| SignedDuration::from_hours(1))
 }
 
 /// Parse a duration string (e.g., "30m", "1h", "24h")
-fn parse_duration(s: &str) -> Option<chrono::Duration> {
+fn parse_duration(s: &str) -> Option<SignedDuration> {
     let s = s.trim();
     if s.ends_with('h') {
         let hours: i64 = s.trim_end_matches('h').parse().ok()?;
-        Some(chrono::Duration::hours(hours))
+        Some(SignedDuration::from_hours(hours))
     } else if s.ends_with('m') {
         let minutes: i64 = s.trim_end_matches('m').parse().ok()?;
-        Some(chrono::Duration::minutes(minutes))
+        Some(SignedDuration::from_mins(minutes))
     } else if s.ends_with('s') {
         let seconds: i64 = s.trim_end_matches('s').parse().ok()?;
-        Some(chrono::Duration::seconds(seconds))
+        Some(SignedDuration::from_secs(seconds))
     } else {
         None
     }
@@ -1691,10 +1693,10 @@ mod tests {
 
     #[test]
     fn test_parse_duration() {
-        assert_eq!(parse_duration("30m"), Some(chrono::Duration::minutes(30)));
-        assert_eq!(parse_duration("1h"), Some(chrono::Duration::hours(1)));
-        assert_eq!(parse_duration("24h"), Some(chrono::Duration::hours(24)));
-        assert_eq!(parse_duration("60s"), Some(chrono::Duration::seconds(60)));
+        assert_eq!(parse_duration("30m"), Some(SignedDuration::from_mins(30)));
+        assert_eq!(parse_duration("1h"), Some(SignedDuration::from_hours(1)));
+        assert_eq!(parse_duration("24h"), Some(SignedDuration::from_hours(24)));
+        assert_eq!(parse_duration("60s"), Some(SignedDuration::from_secs(60)));
         assert_eq!(parse_duration("invalid"), None);
     }
 

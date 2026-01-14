@@ -3,7 +3,7 @@
 //! This module provides utilities for managing Kubernetes-style conditions
 //! and updating the status subresource.
 
-use chrono::Utc;
+use jiff::Timestamp;
 use kube::api::{Patch, PatchParams};
 use kube::{Api, ResourceExt};
 
@@ -64,7 +64,7 @@ impl ConditionBuilder {
 
     /// Set a condition, updating if it exists or adding if it doesn't
     pub fn set_condition(mut self, type_: &str, status: &str, reason: &str, message: &str) -> Self {
-        let now = Utc::now().to_rfc3339();
+        let now = Timestamp::now().to_string();
 
         // Find existing condition of this type
         if let Some(existing) = self.conditions.iter_mut().find(|c| c.type_ == type_) {
@@ -594,7 +594,7 @@ impl<'a> StatusManager<'a> {
             conditions,
             retry_count: Some(current_retry + 1),
             last_error: Some(message.to_string()),
-            last_error_time: Some(chrono::Utc::now().to_rfc3339()),
+            last_error_time: Some(Timestamp::now().to_string()),
             previous_replicas: existing_status.and_then(|s| s.previous_replicas),
             phase_started_at,
             // Preserve existing version when failed
@@ -755,7 +755,7 @@ impl<'a> StatusManager<'a> {
             existing_timestamp
         } else {
             // New phase, set new timestamp
-            Some(chrono::Utc::now().to_rfc3339())
+            Some(Timestamp::now().to_string())
         }
     }
 

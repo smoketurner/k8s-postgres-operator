@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use k8s_openapi::api::apps::v1::{Deployment, StatefulSet};
 use k8s_openapi::api::core::v1::{
     ConfigMap, Endpoints, PersistentVolumeClaim, Pod, Secret, Service, ServiceAccount,
@@ -1783,11 +1783,14 @@ async fn handle_deletion(cluster: &PostgresCluster, ctx: &Context, ns: &str) -> 
 /// Returns Some(duration) if timeout exceeded, None otherwise.
 fn check_deletion_timeout(cluster: &PostgresCluster) -> Option<Duration> {
     let deletion_ts = cluster.metadata.deletion_timestamp.as_ref()?;
-    let deletion_time: DateTime<Utc> = deletion_ts.0;
-    let elapsed = Utc::now().signed_duration_since(deletion_time);
+    // deletion_ts.0 is chrono::DateTime<Utc> from k8s-openapi, use timestamp() to get seconds
+    let deletion_secs = deletion_ts.0.timestamp();
+    let now_secs = Timestamp::now().as_second();
+    let elapsed_secs = now_secs.saturating_sub(deletion_secs);
 
-    // Convert to std::time::Duration (handle negative)
-    let elapsed_std = elapsed.to_std().unwrap_or(Duration::ZERO);
+    // Handle negative values (shouldn't happen but be safe)
+    #[allow(clippy::cast_sign_loss)]
+    let elapsed_std = Duration::from_secs(elapsed_secs.max(0) as u64);
 
     if elapsed_std.as_secs() > DELETION_TIMEOUT_SECS as u64 {
         Some(elapsed_std)
@@ -1893,16 +1896,17 @@ async fn check_creating_timeout(
         .status
         .as_ref()
         .and_then(|s| s.phase_started_at.as_ref())
-        .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
-        .map(|dt| dt.with_timezone(&Utc));
+        .and_then(|ts| ts.parse::<Timestamp>().ok());
 
     let Some(started_at) = phase_started_at else {
         // No timestamp yet, can't determine timeout
         return None;
     };
 
-    let duration_in_creating = Utc::now().signed_duration_since(started_at);
-    if duration_in_creating.num_seconds() < CREATING_TIMEOUT_SECS {
+    let now_secs = Timestamp::now().as_second();
+    let started_secs = started_at.as_second();
+    let duration_in_creating_secs = now_secs.saturating_sub(started_secs);
+    if duration_in_creating_secs < CREATING_TIMEOUT_SECS {
         // Still within timeout
         return None;
     }
@@ -1934,7 +1938,7 @@ async fn check_creating_timeout(
                     "Cluster stuck in Creating state for {} minutes. \
                      PVC '{}' is Pending - storage class '{}' may not exist or be provisioning. \
                      Fix the spec.storage.storageClass or delete the cluster.",
-                    duration_in_creating.num_minutes(),
+                    duration_in_creating_secs / 60,
                     pvc_name,
                     storage_class
                 ));
@@ -1946,7 +1950,7 @@ async fn check_creating_timeout(
     Some(format!(
         "Cluster stuck in Creating state for {} minutes with 0 ready replicas. \
          Check pod events and logs for details.",
-        duration_in_creating.num_minutes()
+        duration_in_creating_secs / 60
     ))
 }
 
@@ -2436,7 +2440,7 @@ pub async fn get_pod_resize_status(
                 pod_name,
                 status,
                 allocated_resources,
-                last_transition_time: Some(chrono::Utc::now().to_rfc3339()),
+                last_transition_time: Some(Timestamp::now().to_string()),
                 message: None,
             });
         }
