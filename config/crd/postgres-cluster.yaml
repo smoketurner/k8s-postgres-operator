@@ -62,6 +62,11 @@ spec:
                 # 3+ replicas: full HA with automatic failover
                 - rule: "self.replicas >= 1"
                   message: "replicas must be at least 1"
+                - rule: "self.replicas <= 100"
+                  message: "replicas cannot exceed 100"
+                # Backup encryption is required when backups are configured
+                - rule: "!has(self.backup) || has(self.backup.encryption)"
+                  message: "backup encryption is required when backups are configured"
               properties:
                 version:
                   type: string

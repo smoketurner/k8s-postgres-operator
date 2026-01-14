@@ -5,7 +5,7 @@ use kube::ResourceExt;
 use kube::core::ObjectMeta;
 use rand::Rng;
 
-use crate::controller::error::Result;
+use crate::controller::cluster_error::Result;
 use crate::crd::PostgresCluster;
 use crate::resources::common::{owner_reference, standard_labels};
 

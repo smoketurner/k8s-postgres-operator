@@ -17,7 +17,7 @@
 
 use proptest::prelude::*;
 
-use postgres_operator::controller::state_machine::{
+use postgres_operator::controller::cluster_state_machine::{
     ClusterEvent, ClusterStateMachine, TransitionContext,
 };
 use postgres_operator::controller::validation::{validate_spec, validate_version_upgrade};

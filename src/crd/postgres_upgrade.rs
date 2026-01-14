@@ -16,14 +16,14 @@
 //! - Automated rollback via annotation support
 
 use crate::crd::{Condition, PostgresVersion, ResourceRequirements};
-use kube::CustomResource;
+use kube::{CustomResource, KubeSchema};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// PostgresUpgrade is the Schema for managing PostgreSQL major version upgrades
 /// using blue-green deployment with logical replication.
-#[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[derive(CustomResource, Serialize, Deserialize, Clone, Debug, KubeSchema)]
 #[kube(
     group = "postgres-operator.smoketurner.com",
     version = "v1alpha1",
@@ -37,6 +37,15 @@ use std::collections::BTreeMap;
     printcolumn = r#"{"name":"Phase", "type":"string", "jsonPath":".status.phase"}"#,
     printcolumn = r#"{"name":"Lag", "type":"string", "jsonPath":".status.replication.lagSeconds"}"#,
     printcolumn = r#"{"name":"Age", "type":"date", "jsonPath":".metadata.creationTimestamp"}"#
+)]
+// CEL validation rules - validated by API server before admission
+#[x_kube(
+    // Replication lag threshold must be non-negative
+    validation = ("!has(self.strategy) || !has(self.strategy.preChecks) || self.strategy.preChecks.maxReplicationLagSeconds >= 0", "maxReplicationLagSeconds must be non-negative"),
+    // Row count tolerance must be non-negative
+    validation = ("!has(self.strategy) || !has(self.strategy.preChecks) || self.strategy.preChecks.rowCountTolerance >= 0", "rowCountTolerance must be non-negative"),
+    // Minimum verification passes must be at least 1
+    validation = ("!has(self.strategy) || !has(self.strategy.preChecks) || self.strategy.preChecks.minVerificationPasses >= 1", "minVerificationPasses must be at least 1")
 )]
 #[serde(rename_all = "camelCase")]
 pub struct PostgresUpgradeSpec {

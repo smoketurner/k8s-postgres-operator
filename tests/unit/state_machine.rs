@@ -1,6 +1,6 @@
 //! Additional unit tests for state machine transitions
 
-use postgres_operator::controller::state_machine::{
+use postgres_operator::controller::cluster_state_machine::{
     ClusterEvent, ClusterStateMachine, TransitionContext, TransitionResult, determine_event,
 };
 use postgres_operator::crd::ClusterPhase;

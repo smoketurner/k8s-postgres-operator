@@ -8,7 +8,7 @@ use kube::api::{Patch, PatchParams};
 use kube::{Api, ResourceExt};
 
 use crate::controller::Context;
-use crate::controller::error::Result;
+use crate::controller::cluster_error::Result;
 use crate::crd::{
     BackupStatus, ClusterPhase, Condition, ConnectionInfo, PostgresCluster, PostgresClusterStatus,
 };

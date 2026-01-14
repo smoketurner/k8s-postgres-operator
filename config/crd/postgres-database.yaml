@@ -49,6 +49,10 @@ spec:
               required:
                 - clusterRef
                 - database
+              x-kubernetes-validations:
+                # Database name cannot be a reserved PostgreSQL database
+                - rule: "!(self.database.name in ['postgres', 'template0', 'template1'])"
+                  message: "database name cannot be a reserved PostgreSQL database (postgres, template0, template1)"
               properties:
                 clusterRef:
                   type: object

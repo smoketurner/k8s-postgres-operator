@@ -1,4 +1,4 @@
-use kube::CustomResource;
+use kube::{CustomResource, KubeSchema};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -67,7 +67,7 @@ impl PostgresVersion {
 }
 
 /// PostgresCluster is the Schema for the postgresclusters API
-#[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[derive(CustomResource, Serialize, Deserialize, Clone, Debug, KubeSchema)]
 #[kube(
     group = "postgres-operator.smoketurner.com",
     version = "v1alpha1",
@@ -82,6 +82,15 @@ impl PostgresVersion {
     printcolumn = r#"{"name":"Successor", "type":"string", "jsonPath":".status.successor.name", "priority":1}"#,
     printcolumn = r#"{"name":"Ready", "type":"integer", "jsonPath":".status.readyReplicas"}"#,
     printcolumn = r#"{"name":"Age", "type":"date", "jsonPath":".metadata.creationTimestamp"}"#
+)]
+// CEL validation rules - validated by API server before admission
+#[x_kube(
+    // Replicas must be at least 1 (single server managed by Patroni)
+    validation = ("self.replicas >= 1", "replicas must be at least 1"),
+    // Replicas cannot exceed 100 (arbitrary safety limit)
+    validation = ("self.replicas <= 100", "replicas cannot exceed 100"),
+    // When backup is configured, encryption must be specified
+    validation = ("!has(self.backup) || has(self.backup.encryption)", "backup encryption is required when backups are configured")
 )]
 #[serde(rename_all = "camelCase")]
 pub struct PostgresClusterSpec {

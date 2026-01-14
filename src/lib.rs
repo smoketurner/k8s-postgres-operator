@@ -18,12 +18,12 @@ pub use webhooks::{
 
 use std::sync::Arc;
 
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::{ConfigMap, Secret, Service};
 use k8s_openapi::api::policy::v1::PodDisruptionBudget;
-use kube::runtime::Controller;
 use kube::runtime::watcher::Config as WatcherConfig;
+use kube::runtime::{Controller, WatchStreamExt, metadata_watcher, predicates, reflector, watcher};
 use kube::{Api, Client, Resource};
 use serde::de::DeserializeOwned;
 
@@ -38,6 +38,43 @@ where
         Some(ns) => Api::namespaced(client, ns),
         None => Api::all(client),
     }
+}
+
+/// Create the default watcher configuration for all controllers.
+///
+/// This ensures consistent behavior across all controllers:
+/// - `any_semantic()`: More reliable resource discovery in test environments
+/// - `streaming_lists()`: Reduces memory spike during initial list (Kubernetes 1.27+)
+fn default_watcher_config() -> WatcherConfig {
+    WatcherConfig::default().any_semantic().streaming_lists()
+}
+
+/// Create a filtered stream for a resource type with standard optimizations.
+///
+/// This creates a reflector-backed stream that:
+/// - Maintains an in-memory cache via reflector
+/// - Uses automatic retry with exponential backoff on errors
+/// - Converts watch events to objects (Added/Modified only)
+/// - Filters out status-only updates via generation predicate
+///
+/// Returns the reflector store (for cache lookups) and the filtered stream.
+fn create_filtered_stream<K>(
+    api: Api<K>,
+    watcher_config: WatcherConfig,
+) -> (
+    reflector::Store<K>,
+    impl Stream<Item = Result<K, watcher::Error>>,
+)
+where
+    K: Resource + Clone + DeserializeOwned + std::fmt::Debug + Send + 'static,
+    K::DynamicType: Default + Eq + std::hash::Hash + Clone,
+{
+    let (reader, writer) = reflector::store();
+    let stream = reflector(writer, watcher(api, watcher_config))
+        .default_backoff()
+        .applied_objects()
+        .predicate_filter(predicates::generation);
+    (reader, stream)
 }
 
 /// Run the operator controller (cluster-wide).
@@ -83,18 +120,23 @@ pub async fn run_controller_scoped(
     let secrets: Api<Secret> = scoped_api(client.clone(), namespace);
     let pdbs: Api<PodDisruptionBudget> = scoped_api(client.clone(), namespace);
 
-    // Configure watcher to handle dynamic resource creation
-    // Use any_semantic() for more reliable resource discovery in test environments
-    let watcher_config = WatcherConfig::default().any_semantic();
+    // Use consistent watcher configuration across all controllers
+    let watcher_config = default_watcher_config();
 
-    // Create and run the controller
-    // Watch PostgresCluster and all owned resources to trigger reconciliation
-    Controller::new(clusters, watcher_config.clone())
+    // Create filtered stream with standard optimizations (reflector, backoff, generation predicate)
+    let (reader, cluster_stream) = create_filtered_stream(clusters, watcher_config.clone());
+
+    // Create and run the controller using for_stream with the pre-filtered stream
+    // Memory optimization: Use metadata_watcher for owned resources where we only need to know
+    // they exist/changed (ConfigMaps, Secrets, Services, PDBs). Keep full watcher for StatefulSet
+    // since we read .status.readyReplicas. metadata_watcher returns PartialObjectMeta which only
+    // contains TypeMeta + ObjectMeta, reducing memory and IO.
+    Controller::for_stream(cluster_stream, reader)
         .owns(statefulsets, watcher_config.clone())
-        .owns(services, watcher_config.clone())
-        .owns(configmaps, watcher_config.clone())
-        .owns(secrets, watcher_config.clone())
-        .owns(pdbs, watcher_config)
+        .owns_stream(metadata_watcher(services, watcher_config.clone()).touched_objects())
+        .owns_stream(metadata_watcher(configmaps, watcher_config.clone()).touched_objects())
+        .owns_stream(metadata_watcher(secrets, watcher_config.clone()).touched_objects())
+        .owns_stream(metadata_watcher(pdbs, watcher_config).touched_objects())
         .run(reconcile, error_policy, ctx)
         .for_each(|result| async move {
             match result {
@@ -148,13 +190,17 @@ pub async fn run_database_controller_scoped(client: Client, namespace: Option<&s
     let databases: Api<PostgresDatabase> = scoped_api(client.clone(), namespace);
     let secrets: Api<Secret> = scoped_api(client.clone(), namespace);
 
-    // Configure watcher
-    let watcher_config = WatcherConfig::default().any_semantic();
+    // Use consistent watcher configuration across all controllers
+    let watcher_config = default_watcher_config();
+
+    // Create filtered stream with standard optimizations (reflector, backoff, generation predicate)
+    let (reader, database_stream) = create_filtered_stream(databases, watcher_config.clone());
 
     // Create and run the controller
     // Watch PostgresDatabase and owned secrets
-    Controller::new(databases, watcher_config.clone())
-        .owns(secrets, watcher_config)
+    // Memory optimization: Use metadata_watcher for secrets since we only need to know they exist
+    Controller::for_stream(database_stream, reader)
+        .owns_stream(metadata_watcher(secrets, watcher_config).touched_objects())
         .run(reconcile_database, database_error_policy, ctx)
         .for_each(|result| async move {
             match result {
@@ -204,14 +250,17 @@ pub async fn run_upgrade_controller_scoped(client: Client, namespace: Option<&st
     // Set up APIs for the controller (namespaced or cluster-wide)
     let upgrades: Api<PostgresUpgrade> = scoped_api(client.clone(), namespace);
 
-    // Configure watcher
-    let watcher_config = WatcherConfig::default().any_semantic();
+    // Use consistent watcher configuration across all controllers
+    let watcher_config = default_watcher_config();
+
+    // Create filtered stream with standard optimizations (reflector, backoff, generation predicate)
+    let (reader, upgrade_stream) = create_filtered_stream(upgrades, watcher_config);
 
     // Create and run the controller
     // Watch PostgresUpgrade resources
     // Note: Target clusters are NOT owned by the upgrade resource (by design)
     // to ensure they survive upgrade deletion
-    Controller::new(upgrades, watcher_config)
+    Controller::for_stream(upgrade_stream, reader)
         .run(reconcile_upgrade, upgrade_error_policy, ctx)
         .for_each(|result| async move {
             match result {

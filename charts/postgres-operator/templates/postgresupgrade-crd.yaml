@@ -55,6 +55,13 @@ spec:
               required:
                 - sourceCluster
                 - targetVersion
+              x-kubernetes-validations:
+                - rule: "!has(self.strategy) || !has(self.strategy.preChecks) || self.strategy.preChecks.maxReplicationLagSeconds >= 0"
+                  message: "maxReplicationLagSeconds must be non-negative"
+                - rule: "!has(self.strategy) || !has(self.strategy.preChecks) || self.strategy.preChecks.rowCountTolerance >= 0"
+                  message: "rowCountTolerance must be non-negative"
+                - rule: "!has(self.strategy) || !has(self.strategy.preChecks) || self.strategy.preChecks.minVerificationPasses >= 1"
+                  message: "minVerificationPasses must be at least 1"
               properties:
                 sourceCluster:
                   type: object

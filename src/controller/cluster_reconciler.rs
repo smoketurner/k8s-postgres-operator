@@ -25,12 +25,12 @@ use tracing::{debug, error, info, instrument, warn};
 
 use crate::controller::backup_status::{BackupEvent, BackupStatusCollector, detect_backup_events};
 use crate::controller::cleanup::{cleanup_stuck_resource, is_namespace_not_found_error};
-use crate::controller::context::Context;
-use crate::controller::error::{BackoffConfig, Error, Result};
-use crate::controller::replication_lag::collect_replication_lag;
-use crate::controller::state_machine::{
+use crate::controller::cluster_error::{BackoffConfig, Error, Result};
+use crate::controller::cluster_state_machine::{
     ClusterEvent, ClusterStateMachine, TransitionContext, TransitionResult, determine_event,
 };
+use crate::controller::context::Context;
+use crate::controller::replication_lag::collect_replication_lag;
 use crate::controller::status::{StatusManager, spec_changed};
 use crate::crd::{ClusterPhase, PostgresCluster};
 use crate::resources::{

@@ -11,7 +11,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::api::{Api, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::{Client, Resource, ResourceExt};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 use crate::controller::cleanup::{cleanup_stuck_resource, is_namespace_not_found_error};
 use crate::crd::{
@@ -71,6 +71,7 @@ pub(crate) const DATABASE_FINALIZER: &str =
     "postgresdatabase.postgres-operator.smoketurner.com/finalizer";
 
 /// Reconcile a PostgresDatabase resource
+#[instrument(skip(db, ctx), fields(name = %db.name_any(), namespace = db.namespace().unwrap_or_default()))]
 pub async fn reconcile_database(
     db: Arc<PostgresDatabase>,
     ctx: Arc<DatabaseContext>,
@@ -78,7 +79,7 @@ pub async fn reconcile_database(
     let name = db.name_any();
     let namespace = db.namespace().ok_or(DatabaseError::MissingNamespace)?;
 
-    debug!(name = %name, namespace = %namespace, "Reconciling PostgresDatabase");
+    debug!("Reconciling PostgresDatabase");
 
     // Check if being deleted
     if db.metadata.deletion_timestamp.is_some() {

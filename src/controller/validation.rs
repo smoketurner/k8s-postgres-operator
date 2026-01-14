@@ -6,7 +6,7 @@
 //! - Version changes
 //! - Storage changes
 
-use crate::controller::error::{Error, Result};
+use crate::controller::cluster_error::{Error, Result};
 use crate::crd::PostgresCluster;
 
 /// Minimum number of replicas

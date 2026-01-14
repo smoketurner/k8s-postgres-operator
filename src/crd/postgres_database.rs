@@ -7,7 +7,7 @@
 //! - Generate Kubernetes secrets with credentials and connection strings
 //! - Apply grants to control access
 
-use kube::CustomResource;
+use kube::{CustomResource, KubeSchema};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 /// A PostgresDatabase resource declares a database and its roles within
 /// a parent PostgresCluster. The operator provisions these resources
 /// and creates Kubernetes secrets with credentials.
-#[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[derive(CustomResource, Serialize, Deserialize, Clone, Debug, KubeSchema)]
 #[kube(
     group = "postgres-operator.smoketurner.com",
     version = "v1alpha1",
@@ -29,6 +29,11 @@ use serde::{Deserialize, Serialize};
     printcolumn = r#"{"name":"Database", "type":"string", "jsonPath":".spec.database.name"}"#,
     printcolumn = r#"{"name":"Phase", "type":"string", "jsonPath":".status.phase"}"#,
     printcolumn = r#"{"name":"Age", "type":"date", "jsonPath":".metadata.creationTimestamp"}"#
+)]
+// CEL validation rules - validated by API server before admission
+#[x_kube(
+    // Database name cannot be a reserved PostgreSQL database
+    validation = ("!(self.database.name in ['postgres', 'template0', 'template1'])", "database name cannot be a reserved PostgreSQL database (postgres, template0, template1)")
 )]
 #[serde(rename_all = "camelCase")]
 pub struct PostgresDatabaseSpec {
