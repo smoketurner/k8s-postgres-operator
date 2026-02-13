@@ -838,8 +838,7 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
     // Check if KEDA is managing replicas - if so, don't set replica count
     // to avoid conflicts between the operator and KEDA's scaling decisions
     let keda_managed = scaled_object::is_keda_managing_replicas(cluster);
-    let sts = patroni::generate_patroni_statefulset(cluster, keda_managed);
-    let sts = patroni::add_resize_policy_to_statefulset(sts, restart_on_resize);
+    let sts = patroni::generate_patroni_statefulset(cluster, keda_managed, restart_on_resize);
     apply_resource(ctx, ns, &sts).await?;
 
     // Ensure Patroni Services exist
@@ -906,11 +905,8 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
             .and_then(|p| p.resources.as_ref())
             .and_then(|r| r.restart_on_resize)
             .unwrap_or(false);
-        let pgbouncer_deployment = pgbouncer::generate_pgbouncer_deployment(cluster);
-        let pgbouncer_deployment = pgbouncer::add_resize_policy_to_deployment(
-            pgbouncer_deployment,
-            pgbouncer_restart_on_resize,
-        );
+        let pgbouncer_deployment =
+            pgbouncer::generate_pgbouncer_deployment(cluster, pgbouncer_restart_on_resize);
         apply_resource(ctx, ns, &pgbouncer_deployment).await?;
 
         // Apply PgBouncer Service
@@ -934,11 +930,7 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
             apply_resource(ctx, ns, &pgbouncer_replica_config).await?;
 
             let pgbouncer_replica_deployment =
-                pgbouncer::generate_pgbouncer_replica_deployment(cluster);
-            let pgbouncer_replica_deployment = pgbouncer::add_resize_policy_to_deployment(
-                pgbouncer_replica_deployment,
-                pgbouncer_restart_on_resize,
-            );
+                pgbouncer::generate_pgbouncer_replica_deployment(cluster, pgbouncer_restart_on_resize);
             apply_resource(ctx, ns, &pgbouncer_replica_deployment).await?;
 
             let pgbouncer_replica_svc = pgbouncer::generate_pgbouncer_replica_service(cluster);
@@ -1785,8 +1777,8 @@ async fn handle_deletion(cluster: &PostgresCluster, ctx: &Context, ns: &str) -> 
 /// Returns Some(duration) if timeout exceeded, None otherwise.
 fn check_deletion_timeout(cluster: &PostgresCluster) -> Option<Duration> {
     let deletion_ts = cluster.metadata.deletion_timestamp.as_ref()?;
-    // deletion_ts.0 is chrono::DateTime<Utc> from k8s-openapi, use timestamp() to get seconds
-    let deletion_secs = deletion_ts.0.timestamp();
+    // deletion_ts.0 is jiff::Timestamp from k8s-openapi 0.27+
+    let deletion_secs = deletion_ts.0.as_second();
     let now_secs = Timestamp::now().as_second();
     let elapsed_secs = now_secs.saturating_sub(deletion_secs);
 
@@ -2391,14 +2383,11 @@ pub async fn get_pod_resize_status(
     for pod in pod_list.items {
         let pod_name = pod.metadata.name.clone().unwrap_or_default();
 
-        // Get resize status from pod conditions (Kubernetes 1.35+)
-        // The resize field is in status.resize
-        let resize_str = pod.status.as_ref().and_then(|s| {
-            // The resize field is a string in the pod status
-            // We access it via JSON since k8s-openapi v1_34 doesn't have it
-            let status_json = serde_json::to_value(s).ok()?;
-            status_json.get("resize")?.as_str().map(|s| s.to_string())
-        });
+        // Get resize status from pod status (Kubernetes 1.35+)
+        let resize_str = pod
+            .status
+            .as_ref()
+            .and_then(|s| s.resize.clone());
 
         let status = match resize_str.as_deref() {
             Some("InProgress") => PodResizeStatus::InProgress,
@@ -2416,18 +2405,10 @@ pub async fn get_pod_resize_status(
             .and_then(|s| s.container_statuses.as_ref())
             .and_then(|containers| containers.first())
             .and_then(|c| {
-                // Access allocatedResources via JSON since k8s-openapi v1_34 doesn't have it
-                let container_json = serde_json::to_value(c).ok()?;
-                let allocated = container_json.get("allocatedResources")?;
+                let allocated = c.allocated_resources.as_ref()?;
 
-                let cpu = allocated
-                    .get("cpu")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let memory = allocated
-                    .get("memory")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
+                let cpu = allocated.get("cpu").map(|q| q.0.clone());
+                let memory = allocated.get("memory").map(|q| q.0.clone());
 
                 if cpu.is_some() || memory.is_some() {
                     Some(ResourceList { cpu, memory })

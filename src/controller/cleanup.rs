@@ -138,34 +138,34 @@ mod tests {
 
     #[test]
     fn test_is_namespace_not_found_error_true() {
-        let error = kube::Error::Api(kube::error::ErrorResponse {
-            status: "Failure".to_string(),
+        let error = kube::Error::Api(Box::new(kube::core::Status {
             message: "namespaces \"test-ns\" not found".to_string(),
             reason: "NotFound".to_string(),
             code: 404,
-        });
+            ..Default::default()
+        }));
         assert!(is_namespace_not_found_error(&error));
     }
 
     #[test]
     fn test_is_namespace_not_found_error_false_wrong_code() {
-        let error = kube::Error::Api(kube::error::ErrorResponse {
-            status: "Failure".to_string(),
+        let error = kube::Error::Api(Box::new(kube::core::Status {
             message: "namespaces \"test-ns\" not found".to_string(),
             reason: "Forbidden".to_string(),
             code: 403,
-        });
+            ..Default::default()
+        }));
         assert!(!is_namespace_not_found_error(&error));
     }
 
     #[test]
     fn test_is_namespace_not_found_error_false_wrong_message() {
-        let error = kube::Error::Api(kube::error::ErrorResponse {
-            status: "Failure".to_string(),
+        let error = kube::Error::Api(Box::new(kube::core::Status {
             message: "resource not found".to_string(),
             reason: "NotFound".to_string(),
             code: 404,
-        });
+            ..Default::default()
+        }));
         assert!(!is_namespace_not_found_error(&error));
     }
 }
