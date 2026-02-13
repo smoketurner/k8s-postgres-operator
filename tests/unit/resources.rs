@@ -1320,7 +1320,10 @@ mod resize_policy_tests {
 
         // Check resize_policy directly on the container
         let container = &spec.template.spec.as_ref().unwrap().containers[0];
-        let resize_policy = container.resize_policy.as_ref().expect("resizePolicy should be present");
+        let resize_policy = container
+            .resize_policy
+            .as_ref()
+            .expect("resizePolicy should be present");
         assert_eq!(resize_policy.len(), 2);
 
         // Check CPU policy
@@ -1354,7 +1357,10 @@ mod resize_policy_tests {
             .unwrap()
             .containers[0];
 
-        let resize_policy = container.resize_policy.as_ref().expect("Should have resizePolicy");
+        let resize_policy = container
+            .resize_policy
+            .as_ref()
+            .expect("Should have resizePolicy");
 
         // Check CPU policy
         let cpu_policy = resize_policy
@@ -1379,10 +1385,7 @@ mod resize_policy_tests {
 
         // Verify fields are present and valid
         assert!(sts.metadata.name.is_some());
-        assert_eq!(
-            sts.spec.as_ref().and_then(|s| s.replicas),
-            Some(3)
-        );
+        assert_eq!(sts.spec.as_ref().and_then(|s| s.replicas), Some(3));
     }
 
     #[test]
@@ -1413,7 +1416,10 @@ mod resize_policy_tests {
             .unwrap()
             .containers[0];
 
-        let resize_policy = container.resize_policy.as_ref().expect("Should have resizePolicy");
+        let resize_policy = container
+            .resize_policy
+            .as_ref()
+            .expect("Should have resizePolicy");
 
         // PgBouncer should always use NotRequired (in-place)
         for policy in resize_policy {
@@ -1444,10 +1450,7 @@ mod resize_policy_tests {
 
         // Verify fields are present and valid
         assert!(deployment.metadata.name.is_some());
-        assert_eq!(
-            deployment.spec.as_ref().and_then(|s| s.replicas),
-            Some(2)
-        );
+        assert_eq!(deployment.spec.as_ref().and_then(|s| s.replicas), Some(2));
     }
 
     #[test]
@@ -1522,12 +1525,13 @@ mod resize_policy_tests {
             .unwrap()
             .containers[0];
 
-        let resize_policy = container.resize_policy.as_ref().expect("Should have resizePolicy");
+        let resize_policy = container
+            .resize_policy
+            .as_ref()
+            .expect("Should have resizePolicy");
 
         for policy in resize_policy {
-            assert_eq!(
-                policy.restart_policy, "RestartContainer"
-            );
+            assert_eq!(policy.restart_policy, "RestartContainer");
         }
     }
 }

@@ -929,8 +929,10 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
             let pgbouncer_replica_config = pgbouncer::generate_pgbouncer_replica_configmap(cluster);
             apply_resource(ctx, ns, &pgbouncer_replica_config).await?;
 
-            let pgbouncer_replica_deployment =
-                pgbouncer::generate_pgbouncer_replica_deployment(cluster, pgbouncer_restart_on_resize);
+            let pgbouncer_replica_deployment = pgbouncer::generate_pgbouncer_replica_deployment(
+                cluster,
+                pgbouncer_restart_on_resize,
+            );
             apply_resource(ctx, ns, &pgbouncer_replica_deployment).await?;
 
             let pgbouncer_replica_svc = pgbouncer::generate_pgbouncer_replica_service(cluster);
@@ -2384,10 +2386,7 @@ pub async fn get_pod_resize_status(
         let pod_name = pod.metadata.name.clone().unwrap_or_default();
 
         // Get resize status from pod status (Kubernetes 1.35+)
-        let resize_str = pod
-            .status
-            .as_ref()
-            .and_then(|s| s.resize.clone());
+        let resize_str = pod.status.as_ref().and_then(|s| s.resize.clone());
 
         let status = match resize_str.as_deref() {
             Some("InProgress") => PodResizeStatus::InProgress,
