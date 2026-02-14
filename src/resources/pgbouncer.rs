@@ -10,10 +10,10 @@
 
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy};
 use k8s_openapi::api::core::v1::{
-    Affinity, ConfigMap, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, EnvVarSource,
-    PodAffinityTerm, PodAntiAffinity, PodSpec, PodTemplateSpec, Probe, ResourceRequirements,
-    SecretKeySelector, SecretVolumeSource, SecurityContext, Service, ServicePort, ServiceSpec,
-    TCPSocketAction, Volume, VolumeMount, WeightedPodAffinityTerm,
+    Affinity, ConfigMap, Container, ContainerPort, ContainerResizePolicy, EmptyDirVolumeSource,
+    EnvVar, EnvVarSource, PodAffinityTerm, PodAntiAffinity, PodSpec, PodTemplateSpec, Probe,
+    ResourceRequirements, SecretKeySelector, SecretVolumeSource, SecurityContext, Service,
+    ServicePort, ServiceSpec, TCPSocketAction, Volume, VolumeMount, WeightedPodAffinityTerm,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, LabelSelectorRequirement};
@@ -242,7 +242,10 @@ fn generate_pgbouncer_anti_affinity(cluster_name: &str) -> Affinity {
 }
 
 /// Generate the PgBouncer Deployment for primary connections
-pub fn generate_pgbouncer_deployment(cluster: &PostgresCluster) -> Deployment {
+pub fn generate_pgbouncer_deployment(
+    cluster: &PostgresCluster,
+    restart_on_resize: bool,
+) -> Deployment {
     let name = format!("{}-pooler", cluster.name_any());
     let cluster_name = cluster.name_any();
     let ns = cluster.namespace();
@@ -484,9 +487,6 @@ pub fn generate_pgbouncer_deployment(cluster: &PostgresCluster) -> Deployment {
                 ..Default::default()
             });
 
-    // Note: resizePolicy is added via JSON patching in add_resize_policy_to_deployment()
-    // since k8s-openapi v1_34 doesn't have the field yet
-
     let container = Container {
         name: "pgbouncer".to_string(),
         image: Some(image),
@@ -500,6 +500,7 @@ pub fn generate_pgbouncer_deployment(cluster: &PostgresCluster) -> Deployment {
         env: Some(env_vars),
         volume_mounts: Some(volume_mounts),
         resources,
+        resize_policy: Some(generate_resize_policy(restart_on_resize)),
         readiness_probe: Some(readiness_probe),
         liveness_probe: Some(liveness_probe),
         security_context: Some(SecurityContext {
@@ -560,7 +561,10 @@ pub fn generate_pgbouncer_deployment(cluster: &PostgresCluster) -> Deployment {
 }
 
 /// Generate the PgBouncer Deployment for replica connections
-pub fn generate_pgbouncer_replica_deployment(cluster: &PostgresCluster) -> Deployment {
+pub fn generate_pgbouncer_replica_deployment(
+    cluster: &PostgresCluster,
+    restart_on_resize: bool,
+) -> Deployment {
     let name = format!("{}-pooler-repl", cluster.name_any());
     let cluster_name = cluster.name_any();
     let ns = cluster.namespace();
@@ -802,9 +806,6 @@ pub fn generate_pgbouncer_replica_deployment(cluster: &PostgresCluster) -> Deplo
                 ..Default::default()
             });
 
-    // Note: resizePolicy is added via JSON patching in add_resize_policy_to_deployment()
-    // since k8s-openapi v1_34 doesn't have the field yet
-
     let container = Container {
         name: "pgbouncer".to_string(),
         image: Some(image),
@@ -818,6 +819,7 @@ pub fn generate_pgbouncer_replica_deployment(cluster: &PostgresCluster) -> Deplo
         env: Some(env_vars),
         volume_mounts: Some(volume_mounts),
         resources,
+        resize_policy: Some(generate_resize_policy(restart_on_resize)),
         readiness_probe: Some(readiness_probe),
         liveness_probe: Some(liveness_probe),
         security_context: Some(SecurityContext {
@@ -997,64 +999,25 @@ pub fn is_replica_pooler_enabled(cluster: &PostgresCluster) -> bool {
         .is_some_and(|s| s.enabled && s.enable_replica_pooler)
 }
 
-/// Add Kubernetes 1.35+ resizePolicy to a Deployment's containers via JSON patching.
+/// Generate a resize policy for in-place pod resource resizing (Kubernetes 1.35+).
 ///
-/// Since k8s-openapi v1_34 doesn't have the resizePolicy field, we add it by:
-/// 1. Serializing the Deployment to JSON
-/// 2. Adding resizePolicy to each container
-/// 3. Deserializing back to Deployment
-///
-/// PgBouncer is stateless so we always use NotRequired (in-place resize).
-///
-/// TODO(k8s-openapi-upgrade): Remove this function when upgrading to k8s-openapi 0.27+ with v1_35.
-/// See Cargo.toml for upgrade blockers and full migration plan.
-/// Instead, add resizePolicy directly in generate_pgbouncer_deployment() using:
-/// ```ignore
-/// use k8s_openapi::api::core::v1::ContainerResizePolicy;
-/// resize_policy: Some(vec![
-///     ContainerResizePolicy {
-///         resource_name: "cpu".to_string(),
-///         restart_policy: "NotRequired".to_string(),
-///     },
-///     ContainerResizePolicy {
-///         resource_name: "memory".to_string(),
-///         restart_policy: "NotRequired".to_string(),
-///     },
-/// ]),
-/// ```
-pub fn add_resize_policy_to_deployment(
-    deployment: Deployment,
-    restart_on_resize: bool,
-) -> Deployment {
+/// When `restart_on_resize` is false (default), both CPU and memory can be resized
+/// without restarting the container. When true, a container restart is required.
+fn generate_resize_policy(restart_on_resize: bool) -> Vec<ContainerResizePolicy> {
     let policy = if restart_on_resize {
         "RestartContainer"
     } else {
         "NotRequired"
     };
 
-    let resize_policy = serde_json::json!([
-        {"resourceName": "cpu", "restartPolicy": policy},
-        {"resourceName": "memory", "restartPolicy": policy}
-    ]);
-
-    // Serialize to JSON Value
-    let mut deployment_json = match serde_json::to_value(&deployment) {
-        Ok(v) => v,
-        Err(_) => return deployment, // Return original on error
-    };
-
-    // Navigate to containers and add resizePolicy
-    if let Some(spec) = deployment_json.get_mut("spec")
-        && let Some(template) = spec.get_mut("template")
-        && let Some(pod_spec) = template.get_mut("spec")
-        && let Some(containers) = pod_spec.get_mut("containers")
-        && let Some(containers_arr) = containers.as_array_mut()
-    {
-        for container in containers_arr {
-            container["resizePolicy"] = resize_policy.clone();
-        }
-    }
-
-    // Deserialize back to Deployment
-    serde_json::from_value(deployment_json).unwrap_or(deployment)
+    vec![
+        ContainerResizePolicy {
+            resource_name: "cpu".to_string(),
+            restart_policy: policy.to_string(),
+        },
+        ContainerResizePolicy {
+            resource_name: "memory".to_string(),
+            restart_policy: policy.to_string(),
+        },
+    ]
 }

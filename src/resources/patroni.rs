@@ -13,11 +13,11 @@ use k8s_openapi::api::apps::v1::{
     RollingUpdateStatefulSetStrategy, StatefulSet, StatefulSetSpec, StatefulSetUpdateStrategy,
 };
 use k8s_openapi::api::core::v1::{
-    Affinity, ConfigMap, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, EnvVarSource,
-    ExecAction, HTTPGetAction, Lifecycle, LifecycleHandler, PersistentVolumeClaim,
-    PersistentVolumeClaimSpec, PodAffinityTerm, PodAntiAffinity, PodSpec, PodTemplateSpec, Probe,
-    ResourceRequirements, SecretKeySelector, SecretVolumeSource, SecurityContext, ServiceAccount,
-    Volume, VolumeMount, WeightedPodAffinityTerm,
+    Affinity, ConfigMap, Container, ContainerPort, ContainerResizePolicy, EmptyDirVolumeSource,
+    EnvVar, EnvVarSource, ExecAction, HTTPGetAction, Lifecycle, LifecycleHandler,
+    PersistentVolumeClaim, PersistentVolumeClaimSpec, PodAffinityTerm, PodAntiAffinity, PodSpec,
+    PodTemplateSpec, Probe, ResourceRequirements, SecretKeySelector, SecretVolumeSource,
+    SecurityContext, ServiceAccount, Volume, VolumeMount, WeightedPodAffinityTerm,
 };
 use k8s_openapi::api::rbac::v1::{Role, RoleBinding, RoleRef, Subject};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -411,7 +411,11 @@ fn generate_anti_affinity(cluster_name: &str) -> Affinity {
 /// When `keda_managed` is true, the replicas field is not set, allowing KEDA to manage
 /// the replica count via ScaledObject/HPA. This prevents conflicts between the operator
 /// and KEDA's autoscaling decisions.
-pub fn generate_patroni_statefulset(cluster: &PostgresCluster, keda_managed: bool) -> StatefulSet {
+pub fn generate_patroni_statefulset(
+    cluster: &PostgresCluster,
+    keda_managed: bool,
+    restart_on_resize: bool,
+) -> StatefulSet {
     let name = cluster.name_any();
     let ns = cluster.namespace();
     // Use patroni_cluster_labels to include user-defined labels (e.g., cost allocation)
@@ -743,8 +747,7 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster, keda_managed: boo
                 }),
                 ..Default::default()
             }),
-        // Note: resizePolicy is added via JSON patching in add_resize_policy_to_statefulset()
-        // since k8s-openapi v1_34 doesn't have the field yet
+        resize_policy: Some(generate_resize_policy(restart_on_resize)),
         startup_probe: Some(startup_probe),
         readiness_probe: Some(readiness_probe),
         liveness_probe: Some(liveness_probe),
@@ -906,62 +909,25 @@ pub fn generate_patroni_statefulset(cluster: &PostgresCluster, keda_managed: boo
     }
 }
 
-/// Add Kubernetes 1.35+ resizePolicy to a StatefulSet's containers via JSON patching.
+/// Generate a resize policy for in-place pod resource resizing (Kubernetes 1.35+).
 ///
-/// Since k8s-openapi v1_34 doesn't have the resizePolicy field, we add it by:
-/// 1. Serializing the StatefulSet to JSON
-/// 2. Adding resizePolicy to each container
-/// 3. Deserializing back to StatefulSet
-///
-/// This allows in-place pod resource updates without container restarts (default)
-/// or with restarts if restart_on_resize is true.
-///
-/// TODO(k8s-openapi-upgrade): Remove this function when upgrading to k8s-openapi 0.27+ with v1_35.
-/// See Cargo.toml for upgrade blockers and full migration plan.
-/// Instead, add resizePolicy directly in generate_patroni_statefulset() using:
-/// ```ignore
-/// use k8s_openapi::api::core::v1::ContainerResizePolicy;
-/// resize_policy: Some(vec![
-///     ContainerResizePolicy {
-///         resource_name: "cpu".to_string(),
-///         restart_policy: if restart_on_resize { "RestartContainer" } else { "NotRequired" }.to_string(),
-///     },
-///     ContainerResizePolicy {
-///         resource_name: "memory".to_string(),
-///         restart_policy: if restart_on_resize { "RestartContainer" } else { "NotRequired" }.to_string(),
-///     },
-/// ]),
-/// ```
-pub fn add_resize_policy_to_statefulset(sts: StatefulSet, restart_on_resize: bool) -> StatefulSet {
+/// When `restart_on_resize` is false (default), both CPU and memory can be resized
+/// without restarting the container. When true, a container restart is required.
+fn generate_resize_policy(restart_on_resize: bool) -> Vec<ContainerResizePolicy> {
     let policy = if restart_on_resize {
         "RestartContainer"
     } else {
         "NotRequired"
     };
 
-    let resize_policy = serde_json::json!([
-        {"resourceName": "cpu", "restartPolicy": policy},
-        {"resourceName": "memory", "restartPolicy": policy}
-    ]);
-
-    // Serialize to JSON Value
-    let mut sts_json = match serde_json::to_value(&sts) {
-        Ok(v) => v,
-        Err(_) => return sts, // Return original on error
-    };
-
-    // Navigate to containers and add resizePolicy
-    if let Some(spec) = sts_json.get_mut("spec")
-        && let Some(template) = spec.get_mut("template")
-        && let Some(pod_spec) = template.get_mut("spec")
-        && let Some(containers) = pod_spec.get_mut("containers")
-        && let Some(containers_arr) = containers.as_array_mut()
-    {
-        for container in containers_arr {
-            container["resizePolicy"] = resize_policy.clone();
-        }
-    }
-
-    // Deserialize back to StatefulSet
-    serde_json::from_value(sts_json).unwrap_or(sts)
+    vec![
+        ContainerResizePolicy {
+            resource_name: "cpu".to_string(),
+            restart_policy: policy.to_string(),
+        },
+        ContainerResizePolicy {
+            resource_name: "memory".to_string(),
+            restart_policy: policy.to_string(),
+        },
+    ]
 }

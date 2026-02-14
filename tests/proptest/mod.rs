@@ -540,7 +540,7 @@ proptest! {
     fn prop_valid_spec_generates_statefulset(spec in valid_spec()) {
         let cluster = cluster_from_spec(spec);
         // This should not panic
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
         prop_assert!(sts.metadata.name.is_some());
         prop_assert!(sts.spec.is_some());
     }
@@ -683,7 +683,7 @@ proptest! {
     fn prop_statefulset_replicas_match(replicas in 1..=50i32) {
         let spec = spec_with_replicas(replicas);
         let cluster = cluster_from_spec(spec);
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
 
         prop_assert_eq!(
             sts.spec.as_ref().unwrap().replicas,
@@ -872,7 +872,7 @@ proptest! {
 
         // When KEDA manages replicas, StatefulSet should be generated with keda_manages=true
         if scaled_object::is_keda_managing_replicas(&cluster) {
-            let sts = patroni::generate_patroni_statefulset(&cluster, true);
+            let sts = patroni::generate_patroni_statefulset(&cluster, true, false);
             prop_assert!(
                 sts.spec.as_ref().unwrap().replicas.is_none(),
                 "StatefulSet should have no replicas when KEDA manages"
@@ -943,7 +943,7 @@ mod edge_case_tests {
         let cluster = cluster_from_spec(spec);
 
         // All resource generation should succeed
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
         let cm = patroni::generate_patroni_config(&cluster);
         let primary = service::generate_primary_service(&cluster);
         let pdb_resource = pdb::generate_pdb(&cluster);
@@ -984,7 +984,7 @@ mod edge_case_tests {
         });
 
         // Resource generation should still work with status present
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
         assert!(sts.metadata.name.is_some());
     }
 }

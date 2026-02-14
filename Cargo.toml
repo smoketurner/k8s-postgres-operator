@@ -8,45 +8,9 @@ license = "MIT"
 
 [dependencies]
 # Kubernetes
-# Note: Using v1_34 feature but targeting K8s 1.35 clusters.
-# New 1.35 fields (like resizePolicy) are added via JSON patching.
-#
-# TODO(k8s-openapi-upgrade): Upgrade to k8s-openapi 0.27.0 with v1_35 when ecosystem is ready.
-#
-# Status as of 2026-01-12:
-# - kube 3.0.0 released with k8s-openapi 0.27.0 support
-# - kube 3.0.0 replaced chrono with jiff for timestamps
-#
-# Remaining blocker:
-# - kube-leader-election: Uses k8s_openapi::chrono which was replaced with jiff in k8s-openapi 0.27.0
-#   - No PR or issue exists to update kube-leader-election for jiff
-#   - See: https://github.com/hendrikmaus/kube-leader-election/issues
-#
-# When blocker is resolved:
-# 1. Update dependencies:
-#    - kube = { version = "=3.0.x", ... }
-#    - k8s-openapi = { version = "=0.27.x", features = ["v1_35"] }
-# 2. Handle chrono → jiff migration:
-#    - LogParams and Client::with_valid_until now use jiff timestamps
-#    - Update any code using k8s_openapi::chrono types
-# 3. Handle other kube 3.0.0 breaking changes:
-#    - ErrorResponse merged into Status (use is_forbidden(), etc. instead of pattern matching)
-#    - predicate_filter() now requires PredicateConfig parameter
-#    - Subresource write methods (replace_status) accept &K: Serialize instead of Vec<u8>
-# 4. In src/resources/patroni.rs:
-#    - Remove add_resize_policy_to_statefulset() function
-#    - Use native ContainerResizePolicy type directly in generate_patroni_statefulset()
-# 5. In src/resources/pgbouncer.rs:
-#    - Remove add_resize_policy_to_deployment() function
-#    - Use native ContainerResizePolicy type directly in generate_pgbouncer_deployment()
-# 6. In src/controller/reconciler.rs:
-#    - Simplify get_pod_resize_status() to use native pod.status.resize field
-#    - Use native container.allocatedResources field
-# 7. Run `cargo check` to verify everything compiles
-# 8. Track progress at:
-#    - kube-leader-election: https://github.com/hendrikmaus/kube-leader-election/releases
-kube = { version = "=2.0.1", default-features = false, features = ["runtime", "derive", "client", "rustls-tls", "aws-lc-rs", "ws", "unstable-runtime", "admission"] }
-k8s-openapi = { version = "=0.26.1", default-features = false, features = ["v1_34"] }
+# kube 3.x with k8s-openapi 0.27 (Kubernetes 1.35 native types)
+kube = { version = "=3.0.1", default-features = false, features = ["runtime", "derive", "client", "rustls-tls", "aws-lc-rs", "ws", "unstable-runtime", "admission"] }
+k8s-openapi = { version = "=0.27.0", default-features = false, features = ["v1_35"] }
 
 # Async runtime
 tokio = { version = "=1.49.0", default-features = false, features = ["full"] }
@@ -55,11 +19,11 @@ futures = { version = "=0.3.31", default-features = false }
 # Serialization
 serde = { version = "=1.0.228", default-features = false, features = ["derive"] }
 serde_json = { version = "=1.0.149", default-features = false }
-serde-saphyr = { version = "=0.0.15", default-features = false }
-schemars = { version = "=1.2.0", default-features = false }
+serde-saphyr = { version = "=0.0.17", default-features = false }
+schemars = { version = "=1.2.1", default-features = false }
 
 # Error handling
-thiserror = { version = "=2.0.17", default-features = false }
+thiserror = { version = "=2.0.18", default-features = false }
 
 # Logging/Tracing
 tracing = { version = "=0.1.44", default-features = false }
@@ -73,12 +37,12 @@ rustls-pemfile = { version = "=2.2.0", default-features = false, features = ["st
 
 # HTTP client for Patroni API queries
 hyper = { version = "=1.8.1", default-features = false, features = ["client", "http1"] }
-hyper-util = { version = "=0.1.19", default-features = false, features = ["tokio", "client", "client-legacy"] }
+hyper-util = { version = "=0.1.20", default-features = false, features = ["tokio", "client", "client-legacy"] }
 http-body-util = { version = "=0.1.3", default-features = false }
-bytes = { version = "=1.11.0", default-features = false }
+bytes = { version = "=1.11.1", default-features = false }
 
 # Utilities
-jiff = { version = "=0.2.18", default-features = false, features = ["std"] }
+jiff = { version = "=0.2.19", default-features = false, features = ["std"] }
 rand = { version = "=0.9.2", default-features = false }
 sha2 = { version = "=0.10.9", default-features = false }
 base64 = { version = "=0.22.1", default-features = false }
@@ -92,13 +56,13 @@ tokio-postgres-rustls-improved = { version = "=0.16.2", default-features = false
 rustls-pki-types = { version = "=1.14.0", default-features = false, features = ["std"] }
 
 # Leader election
-kube-leader-election = { version = "=0.42.0", default-features = false }
+kube-leader-election = { version = "=0.43.0", default-features = false }
 hostname = { version = "=0.4.2", default-features = false }
 
 [dev-dependencies]
 tokio-test = { version = "=0.4.5", default-features = false }
-uuid = { version = "=1.19.0", default-features = false, features = ["v4"] }
-proptest = { version = "=1.9.0", default-features = false, features = ["std"] }
+uuid = { version = "=1.20.0", default-features = false, features = ["v4"] }
+proptest = { version = "=1.10.0", default-features = false, features = ["std"] }
 
 [lints.clippy]
 # Panic-prevention lints

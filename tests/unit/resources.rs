@@ -21,7 +21,7 @@ mod patroni_statefulset_tests {
     #[test]
     fn test_patroni_statefulset_name() {
         let cluster = create_test_cluster("my-cluster", "default", 1);
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
 
         // Patroni uses the cluster name directly
         assert_eq!(sts.name_any(), "my-cluster");
@@ -30,7 +30,7 @@ mod patroni_statefulset_tests {
     #[test]
     fn test_patroni_statefulset_single_replica() {
         let cluster = create_test_cluster("my-cluster", "default", 1);
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
 
         let spec = sts.spec.as_ref().unwrap();
         assert_eq!(spec.replicas, Some(1));
@@ -39,7 +39,7 @@ mod patroni_statefulset_tests {
     #[test]
     fn test_patroni_statefulset_three_replicas() {
         let cluster = create_test_cluster("my-cluster", "default", 3);
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
 
         let spec = sts.spec.as_ref().unwrap();
         assert_eq!(spec.replicas, Some(3));
@@ -48,7 +48,7 @@ mod patroni_statefulset_tests {
     #[test]
     fn test_patroni_statefulset_labels() {
         let cluster = create_test_cluster("my-cluster", "default", 1);
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
 
         let labels = sts.metadata.labels.as_ref().unwrap();
         assert_eq!(
@@ -68,7 +68,7 @@ mod patroni_statefulset_tests {
     #[test]
     fn test_patroni_statefulset_owner_reference() {
         let cluster = create_test_cluster("my-cluster", "default", 1);
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
 
         let owner_refs = sts.metadata.owner_references.as_ref().unwrap();
         assert_eq!(owner_refs.len(), 1);
@@ -80,7 +80,7 @@ mod patroni_statefulset_tests {
     #[test]
     fn test_patroni_statefulset_update_strategy() {
         let cluster = create_test_cluster("my-cluster", "default", 1);
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
 
         let spec = sts.spec.as_ref().unwrap();
         let strategy = spec.update_strategy.as_ref().unwrap();
@@ -90,7 +90,7 @@ mod patroni_statefulset_tests {
     #[test]
     fn test_patroni_statefulset_service_account() {
         let cluster = create_test_cluster("my-cluster", "default", 1);
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
 
         let spec = sts.spec.as_ref().unwrap();
         let pod_spec = spec.template.spec.as_ref().unwrap();
@@ -103,7 +103,7 @@ mod patroni_statefulset_tests {
     #[test]
     fn test_patroni_statefulset_ports() {
         let cluster = create_test_cluster("my-cluster", "default", 1);
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
 
         let containers = &sts
             .spec
@@ -127,7 +127,7 @@ mod patroni_statefulset_tests {
     #[test]
     fn test_patroni_statefulset_probes() {
         let cluster = create_test_cluster("my-cluster", "default", 1);
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
 
         let container = &sts
             .spec
@@ -398,7 +398,7 @@ mod tls_statefulset_tests {
     #[test]
     fn test_tls_disabled_no_tls_volume() {
         let cluster = create_test_cluster("my-cluster", "default", 1);
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
 
         let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
         let volumes = pod_spec.volumes.as_ref().unwrap();
@@ -418,7 +418,7 @@ mod tls_statefulset_tests {
     #[test]
     fn test_tls_enabled_adds_volume() {
         let cluster = create_test_cluster_with_tls("my-cluster", "default", 1);
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
 
         let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
         let volumes = pod_spec.volumes.as_ref().unwrap();
@@ -438,7 +438,7 @@ mod tls_statefulset_tests {
     #[test]
     fn test_tls_enabled_adds_volume_mount() {
         let cluster = create_test_cluster_with_tls("my-cluster", "default", 1);
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
 
         let containers = &sts
             .spec
@@ -461,7 +461,7 @@ mod tls_statefulset_tests {
     #[test]
     fn test_tls_enabled_adds_env_vars() {
         let cluster = create_test_cluster_with_tls("my-cluster", "default", 1);
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
 
         let containers = &sts
             .spec
@@ -489,7 +489,7 @@ mod tls_statefulset_tests {
     fn test_tls_includes_ca_file() {
         // With cert-manager, the CA is included in the same secret as tls.crt and tls.key
         let cluster = create_test_cluster_with_tls("my-cluster", "default", 1);
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
 
         let containers = &sts
             .spec
@@ -520,7 +520,7 @@ mod pgbouncer_deployment_tests {
     #[test]
     fn test_pgbouncer_deployment_name() {
         let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
-        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster, false);
 
         assert_eq!(deployment.name_any(), "my-cluster-pooler");
     }
@@ -528,7 +528,7 @@ mod pgbouncer_deployment_tests {
     #[test]
     fn test_pgbouncer_deployment_replicas() {
         let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
-        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster, false);
 
         let spec = deployment.spec.as_ref().unwrap();
         assert_eq!(spec.replicas, Some(2));
@@ -537,7 +537,7 @@ mod pgbouncer_deployment_tests {
     #[test]
     fn test_pgbouncer_deployment_labels() {
         let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
-        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster, false);
 
         let labels = deployment.metadata.labels.as_ref().unwrap();
         assert_eq!(
@@ -557,7 +557,7 @@ mod pgbouncer_deployment_tests {
     #[test]
     fn test_pgbouncer_deployment_owner_reference() {
         let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
-        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster, false);
 
         let owner_refs = deployment.metadata.owner_references.as_ref().unwrap();
         assert_eq!(owner_refs.len(), 1);
@@ -568,7 +568,7 @@ mod pgbouncer_deployment_tests {
     #[test]
     fn test_pgbouncer_deployment_port() {
         let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
-        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster, false);
 
         let containers = &deployment
             .spec
@@ -588,7 +588,7 @@ mod pgbouncer_deployment_tests {
     #[test]
     fn test_pgbouncer_deployment_has_probes() {
         let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
-        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster, false);
 
         let container = &deployment
             .spec
@@ -613,7 +613,7 @@ mod pgbouncer_deployment_tests {
     #[test]
     fn test_pgbouncer_deployment_security_context() {
         let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
-        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster, false);
 
         let container = &deployment
             .spec
@@ -740,7 +740,7 @@ mod pgbouncer_replica_tests {
     #[test]
     fn test_pgbouncer_replica_deployment_name() {
         let cluster = create_test_cluster_with_pgbouncer_replica("my-cluster", "default", 3);
-        let deployment = pgbouncer::generate_pgbouncer_replica_deployment(&cluster);
+        let deployment = pgbouncer::generate_pgbouncer_replica_deployment(&cluster, false);
 
         assert_eq!(deployment.name_any(), "my-cluster-pooler-repl");
     }
@@ -795,7 +795,7 @@ mod tls_pgbouncer_integration_tests {
             .with_tls("letsencrypt-prod")
             .with_pgbouncer()
             .build();
-        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster, false);
 
         let pod_spec = deployment
             .spec
@@ -821,7 +821,7 @@ mod tls_pgbouncer_integration_tests {
             .with_tls("letsencrypt-prod")
             .with_pgbouncer()
             .build();
-        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster, false);
 
         let containers = &deployment
             .spec
@@ -855,28 +855,28 @@ mod replica_count_tests {
     #[test]
     fn test_single_replica_statefulset() {
         let cluster = create_test_cluster("my-cluster", "default", 1);
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
         assert_eq!(sts.spec.as_ref().unwrap().replicas, Some(1));
     }
 
     #[test]
     fn test_two_replica_statefulset() {
         let cluster = create_test_cluster("my-cluster", "default", 2);
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
         assert_eq!(sts.spec.as_ref().unwrap().replicas, Some(2));
     }
 
     #[test]
     fn test_five_replica_statefulset() {
         let cluster = create_test_cluster("my-cluster", "default", 5);
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
         assert_eq!(sts.spec.as_ref().unwrap().replicas, Some(5));
     }
 
     #[test]
     fn test_ten_replica_statefulset() {
         let cluster = create_test_cluster("my-cluster", "default", 10);
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
         assert_eq!(sts.spec.as_ref().unwrap().replicas, Some(10));
     }
 
@@ -968,7 +968,7 @@ mod resource_configuration_tests {
         let cluster = PostgresClusterBuilder::single("my-cluster", "default")
             .with_resources_full("100m", "128Mi", "500m", "512Mi")
             .build();
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
         let container = &sts
             .spec
             .as_ref()
@@ -994,7 +994,7 @@ mod resource_configuration_tests {
         let cluster = PostgresClusterBuilder::single("my-cluster", "default")
             .with_resources_full("2", "4Gi", "4", "8Gi")
             .build();
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
         let container = &sts
             .spec
             .as_ref()
@@ -1014,7 +1014,7 @@ mod resource_configuration_tests {
     #[test]
     fn test_no_resources() {
         let cluster = create_test_cluster("my-cluster", "default", 1);
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
         let container = &sts
             .spec
             .as_ref()
@@ -1042,7 +1042,7 @@ mod storage_class_tests {
         let cluster = PostgresClusterBuilder::single("my-cluster", "default")
             .with_storage("10Gi", None)
             .build();
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
         let vct = &sts
             .spec
             .as_ref()
@@ -1059,7 +1059,7 @@ mod storage_class_tests {
         let cluster = PostgresClusterBuilder::single("my-cluster", "default")
             .with_storage("10Gi", Some("fast-ssd"))
             .build();
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
         let vct = &sts
             .spec
             .as_ref()
@@ -1078,7 +1078,7 @@ mod storage_class_tests {
         let cluster = PostgresClusterBuilder::single("my-cluster", "default")
             .with_storage("100Gi", None)
             .build();
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
         let vct = &sts
             .spec
             .as_ref()
@@ -1138,14 +1138,14 @@ mod production_configuration_tests {
     #[test]
     fn test_production_statefulset_replicas() {
         let cluster = create_production_cluster();
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
         assert_eq!(sts.spec.as_ref().unwrap().replicas, Some(3));
     }
 
     #[test]
     fn test_production_statefulset_has_tls_volumes() {
         let cluster = create_production_cluster();
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
         let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
         let volumes = pod_spec.volumes.as_ref().unwrap();
 
@@ -1168,7 +1168,7 @@ mod production_configuration_tests {
     #[test]
     fn test_production_pgbouncer_deployment() {
         let cluster = create_production_cluster();
-        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster, false);
         assert_eq!(deployment.spec.as_ref().unwrap().replicas, Some(3));
     }
 
@@ -1177,7 +1177,7 @@ mod production_configuration_tests {
         let cluster = create_production_cluster();
         assert!(pgbouncer::is_replica_pooler_enabled(&cluster));
 
-        let repl_deployment = pgbouncer::generate_pgbouncer_replica_deployment(&cluster);
+        let repl_deployment = pgbouncer::generate_pgbouncer_replica_deployment(&cluster, false);
         assert!(repl_deployment.metadata.name.is_some());
     }
 
@@ -1226,7 +1226,7 @@ mod resource_panic_prevention_tests {
         cluster.status = None;
 
         // Should not panic
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
         assert!(sts.metadata.name.is_some());
     }
 
@@ -1288,7 +1288,7 @@ mod resource_panic_prevention_tests {
     #[test]
     fn test_tls_disabled_no_volumes() {
         let cluster = create_test_cluster("my-cluster", "default", 1);
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
         let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
 
         // Without TLS, should have no volumes or empty volumes
@@ -1308,122 +1308,88 @@ mod resize_policy_tests {
     use postgres_operator::crd::{ResourceList, ResourceRequirements};
 
     #[test]
-    fn test_add_resize_policy_to_statefulset_in_place() {
+    fn test_resize_policy_statefulset_in_place() {
         let cluster = create_test_cluster("my-cluster", "default", 3);
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
-
-        // Apply resize policy for in-place resize (restart_on_resize = false)
-        let sts_with_policy = patroni::add_resize_policy_to_statefulset(sts, false);
+        // Generate with restart_on_resize = false (in-place resize)
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
 
         // Verify the StatefulSet still has valid structure
-        assert!(sts_with_policy.spec.is_some());
-        let spec = sts_with_policy.spec.as_ref().unwrap();
+        assert!(sts.spec.is_some());
+        let spec = sts.spec.as_ref().unwrap();
         assert!(spec.template.spec.is_some());
 
-        // Serialize to JSON and verify resizePolicy was added
-        let sts_json = serde_json::to_value(&sts_with_policy).unwrap();
-        let containers = sts_json
-            .get("spec")
-            .and_then(|s| s.get("template"))
-            .and_then(|t| t.get("spec"))
-            .and_then(|s| s.get("containers"))
-            .and_then(|c| c.as_array())
-            .expect("Should have containers");
-
-        // Check that resizePolicy was added to the first container
-        let resize_policy = containers[0].get("resizePolicy");
-        assert!(resize_policy.is_some(), "resizePolicy should be present");
-
-        let policy_array = resize_policy.unwrap().as_array().unwrap();
-        assert_eq!(policy_array.len(), 2);
+        // Check resize_policy directly on the container
+        let container = &spec.template.spec.as_ref().unwrap().containers[0];
+        let resize_policy = container
+            .resize_policy
+            .as_ref()
+            .expect("resizePolicy should be present");
+        assert_eq!(resize_policy.len(), 2);
 
         // Check CPU policy
-        let cpu_policy = policy_array
+        let cpu_policy = resize_policy
             .iter()
-            .find(|p| p.get("resourceName").and_then(|r| r.as_str()) == Some("cpu"))
+            .find(|p| p.resource_name == "cpu")
             .expect("Should have CPU policy");
-        assert_eq!(
-            cpu_policy.get("restartPolicy").and_then(|r| r.as_str()),
-            Some("NotRequired")
-        );
+        assert_eq!(cpu_policy.restart_policy, "NotRequired");
 
         // Check memory policy
-        let memory_policy = policy_array
+        let memory_policy = resize_policy
             .iter()
-            .find(|p| p.get("resourceName").and_then(|r| r.as_str()) == Some("memory"))
+            .find(|p| p.resource_name == "memory")
             .expect("Should have memory policy");
-        assert_eq!(
-            memory_policy.get("restartPolicy").and_then(|r| r.as_str()),
-            Some("NotRequired")
-        );
+        assert_eq!(memory_policy.restart_policy, "NotRequired");
     }
 
     #[test]
-    fn test_add_resize_policy_to_statefulset_restart() {
+    fn test_resize_policy_statefulset_restart() {
         let cluster = create_test_cluster("my-cluster", "default", 3);
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        // Generate with restart_on_resize = true
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, true);
 
-        // Apply resize policy for restart on resize (restart_on_resize = true)
-        let sts_with_policy = patroni::add_resize_policy_to_statefulset(sts, true);
+        let container = &sts
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0];
 
-        // Serialize to JSON and verify resizePolicy was added with RestartContainer
-        let sts_json = serde_json::to_value(&sts_with_policy).unwrap();
-        let containers = sts_json
-            .get("spec")
-            .and_then(|s| s.get("template"))
-            .and_then(|t| t.get("spec"))
-            .and_then(|s| s.get("containers"))
-            .and_then(|c| c.as_array())
-            .expect("Should have containers");
-
-        let resize_policy = containers[0]
-            .get("resizePolicy")
-            .and_then(|p| p.as_array())
+        let resize_policy = container
+            .resize_policy
+            .as_ref()
             .expect("Should have resizePolicy");
 
         // Check CPU policy
         let cpu_policy = resize_policy
             .iter()
-            .find(|p| p.get("resourceName").and_then(|r| r.as_str()) == Some("cpu"))
+            .find(|p| p.resource_name == "cpu")
             .expect("Should have CPU policy");
-        assert_eq!(
-            cpu_policy.get("restartPolicy").and_then(|r| r.as_str()),
-            Some("RestartContainer")
-        );
+        assert_eq!(cpu_policy.restart_policy, "RestartContainer");
 
         // Check memory policy
         let memory_policy = resize_policy
             .iter()
-            .find(|p| p.get("resourceName").and_then(|r| r.as_str()) == Some("memory"))
+            .find(|p| p.resource_name == "memory")
             .expect("Should have memory policy");
-        assert_eq!(
-            memory_policy.get("restartPolicy").and_then(|r| r.as_str()),
-            Some("RestartContainer")
-        );
+        assert_eq!(memory_policy.restart_policy, "RestartContainer");
     }
 
     #[test]
-    fn test_add_resize_policy_preserves_statefulset_fields() {
+    fn test_resize_policy_preserves_statefulset_fields() {
         let cluster = create_test_cluster("my-cluster", "default", 3);
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
+        // Generate with resize policy applied inline
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
 
-        // Store original values
-        let original_name = sts.metadata.name.clone();
-        let original_replicas = sts.spec.as_ref().and_then(|s| s.replicas);
-
-        // Apply resize policy
-        let sts_with_policy = patroni::add_resize_policy_to_statefulset(sts, false);
-
-        // Verify original fields are preserved
-        assert_eq!(sts_with_policy.metadata.name, original_name);
-        assert_eq!(
-            sts_with_policy.spec.as_ref().and_then(|s| s.replicas),
-            original_replicas
-        );
+        // Verify fields are present and valid
+        assert!(sts.metadata.name.is_some());
+        assert_eq!(sts.spec.as_ref().and_then(|s| s.replicas), Some(3));
     }
 
     #[test]
-    fn test_add_resize_policy_to_deployment_always_in_place() {
+    fn test_resize_policy_deployment_always_in_place() {
         let mut cluster = create_test_cluster("my-cluster", "default", 3);
         cluster.spec.pgbouncer = Some(PgBouncerSpec {
             enabled: true,
@@ -1437,38 +1403,35 @@ mod resize_policy_tests {
             enable_replica_pooler: false,
         });
 
-        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
+        // PgBouncer uses NotRequired by default (in-place resize)
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster, false);
 
-        // Apply resize policy - PgBouncer uses NotRequired by default (in-place resize)
-        let deployment_with_policy = pgbouncer::add_resize_policy_to_deployment(deployment, false);
+        let container = &deployment
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0];
 
-        // Serialize to JSON and verify resizePolicy was added
-        let deployment_json = serde_json::to_value(&deployment_with_policy).unwrap();
-        let containers = deployment_json
-            .get("spec")
-            .and_then(|s| s.get("template"))
-            .and_then(|t| t.get("spec"))
-            .and_then(|s| s.get("containers"))
-            .and_then(|c| c.as_array())
-            .expect("Should have containers");
-
-        let resize_policy = containers[0]
-            .get("resizePolicy")
-            .and_then(|p| p.as_array())
+        let resize_policy = container
+            .resize_policy
+            .as_ref()
             .expect("Should have resizePolicy");
 
         // PgBouncer should always use NotRequired (in-place)
         for policy in resize_policy {
             assert_eq!(
-                policy.get("restartPolicy").and_then(|r| r.as_str()),
-                Some("NotRequired"),
+                policy.restart_policy, "NotRequired",
                 "PgBouncer should always use NotRequired policy"
             );
         }
     }
 
     #[test]
-    fn test_add_resize_policy_preserves_deployment_fields() {
+    fn test_resize_policy_preserves_deployment_fields() {
         let mut cluster = create_test_cluster("my-cluster", "default", 3);
         cluster.spec.pgbouncer = Some(PgBouncerSpec {
             enabled: true,
@@ -1482,24 +1445,12 @@ mod resize_policy_tests {
             enable_replica_pooler: false,
         });
 
-        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster);
+        // Generate with resize policy applied inline
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster, false);
 
-        // Store original values
-        let original_name = deployment.metadata.name.clone();
-        let original_replicas = deployment.spec.as_ref().and_then(|s| s.replicas);
-
-        // Apply resize policy (with restart_on_resize=false for in-place resize)
-        let deployment_with_policy = pgbouncer::add_resize_policy_to_deployment(deployment, false);
-
-        // Verify original fields are preserved
-        assert_eq!(deployment_with_policy.metadata.name, original_name);
-        assert_eq!(
-            deployment_with_policy
-                .spec
-                .as_ref()
-                .and_then(|s| s.replicas),
-            original_replicas
-        );
+        // Verify fields are present and valid
+        assert!(deployment.metadata.name.is_some());
+        assert_eq!(deployment.spec.as_ref().and_then(|s| s.replicas), Some(2));
     }
 
     #[test]
@@ -1517,19 +1468,16 @@ mod resize_policy_tests {
             restart_on_resize: Some(false),
         });
 
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
-        let sts_with_policy = patroni::add_resize_policy_to_statefulset(
-            sts,
-            cluster
-                .spec
-                .resources
-                .as_ref()
-                .and_then(|r| r.restart_on_resize)
-                .unwrap_or(false),
-        );
+        let restart_on_resize = cluster
+            .spec
+            .resources
+            .as_ref()
+            .and_then(|r| r.restart_on_resize)
+            .unwrap_or(false);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, restart_on_resize);
 
         // Verify container still has resources
-        let container = &sts_with_policy
+        let container = &sts
             .spec
             .as_ref()
             .unwrap()
@@ -1557,7 +1505,6 @@ mod resize_policy_tests {
             restart_on_resize: Some(true), // Explicitly request restart on resize
         });
 
-        let sts = patroni::generate_patroni_statefulset(&cluster, false);
         let restart_on_resize = cluster
             .spec
             .resources
@@ -1565,26 +1512,26 @@ mod resize_policy_tests {
             .and_then(|r| r.restart_on_resize)
             .unwrap_or(false);
 
-        let sts_with_policy = patroni::add_resize_policy_to_statefulset(sts, restart_on_resize);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, restart_on_resize);
 
-        // Verify RestartContainer policy was applied
-        let sts_json = serde_json::to_value(&sts_with_policy).unwrap();
-        let resize_policy = sts_json
-            .get("spec")
-            .and_then(|s| s.get("template"))
-            .and_then(|t| t.get("spec"))
-            .and_then(|s| s.get("containers"))
-            .and_then(|c| c.as_array())
-            .and_then(|containers| containers.first())
-            .and_then(|c| c.get("resizePolicy"))
-            .and_then(|p| p.as_array())
+        // Verify RestartContainer policy was applied via the container's resize_policy field
+        let container = &sts
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0];
+
+        let resize_policy = container
+            .resize_policy
+            .as_ref()
             .expect("Should have resizePolicy");
 
         for policy in resize_policy {
-            assert_eq!(
-                policy.get("restartPolicy").and_then(|r| r.as_str()),
-                Some("RestartContainer")
-            );
+            assert_eq!(policy.restart_policy, "RestartContainer");
         }
     }
 }
