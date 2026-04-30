@@ -499,19 +499,11 @@ pub(crate) fn detect_backup_events(
     let current_healthy = current.wal_archiving_healthy;
 
     match (prev_healthy, current_healthy) {
-        // Was unhealthy (or unknown), now healthy
-        (Some(false), Some(true)) | (None, Some(true)) => {
-            // Only emit recovery event if there was a previous unhealthy state
-            if prev_healthy == Some(false) {
-                events.push(BackupEvent::WALArchivingHealthy);
-            }
+        (Some(false), Some(true)) => {
+            events.push(BackupEvent::WALArchivingHealthy);
         }
-        // Was healthy, now unhealthy
-        (Some(true), Some(false)) | (None, Some(false)) => {
-            // Only emit failure event if this is a change from healthy
-            if prev_healthy == Some(true) {
-                events.push(BackupEvent::WALArchivingFailed);
-            }
+        (Some(true), Some(false)) => {
+            events.push(BackupEvent::WALArchivingFailed);
         }
         _ => {}
     }
