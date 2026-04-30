@@ -543,7 +543,7 @@ pub fn is_valid_identifier(name: &str) -> bool {
 
 /// Generate a secure random password
 pub fn generate_password() -> String {
-    use rand::Rng;
+    use rand::RngExt;
     const CHARSET: &[u8] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
     const PASSWORD_LEN: usize = 24;

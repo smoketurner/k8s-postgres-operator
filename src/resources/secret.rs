@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use k8s_openapi::api::core::v1::Secret;
 use kube::ResourceExt;
 use kube::core::ObjectMeta;
-use rand::Rng;
+use rand::RngExt;
 
 use crate::controller::cluster_error::Result;
 use crate::crd::PostgresCluster;
