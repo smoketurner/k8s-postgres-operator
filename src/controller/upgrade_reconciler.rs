@@ -40,6 +40,7 @@ use crate::resources::postgres_client::PostgresConnection;
 use crate::resources::replication::{
     self, LagStatus, ReplicationError, RowCountVerification, SequenceSyncResult,
 };
+use crate::resources::service::{self, ServiceSwitchError};
 
 /// Finalizer for PostgresUpgrade resources
 pub const UPGRADE_FINALIZER: &str = "postgresupgrade.postgres-operator.smoketurner.com/finalizer";
@@ -974,7 +975,17 @@ async fn sync_sequences(
     Ok(())
 }
 
-/// Execute the cutover by switching services
+/// Execute the cutover by switching services from the source to the target cluster.
+///
+/// This atomically updates the primary and replica `Service` selectors to route
+/// traffic to the target cluster. The target `PostgresCluster` is fetched first
+/// so its `metadata` can be used to refresh the owner references on the
+/// switched services.
+///
+/// On success, the upgrade status is patched with `cutoverStartedAt` and a
+/// message reflecting the actual switch result. Status is only patched after
+/// the switch succeeds so a failed switch does not falsely record a cutover
+/// timestamp.
 async fn execute_cutover(
     upgrade: &PostgresUpgrade,
     ctx: &UpgradeContext,
@@ -990,16 +1001,51 @@ async fn execute_cutover(
         target_name
     );
 
-    // The actual service switching is done by updating the service selectors
-    // This is handled separately in the service module
-    // For now, we just mark the cutover as initiated
+    // Fetch the target cluster so we can attach correct owner references when
+    // patching the services. If it does not exist, the upgrade cannot proceed.
+    let clusters: Api<PostgresCluster> = Api::namespaced(ctx.client.clone(), ns);
+    let target_cluster = clusters.get(&target_name).await.map_err(|e| match e {
+        kube::Error::Api(ref api_err) if api_err.code == 404 => {
+            UpgradeError::TargetClusterNotFound {
+                namespace: ns.to_string(),
+                name: target_name.clone(),
+            }
+        }
+        other => UpgradeError::KubeError(other),
+    })?;
 
-    // Update status to indicate cutover is in progress
+    // Perform the actual service switch.
+    let switch_result = service::switch_services_to_target(
+        &ctx.client,
+        ns,
+        source_name,
+        &target_name,
+        &target_cluster,
+    )
+    .await
+    .map_err(map_service_switch_error)?;
+
+    info!(
+        "Service switch complete for upgrade {}: primary={} replica={} switched_at={}",
+        upgrade.name_any(),
+        switch_result.primary_service,
+        switch_result.replica_service,
+        switch_result.switched_at
+    );
+
+    // Patch status only after the switch succeeded, so the cutoverStartedAt
+    // timestamp always corresponds to a real switch.
     let api: Api<PostgresUpgrade> = Api::namespaced(ctx.client.clone(), ns);
     let patch = serde_json::json!({
         "status": {
-            "cutoverStartedAt": Timestamp::now().to_string(),
-            "message": format!("Cutover initiated: switching services from {} to {}", source_name, target_name)
+            "cutoverStartedAt": switch_result.switched_at.to_string(),
+            "message": format!(
+                "Services switched from {} to {} (primary={}, replica={})",
+                source_name,
+                target_name,
+                switch_result.primary_service,
+                switch_result.replica_service
+            )
         }
     });
 
@@ -1011,6 +1057,31 @@ async fn execute_cutover(
     .await?;
 
     Ok(())
+}
+
+/// Map a `ServiceSwitchError` from the service module into an `UpgradeError`.
+///
+/// Patch failures bubble up the underlying `kube::Error` so existing retry
+/// logic for transient API errors still applies. The remaining variants are
+/// classified as transient service-switch failures.
+fn map_service_switch_error(err: ServiceSwitchError) -> UpgradeError {
+    match err {
+        ServiceSwitchError::PatchFailed { name, source } => {
+            // Preserve the kube error so transient API failures retry naturally,
+            // while logging which service failed for operator visibility.
+            warn!(
+                "Failed to patch service {} during cutover: {}",
+                name, source
+            );
+            UpgradeError::KubeError(source)
+        }
+        ServiceSwitchError::NotFound(name) => {
+            UpgradeError::ServiceSwitchFailed(format!("service not found: {name}"))
+        }
+        ServiceSwitchError::InvalidConfig(msg) => {
+            UpgradeError::ServiceSwitchFailed(format!("invalid service configuration: {msg}"))
+        }
+    }
 }
 
 /// Clean up replication after successful upgrade
@@ -1667,7 +1738,7 @@ fn requeue_duration_for_phase(phase: &UpgradePhase) -> Duration {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -1718,6 +1789,72 @@ mod tests {
             requeue_duration_for_phase(&UpgradePhase::Completed),
             Duration::from_secs(300)
         );
+    }
+
+    #[test]
+    fn test_map_service_switch_error_not_found() {
+        let err =
+            map_service_switch_error(ServiceSwitchError::NotFound("orders-primary".to_string()));
+        match err {
+            UpgradeError::ServiceSwitchFailed(msg) => {
+                assert!(msg.contains("orders-primary"));
+                assert!(msg.contains("service not found"));
+            }
+            other => panic!("expected ServiceSwitchFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_map_service_switch_error_invalid_config() {
+        let err = map_service_switch_error(ServiceSwitchError::InvalidConfig(
+            "missing selector".to_string(),
+        ));
+        match err {
+            UpgradeError::ServiceSwitchFailed(msg) => {
+                assert!(msg.contains("invalid service configuration"));
+                assert!(msg.contains("missing selector"));
+            }
+            other => panic!("expected ServiceSwitchFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_map_service_switch_error_patch_failed_preserves_kube_error() {
+        // PatchFailed wraps a kube::Error which should pass through so existing
+        // retry classification (KubeError -> retryable) continues to apply.
+        let kube_err = kube::Error::Api(Box::new(kube::core::Status {
+            message: "internal".to_string(),
+            reason: "InternalError".to_string(),
+            code: 500,
+            ..Default::default()
+        }));
+        let err = map_service_switch_error(ServiceSwitchError::PatchFailed {
+            name: "orders-primary".to_string(),
+            source: kube_err,
+        });
+        match err {
+            UpgradeError::KubeError(_) => {}
+            other => panic!("expected KubeError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_service_switch_failed_is_retryable() {
+        let err = UpgradeError::ServiceSwitchFailed("transient".to_string());
+        assert!(err.is_retryable());
+        assert!(!err.is_permanent());
+        assert!(!err.blocks_cutover());
+    }
+
+    #[test]
+    fn test_target_cluster_not_found_is_permanent() {
+        let err = UpgradeError::TargetClusterNotFound {
+            namespace: "default".to_string(),
+            name: "orders-upgrade-target".to_string(),
+        };
+        assert!(err.is_permanent());
+        assert!(!err.is_retryable());
+        assert!(!err.blocks_cutover());
     }
 
     #[test]

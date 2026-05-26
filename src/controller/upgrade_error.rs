@@ -36,6 +36,10 @@ pub enum UpgradeError {
     #[error("Source cluster not found: {namespace}/{name}")]
     SourceClusterNotFound { namespace: String, name: String },
 
+    /// Target cluster not found
+    #[error("Target cluster not found: {namespace}/{name}")]
+    TargetClusterNotFound { namespace: String, name: String },
+
     /// Immutable field change attempted
     #[error("Immutable field cannot be changed: {field}")]
     ImmutableFieldChange { field: String },
@@ -86,6 +90,10 @@ pub enum UpgradeError {
     /// Connection draining timeout
     #[error("Connection draining timeout: {0}")]
     ConnectionDrainTimeout(String),
+
+    /// Service switch failed during cutover
+    #[error("Service switch failed: {0}")]
+    ServiceSwitchFailed(String),
 
     /// Timeout error
     #[error("Phase timeout: {phase} exceeded {timeout}")]
@@ -155,6 +163,7 @@ impl UpgradeError {
                 | UpgradeError::ReplicationSetupError(_)
                 | UpgradeError::SubscriptionNotActive(_)
                 | UpgradeError::ConnectionDrainTimeout(_)
+                | UpgradeError::ServiceSwitchFailed(_)
                 | UpgradeError::TransientError(_)
         )
     }
@@ -167,6 +176,7 @@ impl UpgradeError {
                 | UpgradeError::DowngradeNotAllowed { .. }
                 | UpgradeError::UnsupportedVersion(_)
                 | UpgradeError::SourceClusterNotFound { .. }
+                | UpgradeError::TargetClusterNotFound { .. }
                 | UpgradeError::ImmutableFieldChange { .. }
                 | UpgradeError::ConcurrentUpgrade(_)
         )
