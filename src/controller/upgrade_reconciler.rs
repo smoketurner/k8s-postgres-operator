@@ -466,6 +466,22 @@ async fn build_transition_context(
     Ok(tc)
 }
 
+/// Map an observed target cluster phase to the upgrade event for the
+/// `HealthChecking` phase.
+///
+/// Returns `Some(HealthCheckPassed)` only when the target cluster has reached
+/// `Running`. When the cluster is missing (`None`) or in any other phase, the
+/// reconciler should keep polling, so this returns `None`.
+///
+/// Extracting this from [`determine_event_for_phase`] lets us unit-test the
+/// decision without standing up a Kubernetes client.
+fn health_check_event_for_target_phase(target_phase: Option<ClusterPhase>) -> Option<UpgradeEvent> {
+    match target_phase {
+        Some(ClusterPhase::Running) => Some(UpgradeEvent::HealthCheckPassed),
+        _ => None,
+    }
+}
+
 /// Determine the appropriate event for the current phase
 async fn determine_event_for_phase(
     upgrade: &PostgresUpgrade,
@@ -590,8 +606,20 @@ async fn determine_event_for_phase(
         }
 
         UpgradePhase::HealthChecking => {
-            // Health check logic - verify target is accepting connections
-            Ok(None)
+            // Emit HealthCheckPassed when the target cluster reaches Running so the
+            // state machine drives the (HealthChecking -> Completed) transition,
+            // which runs cleanup_replication. Keep polling otherwise.
+            let target_name = generate_target_cluster_name(&upgrade.name_any());
+            let clusters_api: Api<PostgresCluster> = Api::namespaced(ctx.client.clone(), ns);
+            let target_phase = clusters_api.get_opt(&target_name).await?.map(|cluster| {
+                cluster
+                    .status
+                    .as_ref()
+                    .map(|s| s.phase)
+                    .unwrap_or(ClusterPhase::Pending)
+            });
+
+            Ok(health_check_event_for_target_phase(target_phase))
         }
 
         UpgradePhase::Completed | UpgradePhase::Failed | UpgradePhase::RolledBack => {
@@ -686,27 +714,12 @@ async fn execute_phase_monitoring(
             update_verification_status(upgrade, ctx, ns, &verification).await?;
         }
 
-        UpgradePhase::HealthChecking => {
-            // Check target cluster health
-            let target_name = generate_target_cluster_name(&upgrade.name_any());
-            let clusters_api: Api<PostgresCluster> = Api::namespaced(ctx.client.clone(), ns);
-
-            if let Some(cluster) = clusters_api.get_opt(&target_name).await? {
-                let phase = cluster
-                    .status
-                    .as_ref()
-                    .map(|s| s.phase)
-                    .unwrap_or(ClusterPhase::Pending);
-
-                if phase == ClusterPhase::Running {
-                    // Transition to completed
-                    update_phase(upgrade, ctx, ns, UpgradePhase::Completed).await?;
-                }
-            }
-        }
-
         _ => {
-            // No monitoring needed for other phases
+            // No monitoring needed for other phases.
+            // HealthChecking completion is routed through determine_event_for_phase,
+            // which emits HealthCheckPassed when the target cluster reaches Running.
+            // The (HealthChecking -> Completed) transition action runs
+            // cleanup_replication, so completion must not be triggered here.
         }
     }
 
@@ -1705,5 +1718,44 @@ mod tests {
             requeue_duration_for_phase(&UpgradePhase::Completed),
             Duration::from_secs(300)
         );
+    }
+
+    #[test]
+    fn test_health_check_event_target_running() {
+        // When target cluster is Running, emit HealthCheckPassed so the
+        // (HealthChecking -> Completed) transition runs cleanup_replication.
+        assert_eq!(
+            health_check_event_for_target_phase(Some(ClusterPhase::Running)),
+            Some(UpgradeEvent::HealthCheckPassed)
+        );
+    }
+
+    #[test]
+    fn test_health_check_event_target_missing() {
+        // If the target cluster is not found, keep polling.
+        assert_eq!(health_check_event_for_target_phase(None), None);
+    }
+
+    #[test]
+    fn test_health_check_event_target_not_running() {
+        // Any non-Running phase means the target isn't healthy yet; keep polling.
+        for phase in [
+            ClusterPhase::Pending,
+            ClusterPhase::Creating,
+            ClusterPhase::Updating,
+            ClusterPhase::Scaling,
+            ClusterPhase::Degraded,
+            ClusterPhase::Recovering,
+            ClusterPhase::Failed,
+            ClusterPhase::Deleting,
+            ClusterPhase::Superseded,
+        ] {
+            assert_eq!(
+                health_check_event_for_target_phase(Some(phase)),
+                None,
+                "expected no event when target phase is {:?}",
+                phase
+            );
+        }
     }
 }
