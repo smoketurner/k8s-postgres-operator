@@ -495,24 +495,15 @@ pub async fn run_webhook_server(
 }
 
 /// Errors that can occur when running the webhook server
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum WebhookError {
     /// TLS configuration error
+    #[error("TLS configuration error: {0}")]
     TlsConfig(String),
     /// Server error
+    #[error("Webhook server error: {0}")]
     Server(String),
 }
-
-impl std::fmt::Display for WebhookError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            WebhookError::TlsConfig(msg) => write!(f, "TLS configuration error: {}", msg),
-            WebhookError::Server(msg) => write!(f, "Webhook server error: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for WebhookError {}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
