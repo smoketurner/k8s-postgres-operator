@@ -140,19 +140,6 @@ pub struct LagStatus {
     pub in_sync: bool,
 }
 
-/// Status of LSN synchronization
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LsnSyncStatus {
-    /// Source cluster's current write LSN
-    pub source_lsn: String,
-    /// Target cluster's received LSN
-    pub target_lsn: String,
-    /// Whether LSNs are in sync
-    pub in_sync: bool,
-    /// Lag in bytes between source and target
-    pub lag_bytes: Option<i64>,
-}
-
 /// Result of row count verification
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RowCountVerification {
@@ -262,21 +249,6 @@ pub async fn drop_publication(
 
     debug!(publication = %publication_name, "Publication dropped");
     Ok(())
-}
-
-/// Check if a publication exists
-pub async fn publication_exists(
-    conn: &PostgresConnection,
-    publication_name: &str,
-) -> ReplicationResult<bool> {
-    let row = conn
-        .query_opt(
-            "SELECT 1 FROM pg_publication WHERE pubname = $1",
-            &[&publication_name],
-        )
-        .await?;
-
-    Ok(row.is_some())
 }
 
 // =============================================================================
@@ -418,21 +390,6 @@ pub async fn get_subscription_state(
     }
 }
 
-/// Check if a subscription exists
-pub async fn subscription_exists(
-    conn: &PostgresConnection,
-    subscription_name: &str,
-) -> ReplicationResult<bool> {
-    let row = conn
-        .query_opt(
-            "SELECT 1 FROM pg_subscription WHERE subname = $1",
-            &[&subscription_name],
-        )
-        .await?;
-
-    Ok(row.is_some())
-}
-
 // =============================================================================
 // Schema Replication
 // =============================================================================
@@ -533,22 +490,6 @@ pub async fn get_replication_lag(
         source_lsn,
         target_lsn,
         in_sync: lag_bytes == 0,
-    })
-}
-
-/// Check if source and target LSNs are in sync
-#[instrument(skip(conn))]
-pub async fn check_lsn_sync(
-    conn: &PostgresConnection,
-    subscription_name: &str,
-) -> ReplicationResult<LsnSyncStatus> {
-    let lag_status = get_replication_lag(conn, subscription_name).await?;
-
-    Ok(LsnSyncStatus {
-        source_lsn: lag_status.source_lsn,
-        target_lsn: lag_status.target_lsn,
-        in_sync: lag_status.in_sync,
-        lag_bytes: Some(lag_status.lag_bytes),
     })
 }
 
