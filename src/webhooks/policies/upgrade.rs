@@ -188,9 +188,65 @@ pub fn validate_source_cluster(ctx: &UpgradeValidationContext) -> UpgradeValidat
     }
 }
 
+/// Compute the effective `(name, namespace)` of the source cluster a
+/// PostgresUpgrade points at.
+///
+/// When `spec.sourceCluster.namespace` is omitted it defaults to the
+/// upgrade resource's own namespace, matching the convention used in the
+/// reconciler (see `controller::upgrade_reconciler`).
+pub fn effective_source_ref(upgrade: &PostgresUpgrade) -> (&str, String) {
+    let name = upgrade.spec.source_cluster.name.as_str();
+    let ns = upgrade
+        .spec
+        .source_cluster
+        .namespace
+        .clone()
+        .unwrap_or_else(|| upgrade.namespace().unwrap_or_default());
+    (name, ns)
+}
+
+/// Pure helper that searches a slice of existing `PostgresUpgrade` objects
+/// for a non-terminal upgrade that targets the same `(name, namespace)`
+/// source cluster as `upgrade`, ignoring `upgrade` itself.
+///
+/// Extracted from `validate_no_concurrent_upgrade` so the comparison logic
+/// can be unit-tested without a Kubernetes client.
+pub fn find_conflicting_upgrade<'a>(
+    upgrade: &PostgresUpgrade,
+    existing: &'a [PostgresUpgrade],
+) -> Option<&'a PostgresUpgrade> {
+    let (source_name, source_ns) = effective_source_ref(upgrade);
+    let upgrade_name = upgrade.name_any();
+
+    existing.iter().find(|candidate| {
+        // Skip the upgrade being validated (covers re-validation of an existing object).
+        if candidate.name_any() == upgrade_name {
+            return false;
+        }
+
+        let (candidate_name, candidate_ns) = effective_source_ref(candidate);
+        if candidate_name != source_name || candidate_ns != source_ns {
+            return false;
+        }
+
+        let phase = candidate
+            .status
+            .as_ref()
+            .map(|s| &s.phase)
+            .unwrap_or(&UpgradePhase::Pending);
+        !phase.is_terminal()
+    })
+}
+
 /// Check for concurrent upgrades on the same source cluster
 ///
-/// This requires checking existing PostgresUpgrade resources, so it's async
+/// Lists `PostgresUpgrade` objects across all namespaces because the source
+/// cluster a given upgrade points at may live in a different namespace from
+/// the upgrade resource itself. Comparison is on the effective
+/// `(name, namespace)` tuple, not just the name.
+///
+/// Requires cluster-wide list permission on `postgresupgrades`; the
+/// operator ClusterRole already grants this (see `config/rbac/role.yaml`).
 pub async fn validate_no_concurrent_upgrade(
     client: &Client,
     upgrade: &PostgresUpgrade,
@@ -202,41 +258,31 @@ pub async fn validate_no_concurrent_upgrade(
         return UpgradeValidationResult::allowed();
     }
 
-    let namespace = upgrade.namespace().unwrap_or_default();
-    let source_name = &upgrade.spec.source_cluster.name;
-
-    // List all upgrades in the namespace
-    let upgrades: Api<PostgresUpgrade> = Api::namespaced(client.clone(), &namespace);
+    // List PostgresUpgrade resources across all namespaces. A cross-namespace
+    // source reference would be invisible to a namespaced list.
+    let upgrades: Api<PostgresUpgrade> = Api::all(client.clone());
 
     match upgrades.list(&ListParams::default()).await {
         Ok(list) => {
-            for existing in list.items {
-                // Skip if it's the same upgrade (in case of re-validation)
-                if existing.name_any() == upgrade.name_any() {
-                    continue;
-                }
-
-                // Check if another upgrade is targeting the same source cluster
-                if existing.spec.source_cluster.name == *source_name {
-                    // Check if the existing upgrade is still active (not completed or failed)
-                    let phase = existing
-                        .status
-                        .as_ref()
-                        .map(|s| &s.phase)
-                        .unwrap_or(&UpgradePhase::Pending);
-
-                    if !phase.is_terminal() {
-                        return UpgradeValidationResult::denied(
-                            "ConcurrentUpgradeNotAllowed",
-                            &format!(
-                                "Another upgrade '{}' is already in progress for source cluster '{}' (phase: {:?}). Wait for it to complete or delete it first.",
-                                existing.name_any(),
-                                source_name,
-                                phase
-                            ),
-                        );
-                    }
-                }
+            if let Some(conflicting) = find_conflicting_upgrade(upgrade, &list.items) {
+                let (source_name, source_ns) = effective_source_ref(upgrade);
+                let phase = conflicting
+                    .status
+                    .as_ref()
+                    .map(|s| &s.phase)
+                    .unwrap_or(&UpgradePhase::Pending);
+                let conflicting_ns = conflicting.namespace().unwrap_or_default();
+                return UpgradeValidationResult::denied(
+                    "ConcurrentUpgradeNotAllowed",
+                    &format!(
+                        "Another upgrade '{}/{}' is already in progress for source cluster '{}/{}' (phase: {:?}). Wait for it to complete or delete it first.",
+                        conflicting_ns,
+                        conflicting.name_any(),
+                        source_ns,
+                        source_name,
+                        phase
+                    ),
+                );
             }
             UpgradeValidationResult::allowed()
         }
@@ -322,22 +368,36 @@ mod tests {
         source: &str,
         target_version: PostgresVersion,
     ) -> PostgresUpgrade {
+        create_upgrade_full(name, "default", source, None, target_version, None)
+    }
+
+    fn create_upgrade_full(
+        name: &str,
+        namespace: &str,
+        source_name: &str,
+        source_namespace: Option<&str>,
+        target_version: PostgresVersion,
+        phase: Option<UpgradePhase>,
+    ) -> PostgresUpgrade {
         PostgresUpgrade {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
-                namespace: Some("default".to_string()),
+                namespace: Some(namespace.to_string()),
                 ..Default::default()
             },
             spec: PostgresUpgradeSpec {
                 source_cluster: ClusterReference {
-                    name: source.to_string(),
-                    namespace: None,
+                    name: source_name.to_string(),
+                    namespace: source_namespace.map(String::from),
                 },
                 target_version,
                 target_cluster_overrides: None,
                 strategy: UpgradeStrategy::default(),
             },
-            status: None,
+            status: phase.map(|p| crate::crd::PostgresUpgradeStatus {
+                phase: p,
+                ..Default::default()
+            }),
         }
     }
 
@@ -451,5 +511,165 @@ mod tests {
         let result = validate_upgrade_sync(&ctx);
 
         assert!(result.allowed);
+    }
+
+    // -- effective_source_ref ---------------------------------------------
+
+    #[test]
+    fn test_effective_source_ref_inherits_upgrade_namespace() {
+        let upgrade = create_upgrade_full("u", "team-a", "src", None, PostgresVersion::V17, None);
+        let (name, ns) = effective_source_ref(&upgrade);
+        assert_eq!(name, "src");
+        assert_eq!(ns, "team-a");
+    }
+
+    #[test]
+    fn test_effective_source_ref_uses_explicit_namespace() {
+        let upgrade = create_upgrade_full(
+            "u",
+            "team-a",
+            "src",
+            Some("shared"),
+            PostgresVersion::V17,
+            None,
+        );
+        let (name, ns) = effective_source_ref(&upgrade);
+        assert_eq!(name, "src");
+        assert_eq!(ns, "shared");
+    }
+
+    // -- find_conflicting_upgrade ----------------------------------------
+
+    #[test]
+    fn test_find_conflicting_upgrade_same_namespace_same_source_denied() {
+        let new_upgrade =
+            create_upgrade_full("new", "team-a", "src", None, PostgresVersion::V17, None);
+        let existing = create_upgrade_full(
+            "existing",
+            "team-a",
+            "src",
+            None,
+            PostgresVersion::V17,
+            Some(UpgradePhase::Replicating),
+        );
+
+        let existing = vec![existing];
+        let conflict = find_conflicting_upgrade(&new_upgrade, &existing);
+        assert!(
+            conflict.is_some(),
+            "same-namespace conflict must be flagged"
+        );
+    }
+
+    #[test]
+    fn test_find_conflicting_upgrade_cross_namespace_same_source_denied() {
+        // New upgrade lives in team-a but references a source in shared.
+        let new_upgrade = create_upgrade_full(
+            "new",
+            "team-a",
+            "src",
+            Some("shared"),
+            PostgresVersion::V17,
+            None,
+        );
+        // Pre-existing upgrade in team-b also targets shared/src.
+        let existing = create_upgrade_full(
+            "existing",
+            "team-b",
+            "src",
+            Some("shared"),
+            PostgresVersion::V17,
+            Some(UpgradePhase::Replicating),
+        );
+
+        let existing = vec![existing];
+        let conflict = find_conflicting_upgrade(&new_upgrade, &existing);
+        assert!(
+            conflict.is_some(),
+            "cross-namespace conflict on the same source must be flagged"
+        );
+    }
+
+    #[test]
+    fn test_find_conflicting_upgrade_same_source_name_different_namespace_allowed() {
+        // Two clusters happen to share a name in different namespaces.
+        // These are unrelated and should not conflict.
+        let new_upgrade =
+            create_upgrade_full("new", "team-a", "src", None, PostgresVersion::V17, None);
+        let existing = create_upgrade_full(
+            "existing",
+            "team-b",
+            "src",
+            None,
+            PostgresVersion::V17,
+            Some(UpgradePhase::Replicating),
+        );
+
+        let existing = vec![existing];
+        let conflict = find_conflicting_upgrade(&new_upgrade, &existing);
+        assert!(
+            conflict.is_none(),
+            "same source name in different namespaces must not be flagged"
+        );
+    }
+
+    #[test]
+    fn test_find_conflicting_upgrade_no_match_allowed() {
+        let new_upgrade =
+            create_upgrade_full("new", "team-a", "src", None, PostgresVersion::V17, None);
+        let existing = create_upgrade_full(
+            "existing",
+            "team-a",
+            "other-src",
+            None,
+            PostgresVersion::V17,
+            Some(UpgradePhase::Replicating),
+        );
+
+        let existing = vec![existing];
+        let conflict = find_conflicting_upgrade(&new_upgrade, &existing);
+        assert!(conflict.is_none());
+    }
+
+    #[test]
+    fn test_find_conflicting_upgrade_terminal_phase_allowed() {
+        // A Completed upgrade against the same source should not block.
+        let new_upgrade =
+            create_upgrade_full("new", "team-a", "src", None, PostgresVersion::V17, None);
+        let existing = create_upgrade_full(
+            "existing",
+            "team-a",
+            "src",
+            None,
+            PostgresVersion::V17,
+            Some(UpgradePhase::Completed),
+        );
+
+        let existing = vec![existing];
+        let conflict = find_conflicting_upgrade(&new_upgrade, &existing);
+        assert!(
+            conflict.is_none(),
+            "terminal-phase upgrades must not be flagged as conflicts"
+        );
+    }
+
+    #[test]
+    fn test_find_conflicting_upgrade_skips_self() {
+        // Re-validating the same object against a list that contains it
+        // (e.g., during a webhook retry) must not self-conflict.
+        let new_upgrade =
+            create_upgrade_full("same", "team-a", "src", None, PostgresVersion::V17, None);
+        let existing = create_upgrade_full(
+            "same",
+            "team-a",
+            "src",
+            None,
+            PostgresVersion::V17,
+            Some(UpgradePhase::Replicating),
+        );
+
+        let existing = vec![existing];
+        let conflict = find_conflicting_upgrade(&new_upgrade, &existing);
+        assert!(conflict.is_none());
     }
 }

@@ -164,7 +164,42 @@ async fn get_namespace_labels(client: &Client, namespace: &str) -> BTreeMap<Stri
     }
 }
 
+/// Pure helper: scan a list of `PostgresUpgrade` objects for one that
+/// targets the cluster identified by `(cluster_name, cluster_namespace)`
+/// and is currently in a non-terminal phase.
+///
+/// Comparison is on the upgrade's *effective* source namespace, which
+/// defaults to the upgrade's own namespace when `spec.sourceCluster.namespace`
+/// is omitted (see `policies::upgrade::effective_source_ref`).
+fn find_active_upgrade_for_cluster<'a>(
+    upgrades: &'a [PostgresUpgrade],
+    cluster_namespace: &str,
+    cluster_name: &str,
+) -> Option<&'a PostgresUpgrade> {
+    upgrades.iter().find(|upgrade| {
+        let (src_name, src_ns) = super::policies::upgrade::effective_source_ref(upgrade);
+        if src_name != cluster_name || src_ns != cluster_namespace {
+            return false;
+        }
+        let phase = upgrade
+            .status
+            .as_ref()
+            .map(|s| &s.phase)
+            .unwrap_or(&UpgradePhase::Pending);
+        !phase.is_terminal()
+    })
+}
+
 /// Check if a cluster has an active upgrade in progress
+///
+/// Lists `PostgresUpgrade` resources across all namespaces because a
+/// `PostgresUpgrade` may reference a source cluster living in a different
+/// namespace (`spec.sourceCluster.namespace`). Listing only within
+/// `namespace` would miss those cross-namespace references and would also
+/// falsely flag unrelated clusters sharing a name across namespaces.
+///
+/// Requires cluster-wide list permission on `postgresupgrades`; the
+/// operator ClusterRole already grants this (see `config/rbac/role.yaml`).
 ///
 /// Returns Some((reason, message)) if an upgrade is blocking modifications, None otherwise.
 async fn check_cluster_upgrade_in_progress(
@@ -172,36 +207,30 @@ async fn check_cluster_upgrade_in_progress(
     namespace: &str,
     cluster_name: &str,
 ) -> Option<(String, String)> {
-    let upgrades: Api<PostgresUpgrade> = Api::namespaced(client.clone(), namespace);
+    let upgrades: Api<PostgresUpgrade> = Api::all(client.clone());
 
     match upgrades.list(&ListParams::default()).await {
         Ok(list) => {
-            for upgrade in list.items {
-                // Check if this upgrade targets the cluster being modified
-                if upgrade.spec.source_cluster.name == cluster_name {
-                    let phase = upgrade
-                        .status
-                        .as_ref()
-                        .map(|s| &s.phase)
-                        .unwrap_or(&UpgradePhase::Pending);
-
-                    // Block modifications if upgrade is active (not terminal)
-                    if !phase.is_terminal() {
-                        return Some((
-                            "UpgradeInProgress".to_string(),
-                            format!(
-                                "Cluster '{}' has an active upgrade '{}' in phase {:?}. \
-                                 Modifications are blocked during upgrades. Wait for the upgrade \
-                                 to complete or delete it first.",
-                                cluster_name,
-                                upgrade.name_any(),
-                                phase
-                            ),
-                        ));
-                    }
-                }
-            }
-            None
+            let active = find_active_upgrade_for_cluster(&list.items, namespace, cluster_name)?;
+            let phase = active
+                .status
+                .as_ref()
+                .map(|s| &s.phase)
+                .unwrap_or(&UpgradePhase::Pending);
+            let upgrade_ns = active.namespace().unwrap_or_default();
+            Some((
+                "UpgradeInProgress".to_string(),
+                format!(
+                    "Cluster '{}/{}' has an active upgrade '{}/{}' in phase {:?}. \
+                     Modifications are blocked during upgrades. Wait for the upgrade \
+                     to complete or delete it first.",
+                    namespace,
+                    cluster_name,
+                    upgrade_ns,
+                    active.name_any(),
+                    phase
+                ),
+            ))
         }
         Err(e) => {
             // If we can't check, log but allow the operation
@@ -571,5 +600,128 @@ mod tests {
         assert_eq!(Operation::Update, Operation::Update);
         assert_eq!(Operation::Delete, Operation::Delete);
         assert_ne!(Operation::Create, Operation::Delete);
+    }
+
+    // --- check_cluster_upgrade_in_progress comparison logic --------------
+    //
+    // These tests cover the pure helper extracted from the async wrapper.
+    // They exercise the (name, namespace) tuple comparison that previously
+    // had two bugs (single-namespace list, name-only compare) — see #47.
+
+    use crate::crd::{
+        ClusterReference, PostgresUpgradeSpec, PostgresUpgradeStatus, PostgresVersion,
+        UpgradeStrategy,
+    };
+    use kube::core::ObjectMeta;
+
+    fn make_upgrade(
+        name: &str,
+        namespace: &str,
+        source_name: &str,
+        source_namespace: Option<&str>,
+        phase: UpgradePhase,
+    ) -> PostgresUpgrade {
+        PostgresUpgrade {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some(namespace.to_string()),
+                ..Default::default()
+            },
+            spec: PostgresUpgradeSpec {
+                source_cluster: ClusterReference {
+                    name: source_name.to_string(),
+                    namespace: source_namespace.map(String::from),
+                },
+                target_version: PostgresVersion::V17,
+                target_cluster_overrides: None,
+                strategy: UpgradeStrategy::default(),
+            },
+            status: Some(PostgresUpgradeStatus {
+                phase,
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn test_find_active_upgrade_same_namespace_matches() {
+        let upgrades = vec![make_upgrade(
+            "upg",
+            "team-a",
+            "src",
+            None,
+            UpgradePhase::Replicating,
+        )];
+        let found = find_active_upgrade_for_cluster(&upgrades, "team-a", "src");
+        assert!(
+            found.is_some(),
+            "same-namespace active upgrade must block modifications"
+        );
+    }
+
+    #[test]
+    fn test_find_active_upgrade_cross_namespace_matches() {
+        // Upgrade lives in team-a but references shared/src.
+        // Modifying shared/src must be blocked even though the upgrade
+        // resource is in a different namespace.
+        let upgrades = vec![make_upgrade(
+            "upg",
+            "team-a",
+            "src",
+            Some("shared"),
+            UpgradePhase::Replicating,
+        )];
+        let found = find_active_upgrade_for_cluster(&upgrades, "shared", "src");
+        assert!(
+            found.is_some(),
+            "cross-namespace source reference must block modifications"
+        );
+    }
+
+    #[test]
+    fn test_find_active_upgrade_same_name_different_namespace_no_match() {
+        // Upgrade targets team-a/src. Modifying team-b/src (same name,
+        // different namespace) must NOT be blocked.
+        let upgrades = vec![make_upgrade(
+            "upg",
+            "team-a",
+            "src",
+            None,
+            UpgradePhase::Replicating,
+        )];
+        let found = find_active_upgrade_for_cluster(&upgrades, "team-b", "src");
+        assert!(
+            found.is_none(),
+            "unrelated cluster sharing a name must not be falsely blocked"
+        );
+    }
+
+    #[test]
+    fn test_find_active_upgrade_no_matching_upgrade() {
+        let upgrades = vec![make_upgrade(
+            "upg",
+            "team-a",
+            "other-src",
+            None,
+            UpgradePhase::Replicating,
+        )];
+        let found = find_active_upgrade_for_cluster(&upgrades, "team-a", "src");
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn test_find_active_upgrade_terminal_phase_not_blocking() {
+        let upgrades = vec![make_upgrade(
+            "upg",
+            "team-a",
+            "src",
+            None,
+            UpgradePhase::Completed,
+        )];
+        let found = find_active_upgrade_for_cluster(&upgrades, "team-a", "src");
+        assert!(
+            found.is_none(),
+            "completed upgrade must not block modifications"
+        );
     }
 }
