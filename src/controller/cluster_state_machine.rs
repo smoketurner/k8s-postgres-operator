@@ -447,12 +447,21 @@ impl ClusterStateMachine {
     /// Check guard conditions for a transition
     fn check_guard(&self, transition: &Transition, ctx: &TransitionContext) -> Option<String> {
         match (&transition.from, &transition.to, &transition.event) {
-            // Guard: AllReplicasReady requires all replicas to be ready
+            // Guard: AllReplicasReady requires the cluster to be fully ready for
+            // the Running phase. Beyond replica readiness, this also requires that
+            // every pod has acknowledged the latest spec (KEP-5067) and that no
+            // in-place resource resize is currently active (KEP-1287). Reporting
+            // Running while a resize is still in flight would contradict the
+            // resizeStatus and allPodsSynced status fields.
             (_, ClusterPhase::Running, ClusterEvent::AllReplicasReady) => {
-                if !ctx.all_replicas_ready() {
+                if !ctx.ready_for_running() {
                     Some(format!(
-                        "Not all replicas ready: {}/{}",
-                        ctx.ready_replicas, ctx.desired_replicas
+                        "Not ready for Running: replicas {}/{}, pods synced {}/{}, resize in progress: {}",
+                        ctx.ready_replicas,
+                        ctx.desired_replicas,
+                        ctx.synced_pods,
+                        ctx.total_pods,
+                        ctx.resize_in_progress
                     ))
                 } else {
                     None
@@ -664,5 +673,96 @@ mod tests {
         let ctx = TransitionContext::new(3, 3);
         let event = determine_event(&ClusterPhase::Running, &ctx, false, Some(2));
         assert_eq!(event, ClusterEvent::ReplicaCountChanged);
+    }
+
+    #[test]
+    fn test_ready_for_running_requires_all_signals() {
+        // All three signals satisfied: replicas ready, pods synced, no resize.
+        let mut ctx = TransitionContext::new(3, 3);
+        ctx.total_pods = 3;
+        ctx.synced_pods = 3;
+        ctx.resize_in_progress = false;
+        assert!(ctx.ready_for_running());
+
+        // Resize in progress blocks Running even with replicas/sync ok.
+        let mut ctx = TransitionContext::new(3, 3);
+        ctx.total_pods = 3;
+        ctx.synced_pods = 3;
+        ctx.resize_in_progress = true;
+        assert!(!ctx.ready_for_running());
+
+        // Stale pod spec blocks Running even with replicas ready.
+        let mut ctx = TransitionContext::new(3, 3);
+        ctx.total_pods = 3;
+        ctx.synced_pods = 2;
+        ctx.resize_in_progress = false;
+        assert!(!ctx.ready_for_running());
+
+        // Replicas short blocks Running.
+        let mut ctx = TransitionContext::new(2, 3);
+        ctx.total_pods = 3;
+        ctx.synced_pods = 3;
+        ctx.resize_in_progress = false;
+        assert!(!ctx.ready_for_running());
+    }
+
+    #[test]
+    fn test_running_guard_blocks_during_resize() {
+        let sm = ClusterStateMachine::new();
+
+        // All replicas ready but resize is in progress: guard must reject.
+        let mut ctx = TransitionContext::new(3, 3);
+        ctx.total_pods = 3;
+        ctx.synced_pods = 3;
+        ctx.resize_in_progress = true;
+
+        let result = sm.transition(
+            &ClusterPhase::Updating,
+            ClusterEvent::AllReplicasReady,
+            &ctx,
+        );
+        match result {
+            TransitionResult::GuardFailed { reason, .. } => {
+                assert!(
+                    reason.contains("resize"),
+                    "guard reason should mention resize state: {reason}"
+                );
+            }
+            other => panic!("Expected GuardFailed during resize, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_running_guard_blocks_until_pods_synced() {
+        let sm = ClusterStateMachine::new();
+
+        // All replicas ready but kubelet hasn't observed latest spec.
+        let mut ctx = TransitionContext::new(3, 3);
+        ctx.total_pods = 3;
+        ctx.synced_pods = 1;
+
+        let result = sm.transition(
+            &ClusterPhase::Creating,
+            ClusterEvent::AllReplicasReady,
+            &ctx,
+        );
+        assert!(matches!(result, TransitionResult::GuardFailed { .. }));
+    }
+
+    #[test]
+    fn test_running_guard_passes_when_fully_ready() {
+        let sm = ClusterStateMachine::new();
+
+        let mut ctx = TransitionContext::new(3, 3);
+        ctx.total_pods = 3;
+        ctx.synced_pods = 3;
+        ctx.resize_in_progress = false;
+
+        let result = sm.transition(
+            &ClusterPhase::Creating,
+            ClusterEvent::AllReplicasReady,
+            &ctx,
+        );
+        assert!(matches!(result, TransitionResult::Success { .. }));
     }
 }

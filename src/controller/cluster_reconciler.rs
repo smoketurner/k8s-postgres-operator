@@ -32,7 +32,7 @@ use crate::controller::cluster_replication_lag::collect_replication_lag;
 use crate::controller::cluster_state_machine::{
     ClusterEvent, ClusterStateMachine, TransitionContext, TransitionResult, determine_event,
 };
-use crate::controller::cluster_status::{StatusManager, spec_changed};
+use crate::controller::cluster_status::{RunningProgress, StatusManager, spec_changed};
 use crate::controller::context::Context;
 use crate::crd::{ClusterPhase, PostgresCluster};
 use crate::resources::{
@@ -347,8 +347,21 @@ async fn check_and_update_status(
 
     let current_phase = cluster.status.as_ref().map(|s| s.phase).unwrap_or_default();
 
-    // Build transition context for potential state changes
-    let transition_ctx = TransitionContext::new(ready_replicas, cluster.spec.replicas);
+    // Build transition context for potential state changes.
+    //
+    // Populate the Kubernetes 1.35+ pod-tracking signals so that the Running
+    // phase status update can reflect in-place resize (KEP-1287) and
+    // observedGeneration (KEP-5067) state. Without this, the cluster would be
+    // reported as Stable while a resize is actively in flight.
+    let mut transition_ctx = TransitionContext::new(ready_replicas, cluster.spec.replicas);
+    let pod_infos = get_pod_info(ctx, ns, &name).await.unwrap_or_default();
+    transition_ctx.total_pods = i32::try_from(pod_infos.len()).unwrap_or(0);
+    transition_ctx.synced_pods =
+        i32::try_from(pod_infos.iter().filter(|p| p.spec_applied).count()).unwrap_or(0);
+    let resize_statuses = get_pod_resize_status(ctx, ns, &name)
+        .await
+        .unwrap_or_default();
+    transition_ctx.resize_in_progress = any_resize_in_progress(&resize_statuses);
 
     // Collect backup status if backups are enabled and cluster is running
     let collected_backup_status =
@@ -508,7 +521,14 @@ async fn check_and_update_status(
         }
     } else if ready_replicas >= cluster.spec.replicas {
         // Consolidated status update: backup status + replication lag in a single call
-        // This avoids race conditions from multiple separate status updates
+        // This avoids race conditions from multiple separate status updates.
+        // Pod-tracking signals (resize state, observedGeneration sync) are also
+        // threaded through so the Progressing condition reflects in-flight pod
+        // changes instead of always reporting Stable.
+        let progress = RunningProgress::new(
+            transition_ctx.resize_in_progress,
+            transition_ctx.all_pods_synced(),
+        );
         status_manager
             .set_running_full(
                 ready_replicas,
@@ -518,6 +538,7 @@ async fn check_and_update_status(
                 cluster.spec.version.as_str(),
                 collected_backup_status,
                 collected_replication_lag.as_ref(),
+                progress,
             )
             .await?;
     }
@@ -1038,13 +1059,24 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
                         .await?;
                 }
                 ClusterPhase::Running => {
+                    // The FSM guard already confirmed ready_for_running(), so
+                    // the cluster is fully stable on entry to Running. Still
+                    // pass the live progress signals so the condition reflects
+                    // pod-level state (cheap, and keeps callers consistent).
+                    let progress = RunningProgress::new(
+                        transition_ctx.resize_in_progress,
+                        transition_ctx.all_pods_synced(),
+                    );
                     status_manager
-                        .set_running(
+                        .set_running_full(
                             ready_replicas,
                             cluster.spec.replicas,
                             primary_pod,
                             replica_pods,
                             cluster.spec.version.as_str(),
+                            None,
+                            None,
+                            progress,
                         )
                         .await?;
                 }
@@ -1098,13 +1130,23 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
                         .await?;
                 }
                 ClusterPhase::Running => {
+                    // Staying in Running: reflect pod-level activity in the
+                    // Progressing condition so a live in-place resize or an
+                    // unobserved pod spec change is not masked as Stable.
+                    let progress = RunningProgress::new(
+                        transition_ctx.resize_in_progress,
+                        transition_ctx.all_pods_synced(),
+                    );
                     status_manager
-                        .set_running(
+                        .set_running_full(
                             ready_replicas,
                             cluster.spec.replicas,
                             primary_pod,
                             replica_pods,
                             cluster.spec.version.as_str(),
+                            None,
+                            None,
+                            progress,
                         )
                         .await?;
                 }
