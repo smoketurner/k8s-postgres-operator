@@ -7,8 +7,8 @@
 
 use postgres_operator::crd::{
     BackupDestination, BackupSpec, EncryptionSpec, IssuerKind, IssuerRef, NetworkPolicySpec,
-    PostgresCluster, PostgresClusterSpec, PostgresVersion, ResourceList, ResourceRequirements,
-    RetentionPolicy, StorageSpec, TLSSpec,
+    PostgresCluster, PostgresClusterSpec, PostgresClusterStatus, PostgresVersion, ResourceList,
+    ResourceRequirements, RetentionPolicy, StorageSpec, TLSSpec,
 };
 use std::collections::BTreeMap;
 
@@ -280,6 +280,10 @@ mod immutability_policy_integration_tests {
     fn test_version_upgrade_allowed() {
         let mut old_cluster = create_test_cluster();
         old_cluster.spec.version = PostgresVersion::V15;
+        old_cluster.status = Some(PostgresClusterStatus {
+            current_version: Some("15".to_string()),
+            ..Default::default()
+        });
 
         let mut new_cluster = create_test_cluster();
         new_cluster.spec.version = PostgresVersion::V16;
@@ -293,6 +297,10 @@ mod immutability_policy_integration_tests {
     fn test_version_downgrade_denied() {
         let mut old_cluster = create_test_cluster();
         old_cluster.spec.version = PostgresVersion::V16;
+        old_cluster.status = Some(PostgresClusterStatus {
+            current_version: Some("16".to_string()),
+            ..Default::default()
+        });
 
         let mut new_cluster = create_test_cluster();
         new_cluster.spec.version = PostgresVersion::V15;
@@ -307,6 +315,29 @@ mod immutability_policy_integration_tests {
                 .map(|r| r.contains("Downgrade"))
                 .unwrap_or(false),
             "Error should mention downgrade"
+        );
+    }
+
+    #[test]
+    fn test_version_revert_after_mistake_allowed() {
+        // Cluster is actually running V15 (status.current_version="15") but spec
+        // was mistakenly bumped to V16. Reverting spec.version back to V15
+        // should be allowed because no data has migrated yet.
+        let mut old_cluster = create_test_cluster();
+        old_cluster.spec.version = PostgresVersion::V16;
+        old_cluster.status = Some(PostgresClusterStatus {
+            current_version: Some("15".to_string()),
+            ..Default::default()
+        });
+
+        let mut new_cluster = create_test_cluster();
+        new_cluster.spec.version = PostgresVersion::V15;
+
+        let ctx = ValidationContext::new(&new_cluster, Some(&old_cluster), BTreeMap::new());
+        let result = validate_all(&ctx);
+        assert!(
+            result.allowed,
+            "Reverting spec.version to the running version should be allowed"
         );
     }
 
