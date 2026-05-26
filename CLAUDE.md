@@ -10,7 +10,7 @@ A Kubernetes operator written in Rust that manages PostgreSQL clusters using Pat
 
 | Component | Minimum Version | Notes |
 |-----------|-----------------|-------|
-| Rust | 1.92+ | Edition 2024, MSRV enforced in `Cargo.toml` |
+| Rust | 1.95+ | Edition 2024, MSRV enforced in `Cargo.toml` |
 | Kubernetes | 1.35+ | Required for in-place resize, pod generation tracking |
 | kube-rs | 3.x | With k8s-openapi v1_35 (Kubernetes 1.35 native types) |
 | cert-manager | 1.0+ | Required for TLS certificate management |
@@ -27,6 +27,8 @@ The operator must **never panic** in production code paths. This ensures continu
 - **Always use** `Result<T, Error>` with the `?` operator for error propagation
 - **For Option types**, use `unwrap_or_default()`, `map()`, `and_then()`, or pattern matching
 - **Test-only code** may use `unwrap()` where panicking on failure is acceptable
+
+Additional lints denied in `Cargo.toml` / `.clippy.toml`: `indexing_slicing` (use `.get()`), `unreachable`, `unsafe_code`, `unwrap_in_result`, `panic_in_result_fn`, `get_unwrap`, `exit`. Function size capped at 150 lines (`too-many-lines-threshold`); cognitive complexity capped at 30.
 
 ### Error Handling
 
@@ -59,8 +61,14 @@ make lint               # Run clippy lints
 make check              # Run cargo check
 
 # Testing
-make test               # Run unit tests
-make test-integration   # Run integration tests (installs CRD/RBAC first)
+make test               # Run unit, proptest, and integration test binaries (non-ignored)
+make test-integration   # Run integration tests with --ignored (installs CRD/RBAC first)
+make audit              # Run cargo audit for security advisories
+
+# Run a specific test
+cargo test --test unit state_machine           # Single unit test module
+cargo test --test integration -- --ignored scaling   # Single integration test (needs cluster)
+cargo test --test proptest                     # Property-based tests
 
 # Installation (onto cluster via kubectl)
 make install            # Install CRD and RBAC onto the cluster
@@ -81,8 +89,17 @@ make clean-all          # Uninstall from cluster and clean build artifacts
 
 ## Architecture
 
-### Entry Point (`src/main.rs`)
-Initializes logging, creates Kubernetes client, builds shared Context, and runs the Controller watching PostgresCluster CRD and owned resources (StatefulSet, Services, ConfigMaps, Secrets, PodDisruptionBudgets).
+### Entry Point (`src/main.rs` + `src/lib.rs`)
+`src/main.rs` is thin: it initializes logging/TLS and delegates to `src/lib.rs`. The wiring lives in `lib.rs`, which exposes:
+
+- `run_controller` / `run_controller_scoped` — PostgresCluster controller (watches StatefulSet, Services, ConfigMaps, Secrets, PodDisruptionBudgets)
+- `run_database_controller` / `run_database_controller_scoped` — PostgresDatabase controller
+- `run_upgrade_controller` / `run_upgrade_controller_scoped` — PostgresUpgrade controller
+
+The `_scoped` variants take an optional namespace and are used by integration tests for parallel execution. Integration tests call into `lib.rs` directly, not `main.rs`.
+
+### Health & Metrics (`src/health.rs`)
+`HealthState` and Prometheus `Metrics` types backing the `/healthz`, `/readyz`, and `/metrics` HTTP endpoints. Reconcilers record metrics through `Context.health_state`.
 
 ### CRDs (`src/crd/`)
 
@@ -130,19 +147,21 @@ Features:
 See `docs/upgrades.md` for detailed upgrade procedures.
 
 ### Controller (`src/controller/`)
+PostgresCluster-specific modules use a `cluster_` prefix; PostgresUpgrade-specific modules use an `upgrade_` prefix.
+
 - `cluster_reconciler.rs`: Main PostgresCluster reconciliation loop - handles finalizers, spec change detection, resource application, state transitions
 - `cluster_state_machine.rs`: Formal FSM with states (Pending, Creating, Running, Updating, Scaling, Degraded, Recovering, Failed, Deleting) and guarded transitions
 - `cluster_error.rs`: Custom errors with exponential backoff configuration
+- `cluster_status.rs`: Condition management (Ready, Progressing, Degraded, ConfigurationValid, ReplicasReady, ResourceResizeInProgress)
+- `cluster_validation.rs`: Spec validation logic
+- `cluster_replication_lag.rs`: Replication lag monitoring via Patroni REST API
+- `cluster_backup_status.rs`: Backup status collection from WAL-G
 - `database_reconciler.rs`: PostgresDatabase reconciliation - database/role provisioning via SQL execution, secret generation
 - `upgrade_reconciler.rs`: PostgresUpgrade reconciliation - manages blue-green upgrade lifecycle
 - `upgrade_state_machine.rs`: Upgrade FSM with phases (Pending, CreatingTarget, ConfiguringReplication, Replicating, Verifying, SyncingSequences, ReadyForCutover, CuttingOver, HealthChecking, Completed, Failed, RolledBack)
 - `upgrade_error.rs`: Upgrade-specific errors with backoff configuration
 - `context.rs`: Shared context with Kubernetes client and event recorder
-- `status.rs`: Condition management (Ready, Progressing, Degraded, ConfigurationValid, ReplicasReady, ResourceResizeInProgress)
-- `validation.rs`: Spec validation logic
 - `cleanup.rs`: Resource cleanup utilities for graceful deletion
-- `replication_lag.rs`: Replication lag monitoring via Patroni REST API
-- `backup_status.rs`: Backup status collection from WAL-G
 
 ### Resources (`src/resources/`)
 Each module generates Kubernetes resources:
@@ -169,6 +188,14 @@ ValidatingAdmissionWebhook for policy enforcement:
 - `policies/immutability.rs`: Prevents changing immutable fields (storage size, version downgrades)
 - `policies/production.rs`: Production-specific requirements for namespaces containing "prod"
 - `policies/upgrade.rs`: Validates PostgresUpgrade resources (version compatibility, source cluster state)
+
+### Tests (`tests/`)
+Four sibling test crates, all registered in `Cargo.toml`:
+
+- `tests/unit/` — pure unit tests (state machine, validation, network policy, resource builders, webhooks)
+- `tests/integration/` — full controller-against-cluster tests, gated behind `--ignored`
+- `tests/proptest/` — property-based tests (parsers, serialization, FSM invariants)
+- `tests/common/` — shared fixtures used by the other crates
 
 ### Key Patterns
 - **Finalizer pattern** for graceful deletion
