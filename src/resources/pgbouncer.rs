@@ -70,8 +70,10 @@ pub fn generate_pgbouncer_configmap(cluster: &PostgresCluster) -> ConfigMap {
     let default_pool_size = pgbouncer_spec.map(|s| s.default_pool_size).unwrap_or(20);
     let max_client_conn = pgbouncer_spec.map(|s| s.max_client_conn).unwrap_or(10000);
 
-    // Calculate per-instance max_db_connections
-    let per_instance_max_db_conn = max_db_connections / replicas;
+    // Calculate per-instance max_db_connections.
+    // Floor at 1 because PgBouncer treats `max_db_connections = 0` as unlimited,
+    // which would silently bypass the configured cap when replicas > max_db_connections.
+    let per_instance_max_db_conn = (max_db_connections / replicas).max(1);
 
     // Generate pgbouncer.ini
     // Connect to the primary service for write operations
@@ -147,7 +149,9 @@ pub fn generate_pgbouncer_replica_configmap(cluster: &PostgresCluster) -> Config
     let default_pool_size = pgbouncer_spec.map(|s| s.default_pool_size).unwrap_or(20);
     let max_client_conn = pgbouncer_spec.map(|s| s.max_client_conn).unwrap_or(10000);
 
-    let per_instance_max_db_conn = max_db_connections / replicas;
+    // Floor at 1 because PgBouncer treats `max_db_connections = 0` as unlimited,
+    // which would silently bypass the configured cap when replicas > max_db_connections.
+    let per_instance_max_db_conn = (max_db_connections / replicas).max(1);
 
     // Connect to the replicas service for read operations
     let replica_service = format!("{}-repl", cluster_name);
@@ -266,7 +270,9 @@ pub fn generate_pgbouncer_deployment(
     let max_db_connections = pgbouncer_spec.map(|s| s.max_db_connections).unwrap_or(60);
     let default_pool_size = pgbouncer_spec.map(|s| s.default_pool_size).unwrap_or(20);
     let max_client_conn = pgbouncer_spec.map(|s| s.max_client_conn).unwrap_or(10000);
-    let per_instance_max_db_conn = max_db_connections / replicas;
+    // Floor at 1 because PgBouncer treats `max_db_connections = 0` as unlimited,
+    // which would silently bypass the configured cap when replicas > max_db_connections.
+    let per_instance_max_db_conn = (max_db_connections / replicas).max(1);
 
     // Primary service for write operations
     let primary_service = format!("{}-primary", cluster_name);
@@ -585,7 +591,9 @@ pub fn generate_pgbouncer_replica_deployment(
     let max_db_connections = pgbouncer_spec.map(|s| s.max_db_connections).unwrap_or(60);
     let default_pool_size = pgbouncer_spec.map(|s| s.default_pool_size).unwrap_or(20);
     let max_client_conn = pgbouncer_spec.map(|s| s.max_client_conn).unwrap_or(10000);
-    let per_instance_max_db_conn = max_db_connections / replicas;
+    // Floor at 1 because PgBouncer treats `max_db_connections = 0` as unlimited,
+    // which would silently bypass the configured cap when replicas > max_db_connections.
+    let per_instance_max_db_conn = (max_db_connections / replicas).max(1);
 
     // Replica service for read operations
     let replica_service = format!("{}-repl", cluster_name);

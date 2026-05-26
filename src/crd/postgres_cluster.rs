@@ -794,7 +794,10 @@ pub struct PgBouncerSpec {
     #[serde(default = "default_pool_mode")]
     pub pool_mode: String,
 
-    /// Total max database connections distributed across all instances (default: 60)
+    /// Total max database connections distributed across all instances (default: 60).
+    ///
+    /// When replicas > maxDbConnections, each instance gets at least 1 connection,
+    /// so the effective total may exceed maxDbConnections.
     #[serde(default = "default_max_db_connections")]
     pub max_db_connections: i32,
 
