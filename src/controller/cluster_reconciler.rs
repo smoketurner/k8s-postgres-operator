@@ -34,6 +34,7 @@ use crate::controller::cluster_state_machine::{
 };
 use crate::controller::cluster_status::{StatusManager, spec_changed};
 use crate::controller::context::Context;
+use crate::controller::finalizer::remove_operator_finalizer;
 use crate::crd::{ClusterPhase, PostgresCluster};
 use crate::resources::{
     backup, certificate, network_policy, patroni, pdb, pgbouncer, scaled_object, secret, service,
@@ -1853,27 +1854,14 @@ async fn remove_finalizer(cluster: &PostgresCluster, ctx: &Context, ns: &str) ->
     let name = cluster.name_any();
     let api: Api<PostgresCluster> = Api::namespaced(ctx.client.clone(), ns);
 
-    let patch = serde_json::json!({
-        "metadata": {
-            "finalizers": null
-        }
-    });
-
-    match api
-        .patch(
-            &name,
-            &PatchParams::apply("postgres-operator"),
-            &Patch::Merge(&patch),
-        )
+    match remove_operator_finalizer(&api, &name, cluster.metadata.finalizers.as_ref(), FINALIZER)
         .await
     {
-        Ok(_) => {
-            info!("Removed finalizer from {}", name);
-            Ok(())
-        }
+        Ok(()) => Ok(()),
         Err(e) if is_namespace_not_found_error(&e) => {
             // Namespace is gone - use special cleanup procedure
-            cleanup_stuck_resource::<PostgresCluster>(ctx.client.clone(), &name, ns).await?;
+            cleanup_stuck_resource::<PostgresCluster>(ctx.client.clone(), &name, ns, FINALIZER)
+                .await?;
             Ok(())
         }
         Err(e) => Err(Error::KubeError(e)),

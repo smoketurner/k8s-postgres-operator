@@ -8,6 +8,7 @@ pub mod cluster_status;
 pub mod cluster_validation;
 pub mod context;
 pub mod database_reconciler;
+pub mod finalizer;
 pub mod upgrade_error;
 pub mod upgrade_reconciler;
 pub mod upgrade_state_machine;
