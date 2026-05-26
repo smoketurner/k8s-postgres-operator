@@ -172,6 +172,93 @@ impl ConditionBuilder {
     }
 }
 
+/// Progress signals that affect a Running cluster's Progressing condition.
+///
+/// A cluster that has all its replicas ready but is still applying a pod-level
+/// change (in-place resize via KEP-1287 or a pod spec the kubelet has not yet
+/// observed via KEP-5067) is not stable. Reporting `Progressing=False/Stable`
+/// in that window contradicts the `resizeStatus` and `allPodsSynced` status
+/// fields, so callers must thread this state through.
+#[derive(Debug, Clone, Copy)]
+pub struct RunningProgress {
+    /// At least one pod has an in-place resize in flight (Kubernetes 1.35+).
+    pub resize_in_progress: bool,
+    /// Every pod's `observedGeneration` matches its `metadata.generation`
+    /// (Kubernetes 1.35+). `true` when no pods are tracked yet.
+    pub all_pods_synced: bool,
+}
+
+impl Default for RunningProgress {
+    /// Default to the stable state: no resize active, all pods synced.
+    /// Callers that have pod-tracking data should construct via [`Self::new`].
+    fn default() -> Self {
+        Self {
+            resize_in_progress: false,
+            all_pods_synced: true,
+        }
+    }
+}
+
+impl RunningProgress {
+    /// Construct a [`RunningProgress`] from raw signals.
+    pub fn new(resize_in_progress: bool, all_pods_synced: bool) -> Self {
+        Self {
+            resize_in_progress,
+            all_pods_synced,
+        }
+    }
+
+    /// `true` when no pod-level activity is preventing the Running phase from
+    /// being reported as stable.
+    pub fn is_stable(&self) -> bool {
+        !self.resize_in_progress && self.all_pods_synced
+    }
+}
+
+/// Build the Ready/Progressing/Degraded/ConfigurationValid condition set for a
+/// cluster in the Running phase, reflecting pod-level resize and sync state.
+fn build_running_conditions(
+    existing: Vec<Condition>,
+    generation: Option<i64>,
+    progress: &RunningProgress,
+) -> ConditionBuilder {
+    let builder = ConditionBuilder::from_existing(existing, generation).ready(
+        true,
+        "ClusterReady",
+        "All pods are ready and accepting connections",
+    );
+
+    let builder = if progress.resize_in_progress {
+        builder
+            .progressing(
+                true,
+                "ResizeInProgress",
+                "In-place resource resize is being applied to one or more pods",
+            )
+            .resource_resize_in_progress(
+                true,
+                "ResizeInProgress",
+                "In-place resource resize is being applied to one or more pods",
+            )
+    } else if !progress.all_pods_synced {
+        builder
+            .progressing(
+                true,
+                "SyncInProgress",
+                "Waiting for kubelet to observe the latest pod spec",
+            )
+            .resource_resize_in_progress(false, "NoResize", "No in-place resize active")
+    } else {
+        builder
+            .progressing(false, "Stable", "Cluster is stable")
+            .resource_resize_in_progress(false, "NoResize", "No in-place resize active")
+    };
+
+    builder
+        .degraded(false, "Healthy", "Cluster is healthy")
+        .config_valid(true, "SpecValid", "Cluster specification is valid")
+}
+
 /// Status manager for PostgresCluster resources
 pub(crate) struct StatusManager<'a> {
     cluster: &'a PostgresCluster,
@@ -204,48 +291,6 @@ impl<'a> StatusManager<'a> {
         Ok(())
     }
 
-    /// Update status for a running cluster
-    pub async fn set_running(
-        &self,
-        ready_replicas: i32,
-        total_replicas: i32,
-        primary_pod: Option<String>,
-        replica_pods: Vec<String>,
-        version: &str,
-    ) -> Result<()> {
-        self.set_running_with_backup(
-            ready_replicas,
-            total_replicas,
-            primary_pod,
-            replica_pods,
-            version,
-            None,
-        )
-        .await
-    }
-
-    /// Update status for a running cluster with optional backup status
-    pub async fn set_running_with_backup(
-        &self,
-        ready_replicas: i32,
-        total_replicas: i32,
-        primary_pod: Option<String>,
-        replica_pods: Vec<String>,
-        version: &str,
-        backup_status: Option<BackupStatus>,
-    ) -> Result<()> {
-        self.set_running_full(
-            ready_replicas,
-            total_replicas,
-            primary_pod,
-            replica_pods,
-            version,
-            backup_status,
-            None,
-        )
-        .await
-    }
-
     /// Update status for a running cluster with all optional status fields
     ///
     /// This is the consolidated method that updates backup status and replication lag
@@ -262,6 +307,7 @@ impl<'a> StatusManager<'a> {
         replication_lag_status: Option<
             &crate::controller::cluster_replication_lag::ReplicationLagStatus,
         >,
+        progress: RunningProgress,
     ) -> Result<()> {
         let generation = self.cluster.metadata.generation;
         let existing_conditions = self
@@ -271,16 +317,8 @@ impl<'a> StatusManager<'a> {
             .map(|s| s.conditions.clone())
             .unwrap_or_default();
 
-        let conditions = ConditionBuilder::from_existing(existing_conditions, generation)
-            .ready(
-                true,
-                "ClusterReady",
-                "All pods are ready and accepting connections",
-            )
-            .progressing(false, "Stable", "Cluster is stable")
-            .degraded(false, "Healthy", "Cluster is healthy")
-            .config_valid(true, "SpecValid", "Cluster specification is valid")
-            .build();
+        let conditions =
+            build_running_conditions(existing_conditions, generation, &progress).build();
 
         // Track when we entered this phase
         let phase_started_at = self.get_phase_started_at(ClusterPhase::Running);
@@ -876,5 +914,95 @@ fn generate_connection_info(cluster: &PostgresCluster, namespace: &str) -> Conne
         pooler_replicas,
         credentials_secret: format!("{}-credentials", name),
         database: Some("postgres".to_string()),
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
+mod tests {
+    use super::*;
+
+    fn find_condition<'a>(conditions: &'a [Condition], type_: &str) -> &'a Condition {
+        conditions
+            .iter()
+            .find(|c| c.type_ == type_)
+            .unwrap_or_else(|| panic!("expected {type_} condition"))
+    }
+
+    #[test]
+    fn running_progress_default_is_stable() {
+        let progress = RunningProgress::default();
+        assert!(progress.is_stable());
+        assert!(!progress.resize_in_progress);
+        assert!(progress.all_pods_synced);
+    }
+
+    #[test]
+    fn running_conditions_stable_when_no_pod_activity() {
+        let progress = RunningProgress::new(false, true);
+        let conditions = build_running_conditions(Vec::new(), Some(1), &progress).build();
+
+        let progressing = find_condition(&conditions, condition_types::PROGRESSING);
+        assert_eq!(progressing.status, condition_status::FALSE);
+        assert_eq!(progressing.reason, "Stable");
+
+        let ready = find_condition(&conditions, condition_types::READY);
+        assert_eq!(ready.status, condition_status::TRUE);
+
+        let resize = find_condition(&conditions, condition_types::RESOURCE_RESIZE_IN_PROGRESS);
+        assert_eq!(resize.status, condition_status::FALSE);
+    }
+
+    #[test]
+    fn running_conditions_progressing_during_resize() {
+        let progress = RunningProgress::new(true, true);
+        let conditions = build_running_conditions(Vec::new(), Some(2), &progress).build();
+
+        let progressing = find_condition(&conditions, condition_types::PROGRESSING);
+        assert_eq!(progressing.status, condition_status::TRUE);
+        assert_eq!(progressing.reason, "ResizeInProgress");
+
+        let resize = find_condition(&conditions, condition_types::RESOURCE_RESIZE_IN_PROGRESS);
+        assert_eq!(resize.status, condition_status::TRUE);
+        assert_eq!(resize.reason, "ResizeInProgress");
+    }
+
+    #[test]
+    fn running_conditions_progressing_when_pods_not_synced() {
+        let progress = RunningProgress::new(false, false);
+        let conditions = build_running_conditions(Vec::new(), Some(3), &progress).build();
+
+        let progressing = find_condition(&conditions, condition_types::PROGRESSING);
+        assert_eq!(progressing.status, condition_status::TRUE);
+        assert_eq!(progressing.reason, "SyncInProgress");
+
+        // Resize is not what's blocking stability, so the resize condition is false.
+        let resize = find_condition(&conditions, condition_types::RESOURCE_RESIZE_IN_PROGRESS);
+        assert_eq!(resize.status, condition_status::FALSE);
+    }
+
+    #[test]
+    fn running_conditions_resize_takes_priority_over_sync() {
+        // When both signals are unhealthy, resize is the more specific
+        // explanation and should win the Progressing reason.
+        let progress = RunningProgress::new(true, false);
+        let conditions = build_running_conditions(Vec::new(), Some(4), &progress).build();
+
+        let progressing = find_condition(&conditions, condition_types::PROGRESSING);
+        assert_eq!(progressing.reason, "ResizeInProgress");
+    }
+
+    #[test]
+    fn running_conditions_observed_generation_is_propagated() {
+        let progress = RunningProgress::new(false, true);
+        let conditions = build_running_conditions(Vec::new(), Some(7), &progress).build();
+        for condition in &conditions {
+            assert_eq!(condition.observed_generation, Some(7));
+        }
     }
 }
