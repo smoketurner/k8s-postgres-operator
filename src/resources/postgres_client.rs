@@ -341,26 +341,6 @@ impl PostgresConnection {
         })
     }
 
-    /// Connect with TLS to a specific service
-    pub async fn connect_with_tls(
-        kube_client: &Client,
-        namespace: &str,
-        service_name: &str,
-        port: u16,
-        credentials: &PostgresCredentials,
-        tls_mode: TlsMode,
-    ) -> PostgresClientResult<Self> {
-        Self::connect_service(
-            kube_client,
-            namespace,
-            service_name,
-            port,
-            credentials,
-            tls_mode,
-        )
-        .await
-    }
-
     /// Execute a query returning rows
     pub async fn query(
         &self,
@@ -441,33 +421,6 @@ pub struct ConnectionInfo {
 }
 
 impl ConnectionInfo {
-    /// Query connection info from an established connection
-    pub async fn from_connection(conn: &PostgresConnection) -> PostgresClientResult<Self> {
-        let query = r#"
-            SELECT
-                version() as pg_version,
-                COALESCE(pg_ssl.ssl, false) as ssl_enabled,
-                pg_ssl.version as ssl_version,
-                pg_is_in_recovery() as is_replica,
-                CASE WHEN pg_is_in_recovery() THEN
-                    extract(epoch from (now() - pg_last_xact_replay_timestamp()))::float8
-                ELSE NULL END as replication_lag_seconds
-            FROM pg_stat_activity pg_sa
-            LEFT JOIN pg_stat_ssl pg_ssl ON pg_ssl.pid = pg_sa.pid
-            WHERE pg_sa.pid = pg_backend_pid()
-        "#;
-
-        let row = conn.query_one(query, &[]).await?;
-
-        Ok(Self {
-            pg_version: row.get("pg_version"),
-            ssl_enabled: row.get("ssl_enabled"),
-            ssl_version: row.get("ssl_version"),
-            is_replica: row.get("is_replica"),
-            replication_lag_secs: row.get("replication_lag_seconds"),
-        })
-    }
-
     /// Extract major version number (e.g., 17 from "PostgreSQL 17.2 ...")
     pub fn major_version(&self) -> Option<u8> {
         self.pg_version
