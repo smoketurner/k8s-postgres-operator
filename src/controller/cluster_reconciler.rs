@@ -825,7 +825,7 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
     apply_resource(ctx, ns, &pdb).await?;
 
     // Ensure NetworkPolicy exists (always generated - primary security boundary)
-    let np = network_policy::generate_network_policy(cluster);
+    let np = network_policy::generate_network_policy(cluster, &ctx.operator_namespace);
     apply_resource(ctx, ns, &np).await?;
 
     // Ensure Patroni StatefulSet exists (single StatefulSet for all members)

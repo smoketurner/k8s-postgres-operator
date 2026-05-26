@@ -1123,7 +1123,7 @@ mod network_policy_tests {
         #[test]
         fn prop_network_policy_no_panic(np_spec in optional_network_policy()) {
             let cluster = cluster_with_network_policy(np_spec);
-            let np = network_policy::generate_network_policy(&cluster);
+            let np = network_policy::generate_network_policy(&cluster, "postgres-operator-system");
 
             // Should always generate valid NetworkPolicy
             prop_assert!(np.metadata.name.is_some());
@@ -1134,7 +1134,7 @@ mod network_policy_tests {
         #[test]
         fn prop_network_policy_operator_access(np_spec in optional_network_policy()) {
             let cluster = cluster_with_network_policy(np_spec);
-            let np = network_policy::generate_network_policy(&cluster);
+            let np = network_policy::generate_network_policy(&cluster, "postgres-operator-system");
 
             let spec = np.spec.unwrap();
             let ingress = spec.ingress.unwrap();
@@ -1160,7 +1160,7 @@ mod network_policy_tests {
         #[test]
         fn prop_network_policy_required_egress(np_spec in optional_network_policy()) {
             let cluster = cluster_with_network_policy(np_spec);
-            let np = network_policy::generate_network_policy(&cluster);
+            let np = network_policy::generate_network_policy(&cluster, "postgres-operator-system");
 
             let spec = np.spec.unwrap();
             let egress = spec.egress.unwrap();
@@ -1177,7 +1177,7 @@ mod network_policy_tests {
                 allow_from: vec![],
             });
             let cluster = cluster_with_network_policy(np_spec);
-            let np = network_policy::generate_network_policy(&cluster);
+            let np = network_policy::generate_network_policy(&cluster, "postgres-operator-system");
 
             let spec = np.spec.unwrap();
             let ingress = spec.ingress.unwrap();

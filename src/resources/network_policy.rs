@@ -22,9 +22,6 @@ use std::collections::BTreeMap;
 use crate::crd::{LabelSelectorConfig, PostgresCluster};
 use crate::resources::common::{owner_reference, standard_labels};
 
-/// Operator namespace - always allowed access to prevent footguns
-const OPERATOR_NAMESPACE: &str = "postgres-operator-system";
-
 /// Convert our LabelSelectorConfig to k8s_openapi's LabelSelector
 fn convert_label_selector(config: &LabelSelectorConfig) -> LabelSelector {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelectorRequirement;
@@ -58,12 +55,20 @@ fn convert_label_selector(config: &LabelSelectorConfig) -> LabelSelector {
 /// This is always generated and cannot be disabled. The NetworkPolicy is the
 /// primary security boundary for database access.
 ///
+/// `operator_namespace` is the namespace the operator pod runs in; Rule 3
+/// allows that namespace to reach PostgreSQL (5432) and the Patroni REST API
+/// (8008). Threading this in at runtime (rather than hardcoding) means Helm
+/// deployments to custom namespaces are not silently blocked.
+///
 /// Access rules:
 /// - Same namespace: Can access PostgreSQL (5432)
 /// - Operator namespace: Always allowed (prevents lockout)
 /// - Cluster pods: Can communicate internally (replication, Patroni API)
 /// - External access: Only if `allowExternalAccess: true` (dev/test only)
-pub fn generate_network_policy(cluster: &PostgresCluster) -> NetworkPolicy {
+pub fn generate_network_policy(
+    cluster: &PostgresCluster,
+    operator_namespace: &str,
+) -> NetworkPolicy {
     let name = format!("{}-network-policy", cluster.name_any());
     let cluster_name = cluster.name_any();
     let ns = cluster.namespace().unwrap_or_else(|| "default".to_string());
@@ -127,7 +132,7 @@ pub fn generate_network_policy(cluster: &PostgresCluster) -> NetworkPolicy {
             namespace_selector: Some(LabelSelector {
                 match_labels: Some(BTreeMap::from([(
                     "kubernetes.io/metadata.name".to_string(),
-                    OPERATOR_NAMESPACE.to_string(),
+                    operator_namespace.to_string(),
                 )])),
                 ..Default::default()
             }),
@@ -305,10 +310,31 @@ mod tests {
         }
     }
 
+    const DEFAULT_OPERATOR_NS: &str = "postgres-operator-system";
+
+    /// Find the ingress rule that grants access to the given operator namespace.
+    fn find_operator_rule<'a>(
+        ingress: &'a [NetworkPolicyIngressRule],
+        operator_ns: &str,
+    ) -> Option<&'a NetworkPolicyIngressRule> {
+        ingress.iter().find(|rule| {
+            rule.from.as_ref().is_some_and(|peers| {
+                peers.iter().any(|peer| {
+                    peer.namespace_selector.as_ref().is_some_and(|sel| {
+                        sel.match_labels.as_ref().is_some_and(|labels| {
+                            labels.get("kubernetes.io/metadata.name")
+                                == Some(&operator_ns.to_string())
+                        })
+                    })
+                })
+            })
+        })
+    }
+
     #[test]
     fn test_generate_network_policy_default() {
         let cluster = create_test_cluster(None);
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, DEFAULT_OPERATOR_NS);
 
         assert_eq!(
             np.metadata.name,
@@ -335,7 +361,7 @@ mod tests {
             allow_external_access: true,
             allow_from: vec![],
         }));
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, DEFAULT_OPERATOR_NS);
 
         let spec = np.spec.unwrap();
         let ingress = spec.ingress.unwrap();
@@ -352,28 +378,50 @@ mod tests {
     #[test]
     fn test_operator_namespace_always_allowed() {
         let cluster = create_test_cluster(None);
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, DEFAULT_OPERATOR_NS);
 
         let spec = np.spec.unwrap();
         let ingress = spec.ingress.unwrap();
 
-        // Find the operator namespace rule
-        let operator_rule = ingress.iter().find(|rule| {
-            rule.from.as_ref().is_some_and(|peers| {
-                peers.iter().any(|peer| {
-                    peer.namespace_selector.as_ref().is_some_and(|sel| {
-                        sel.match_labels.as_ref().is_some_and(|labels| {
-                            labels.get("kubernetes.io/metadata.name")
-                                == Some(&OPERATOR_NAMESPACE.to_string())
-                        })
-                    })
-                })
-            })
-        });
+        assert!(
+            find_operator_rule(&ingress, DEFAULT_OPERATOR_NS).is_some(),
+            "Operator namespace must always be allowed"
+        );
+    }
+
+    /// Regression test for #52: original hardcoded behavior is preserved when
+    /// the caller passes the default operator namespace.
+    #[test]
+    fn test_operator_namespace_default_matches_legacy() {
+        let cluster = create_test_cluster(None);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
+
+        let spec = np.spec.unwrap();
+        let ingress = spec.ingress.unwrap();
 
         assert!(
-            operator_rule.is_some(),
-            "Operator namespace must always be allowed"
+            find_operator_rule(&ingress, "postgres-operator-system").is_some(),
+            "Rule 3 must reference 'postgres-operator-system' when called with the default"
+        );
+    }
+
+    /// Regression test for #52: Helm deployments to a custom namespace get a
+    /// matching Rule 3 selector instead of being silently blocked.
+    #[test]
+    fn test_operator_namespace_custom_threaded_through() {
+        let cluster = create_test_cluster(None);
+        let np = generate_network_policy(&cluster, "custom-namespace");
+
+        let spec = np.spec.unwrap();
+        let ingress = spec.ingress.unwrap();
+
+        assert!(
+            find_operator_rule(&ingress, "custom-namespace").is_some(),
+            "Rule 3 must reference the runtime operator namespace"
+        );
+        assert!(
+            find_operator_rule(&ingress, "postgres-operator-system").is_none(),
+            "Default operator namespace must not appear when a custom one is provided"
         );
     }
 }
