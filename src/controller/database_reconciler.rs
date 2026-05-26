@@ -14,6 +14,7 @@ use kube::{Client, Resource, ResourceExt};
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::controller::cleanup::{cleanup_stuck_resource, is_namespace_not_found_error};
+use crate::controller::finalizer::remove_operator_finalizer;
 use crate::crd::{
     ClusterPhase, DatabaseCondition, DatabaseConditionType, DatabaseConnectionInfo, DatabasePhase,
     GrantSpec, PostgresCluster, PostgresDatabase, PostgresDatabaseStatus, RoleSpec,
@@ -619,25 +620,24 @@ async fn remove_finalizer(
     let name = db.name_any();
     let databases: Api<PostgresDatabase> = Api::namespaced(ctx.client.clone(), namespace);
 
-    let patch = serde_json::json!({
-        "metadata": {
-            "finalizers": null
-        }
-    });
-
-    match databases
-        .patch(
-            &name,
-            &PatchParams::apply("postgres-operator"),
-            &Patch::Merge(&patch),
-        )
-        .await
+    match remove_operator_finalizer(
+        &databases,
+        &name,
+        db.metadata.finalizers.as_ref(),
+        DATABASE_FINALIZER,
+    )
+    .await
     {
-        Ok(_) => Ok(()),
+        Ok(()) => Ok(()),
         Err(e) if is_namespace_not_found_error(&e) => {
             // Namespace is gone - use special cleanup procedure
-            cleanup_stuck_resource::<PostgresDatabase>(ctx.client.clone(), &name, namespace)
-                .await?;
+            cleanup_stuck_resource::<PostgresDatabase>(
+                ctx.client.clone(),
+                &name,
+                namespace,
+                DATABASE_FINALIZER,
+            )
+            .await?;
             Ok(())
         }
         Err(e) => Err(DatabaseError::KubeError(e)),

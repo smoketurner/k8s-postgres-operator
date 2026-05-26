@@ -27,6 +27,7 @@ use kube::{Client, ResourceExt};
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::controller::cleanup::{cleanup_stuck_resource, is_namespace_not_found_error};
+use crate::controller::finalizer::remove_operator_finalizer;
 use crate::controller::upgrade_error::{UpgradeBackoffConfig, UpgradeError, UpgradeResult};
 use crate::controller::upgrade_state_machine::{
     UpgradeEvent, UpgradeStateMachine, UpgradeTransitionContext, UpgradeTransitionResult,
@@ -165,26 +166,22 @@ pub async fn reconcile_upgrade(
             // Remove finalizer first to allow deletion
             if has_finalizer(&upgrade) {
                 let api: Api<PostgresUpgrade> = Api::namespaced(ctx.client.clone(), &ns);
-                let patch = serde_json::json!({
-                    "metadata": {
-                        "finalizers": null
-                    }
-                });
-                match api
-                    .patch(
-                        &upgrade.name_any(),
-                        &PatchParams::apply("postgres-operator"),
-                        &Patch::Merge(&patch),
-                    )
-                    .await
+                match remove_operator_finalizer(
+                    &api,
+                    &upgrade.name_any(),
+                    upgrade.metadata.finalizers.as_ref(),
+                    UPGRADE_FINALIZER,
+                )
+                .await
                 {
-                    Ok(_) => {}
+                    Ok(()) => {}
                     Err(e) if is_namespace_not_found_error(&e) => {
                         // Namespace is gone - use special cleanup procedure
                         cleanup_stuck_resource::<PostgresUpgrade>(
                             ctx.client.clone(),
                             &upgrade.name_any(),
                             &ns,
+                            UPGRADE_FINALIZER,
                         )
                         .await
                         .map_err(UpgradeError::KubeError)?;
@@ -207,6 +204,7 @@ pub async fn reconcile_upgrade(
                         ctx.client.clone(),
                         &upgrade.name_any(),
                         &ns,
+                        UPGRADE_FINALIZER,
                     )
                     .await
                     .map_err(UpgradeError::KubeError)?;
@@ -1222,29 +1220,22 @@ async fn handle_deletion(
     // Remove finalizer
     if has_finalizer(upgrade) {
         let api: Api<PostgresUpgrade> = Api::namespaced(ctx.client.clone(), ns);
-        let patch = serde_json::json!({
-            "metadata": {
-                "finalizers": null
-            }
-        });
-
-        match api
-            .patch(
-                &upgrade.name_any(),
-                &PatchParams::apply("postgres-operator"),
-                &Patch::Merge(&patch),
-            )
-            .await
+        match remove_operator_finalizer(
+            &api,
+            &upgrade.name_any(),
+            upgrade.metadata.finalizers.as_ref(),
+            UPGRADE_FINALIZER,
+        )
+        .await
         {
-            Ok(_) => {
-                info!("Removed finalizer from upgrade {}", upgrade.name_any());
-            }
+            Ok(()) => {}
             Err(e) if is_namespace_not_found_error(&e) => {
                 // Namespace is gone - use special cleanup procedure
                 cleanup_stuck_resource::<PostgresUpgrade>(
                     ctx.client.clone(),
                     &upgrade.name_any(),
                     ns,
+                    UPGRADE_FINALIZER,
                 )
                 .await
                 .map_err(UpgradeError::KubeError)?;

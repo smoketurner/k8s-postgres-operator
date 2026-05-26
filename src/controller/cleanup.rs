@@ -4,12 +4,14 @@
 //! when their namespace is deleted while they still have finalizers.
 
 use k8s_openapi::api::core::v1::Namespace;
-use kube::api::{Api, DeleteParams, ObjectMeta, Patch, PatchParams, PostParams};
-use kube::{Client, Resource};
+use kube::api::{Api, DeleteParams, ObjectMeta, PostParams};
+use kube::{Client, Resource, ResourceExt};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fmt::Debug;
 use tracing::{debug, info, warn};
+
+use crate::controller::finalizer::remove_operator_finalizer;
 
 /// Check if a kube error indicates the namespace was not found.
 ///
@@ -27,7 +29,8 @@ pub fn is_namespace_not_found_error(e: &kube::Error) -> bool {
 ///
 /// The cleanup process:
 /// 1. Temporarily recreates the namespace
-/// 2. Removes the finalizer from the stuck resource
+/// 2. Removes the operator's finalizer from the stuck resource, leaving any
+///    system finalizers (e.g. `foregroundDeletion`, `orphan`) intact
 /// 3. Deletes the namespace again to allow Kubernetes garbage collection
 ///
 /// # Type Parameters
@@ -39,21 +42,24 @@ pub fn is_namespace_not_found_error(e: &kube::Error) -> bool {
 /// * `client` - Kubernetes client
 /// * `resource_name` - Name of the stuck resource
 /// * `ns` - Namespace the resource belongs to
+/// * `finalizer_to_remove` - The operator finalizer string to filter out
 ///
 /// # Example
 ///
 /// ```ignore
 /// use postgres_operator::controller::cleanup::cleanup_stuck_resource;
+/// use postgres_operator::controller::FINALIZER;
 /// use postgres_operator::crd::PostgresCluster;
 ///
 /// if is_namespace_not_found_error(&error) {
-///     cleanup_stuck_resource::<PostgresCluster>(client, "my-cluster", "my-namespace").await?;
+///     cleanup_stuck_resource::<PostgresCluster>(client, "my-cluster", "my-namespace", FINALIZER).await?;
 /// }
 /// ```
 pub async fn cleanup_stuck_resource<K>(
     client: Client,
     resource_name: &str,
     ns: &str,
+    finalizer_to_remove: &str,
 ) -> Result<(), kube::Error>
 where
     K: Resource<Scope = k8s_openapi::NamespaceResourceScope>
@@ -95,32 +101,46 @@ where
         }
     }
 
-    // Now remove the finalizer from the stuck resource
+    // Now remove only the operator's finalizer from the stuck resource. We
+    // refetch the resource so the patch carries the current set of system
+    // finalizers (foregroundDeletion, orphan, ...) and only strips the
+    // operator's finalizer from the array.
     let api: Api<K> = Api::namespaced(client.clone(), ns);
-    let patch = serde_json::json!({
-        "metadata": {
-            "finalizers": null
+    match api.get(resource_name).await {
+        Ok(resource) => {
+            if let Err(e) = remove_operator_finalizer(
+                &api,
+                &resource.name_any(),
+                resource.meta().finalizers.as_ref(),
+                finalizer_to_remove,
+            )
+            .await
+            {
+                warn!(
+                    "Failed to remove finalizer from stuck {} {}/{}: {}",
+                    kind, ns, resource_name, e
+                );
+                // Don't return error - the namespace recreation may help on next reconcile
+            } else {
+                info!(
+                    "Removed finalizer from stuck {} {}/{}",
+                    kind, ns, resource_name
+                );
+            }
         }
-    });
-
-    if let Err(e) = api
-        .patch(
-            resource_name,
-            &PatchParams::apply("postgres-operator"),
-            &Patch::Merge(&patch),
-        )
-        .await
-    {
-        warn!(
-            "Failed to remove finalizer from stuck {} {}/{}: {}",
-            kind, ns, resource_name, e
-        );
-        // Don't return error - the namespace recreation may help on next reconcile
-    } else {
-        info!(
-            "Removed finalizer from stuck {} {}/{}",
-            kind, ns, resource_name
-        );
+        Err(kube::Error::Api(resp)) if resp.code == 404 => {
+            debug!(
+                "Stuck {} {}/{} already gone, nothing to clean up",
+                kind, ns, resource_name
+            );
+        }
+        Err(e) => {
+            warn!(
+                "Failed to fetch stuck {} {}/{} for finalizer cleanup: {}",
+                kind, ns, resource_name, e
+            );
+            // Don't return error - the namespace recreation may help on next reconcile
+        }
     }
 
     // Delete the temporary namespace (non-blocking)
