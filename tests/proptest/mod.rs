@@ -576,12 +576,13 @@ proptest! {
         prop_assert!(pdb_resource.spec.is_some());
     }
 
-    /// Property: Valid specs always generate secrets without panicking
+    /// Property: Valid specs always generate well-formed secrets without panicking
     #[test]
     fn prop_valid_spec_generates_secret(spec in valid_spec()) {
         let cluster = cluster_from_spec(spec);
-        let result = secret::generate_credentials_secret(&cluster);
-        prop_assert!(result.is_ok());
+        let secret = secret::generate_credentials_secret(&cluster);
+        prop_assert!(secret.metadata.name.is_some());
+        prop_assert!(secret.string_data.is_some());
     }
 
     // Note: Invalid version tests are no longer needed because PostgresVersion enum

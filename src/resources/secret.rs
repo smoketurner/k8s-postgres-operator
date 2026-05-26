@@ -5,7 +5,6 @@ use kube::ResourceExt;
 use kube::core::ObjectMeta;
 use rand::RngExt;
 
-use crate::controller::cluster_error::Result;
 use crate::crd::PostgresCluster;
 use crate::resources::common::{owner_reference, standard_labels};
 
@@ -22,7 +21,7 @@ fn generate_password(len: usize) -> String {
 }
 
 /// Generate the credentials Secret
-pub fn generate_credentials_secret(cluster: &PostgresCluster) -> Result<Secret> {
+pub fn generate_credentials_secret(cluster: &PostgresCluster) -> Secret {
     let name = format!("{}-credentials", cluster.name_any());
     let cluster_name = cluster.name_any();
     let ns = cluster.namespace();
@@ -39,7 +38,7 @@ pub fn generate_credentials_secret(cluster: &PostgresCluster) -> Result<Secret> 
         ("PGPASSWORD".to_string(), superuser_password),
     ]);
 
-    Ok(Secret {
+    Secret {
         metadata: ObjectMeta {
             name: Some(name),
             namespace: ns,
@@ -50,5 +49,5 @@ pub fn generate_credentials_secret(cluster: &PostgresCluster) -> Result<Secret> 
         type_: Some("Opaque".to_string()),
         string_data: Some(string_data),
         ..Default::default()
-    })
+    }
 }

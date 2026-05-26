@@ -821,7 +821,7 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
     let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
     let secret_name = format!("{}-credentials", name);
     if secrets_api.get_opt(&secret_name).await?.is_none() {
-        let secret = secret::generate_credentials_secret(cluster)?;
+        let secret = secret::generate_credentials_secret(cluster);
         apply_resource(ctx, ns, &secret).await?;
     }
 

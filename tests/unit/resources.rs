@@ -288,7 +288,7 @@ mod secret_tests {
     #[test]
     fn test_secret_name() {
         let cluster = create_test_cluster("my-cluster", "default", 1);
-        let secret = secret::generate_credentials_secret(&cluster).unwrap();
+        let secret = secret::generate_credentials_secret(&cluster);
 
         assert_eq!(secret.name_any(), "my-cluster-credentials");
     }
@@ -296,7 +296,7 @@ mod secret_tests {
     #[test]
     fn test_secret_contains_passwords() {
         let cluster = create_test_cluster("my-cluster", "default", 1);
-        let secret = secret::generate_credentials_secret(&cluster).unwrap();
+        let secret = secret::generate_credentials_secret(&cluster);
 
         let string_data = secret.string_data.as_ref().unwrap();
         assert!(string_data.contains_key("POSTGRES_PASSWORD"));
@@ -307,7 +307,7 @@ mod secret_tests {
     #[test]
     fn test_secret_password_length() {
         let cluster = create_test_cluster("my-cluster", "default", 1);
-        let secret = secret::generate_credentials_secret(&cluster).unwrap();
+        let secret = secret::generate_credentials_secret(&cluster);
 
         let string_data = secret.string_data.as_ref().unwrap();
         let password = string_data.get("POSTGRES_PASSWORD").unwrap();
@@ -318,7 +318,7 @@ mod secret_tests {
     #[test]
     fn test_secret_owner_reference() {
         let cluster = create_test_cluster("my-cluster", "default", 1);
-        let secret = secret::generate_credentials_secret(&cluster).unwrap();
+        let secret = secret::generate_credentials_secret(&cluster);
 
         let owner_refs = secret.metadata.owner_references.as_ref().unwrap();
         assert_eq!(owner_refs.len(), 1);
@@ -1327,15 +1327,6 @@ mod resource_panic_prevention_tests {
         // Should not panic
         let pdb_resource = pdb::generate_pdb(&cluster);
         assert!(pdb_resource.metadata.name.is_some());
-    }
-
-    #[test]
-    fn test_generate_secret_always_succeeds() {
-        let cluster = create_test_cluster("my-cluster", "default", 1);
-
-        // Secret generation should always succeed for valid cluster
-        let result = secret::generate_credentials_secret(&cluster);
-        assert!(result.is_ok());
     }
 
     #[test]

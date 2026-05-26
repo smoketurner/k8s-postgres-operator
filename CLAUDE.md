@@ -27,6 +27,7 @@ The operator must **never panic** in production code paths. This ensures continu
 - **Always use** `Result<T, Error>` with the `?` operator for error propagation
 - **For Option types**, use `unwrap_or_default()`, `map()`, `and_then()`, or pattern matching
 - **Test-only code** may use `unwrap()` where panicking on failure is acceptable
+- **Test modules** (`#[cfg(test)] mod tests`) and files under `tests/` opt out explicitly with `#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]` at the module level, so the exemption is visible at the boundary
 
 Additional lints denied in `Cargo.toml` / `.clippy.toml`: `indexing_slicing` (use `.get()`), `unreachable`, `unsafe_code`, `unwrap_in_result`, `panic_in_result_fn`, `get_unwrap`, `exit`. Function size capped at 150 lines (`too-many-lines-threshold`); cognitive complexity capped at 30.
 
