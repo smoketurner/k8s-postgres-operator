@@ -684,6 +684,65 @@ mod pgbouncer_configmap_tests {
         assert_eq!(owner_refs.len(), 1);
         assert_eq!(owner_refs[0].kind, "PostgresCluster");
     }
+
+    /// Regression test for #50: integer division yielded 0 when replicas exceeded
+    /// max_db_connections. PgBouncer interprets `max_db_connections = 0` as
+    /// unlimited, silently bypassing the configured cap. The per-instance value
+    /// must always be at least 1.
+    #[test]
+    fn test_pgbouncer_division_yields_zero_when_replicas_exceed_max_connections() {
+        let cluster = PostgresClusterBuilder::new("my-cluster", "default")
+            .with_uid("test-uid-12345")
+            .with_storage("10Gi", Some("standard"))
+            .with_pgbouncer_custom(10, "transaction", 5, 20, 10000)
+            .build();
+        let cm = pgbouncer::generate_pgbouncer_configmap(&cluster);
+
+        let data = cm.data.as_ref().unwrap();
+        let ini = data.get("pgbouncer.ini").unwrap();
+
+        assert!(
+            ini.contains("max_db_connections = 1"),
+            "expected floored value of 1, got ini:\n{ini}"
+        );
+        assert!(
+            !ini.contains("max_db_connections = 0"),
+            "must never emit 0 (unlimited in PgBouncer), got ini:\n{ini}"
+        );
+    }
+
+    #[test]
+    fn test_pgbouncer_default_division() {
+        let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
+        let cm = pgbouncer::generate_pgbouncer_configmap(&cluster);
+
+        let data = cm.data.as_ref().unwrap();
+        let ini = data.get("pgbouncer.ini").unwrap();
+
+        // Defaults: replicas=2, max_db_connections=60 -> 30 per instance
+        assert!(
+            ini.contains("max_db_connections = 30"),
+            "expected 30 per instance, got ini:\n{ini}"
+        );
+    }
+
+    #[test]
+    fn test_pgbouncer_one_to_one() {
+        let cluster = PostgresClusterBuilder::new("my-cluster", "default")
+            .with_uid("test-uid-12345")
+            .with_storage("10Gi", Some("standard"))
+            .with_pgbouncer_custom(1, "transaction", 1, 20, 10000)
+            .build();
+        let cm = pgbouncer::generate_pgbouncer_configmap(&cluster);
+
+        let data = cm.data.as_ref().unwrap();
+        let ini = data.get("pgbouncer.ini").unwrap();
+
+        assert!(
+            ini.contains("max_db_connections = 1"),
+            "expected 1 per instance, got ini:\n{ini}"
+        );
+    }
 }
 
 mod pgbouncer_service_tests {
