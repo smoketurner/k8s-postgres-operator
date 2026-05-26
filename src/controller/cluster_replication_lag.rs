@@ -31,7 +31,7 @@
 //! - Consider using a service mesh for mTLS if required
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Empty};
+use http_body_util::{BodyExt, Empty, LengthLimitError, Limited};
 use hyper::Request;
 use hyper::client::conn::http1;
 use hyper_util::rt::TokioIo;
@@ -60,6 +60,13 @@ const DEFAULT_THROUGHPUT_MB_PER_SEC: i32 = 100;
 
 /// Maximum valid length for Kubernetes label values (RFC 1123)
 const MAX_LABEL_VALUE_LENGTH: usize = 63;
+
+/// Maximum size of the Patroni `/cluster` response body (1 MiB)
+///
+/// Patroni returns one JSON object per cluster member; even very large
+/// clusters fit well under this cap. The limit guards against unbounded
+/// memory growth if a misbehaving endpoint streams indefinitely.
+const MAX_PATRONI_RESPONSE_BYTES: usize = 1024 * 1024;
 
 /// Result type for replication lag operations
 pub(crate) type Result<T> = std::result::Result<T, ReplicationLagError>;
@@ -282,58 +289,8 @@ impl ReplicationLagCollector {
             .parse()
             .map_err(|e| ReplicationLagError::ConnectionError(format!("Invalid address: {}", e)))?;
 
-        // Connect to Patroni
-        let stream = TcpStream::connect(addr)
-            .await
-            .map_err(|e| ReplicationLagError::ConnectionError(e.to_string()))?;
-
-        let io = TokioIo::new(stream);
-
-        // Create HTTP/1.1 connection
-        let (mut sender, conn) = http1::handshake(io)
-            .await
-            .map_err(|e| ReplicationLagError::HttpError(e.to_string()))?;
-
-        // Build request
-        let req = Request::builder()
-            .method("GET")
-            .uri("/cluster")
-            .header("Host", format!("{}:{}", pod_ip, PATRONI_PORT))
-            .body(Empty::<Bytes>::new())
-            .map_err(|e| ReplicationLagError::HttpError(e.to_string()))?;
-
-        // Use tokio::select! to properly handle the connection lifecycle
-        // The connection task will be cancelled when we're done with the request
-        let response = tokio::select! {
-            // Drive the connection
-            conn_result = conn => {
-                if let Err(e) = conn_result {
-                    debug!("Connection closed: {}", e);
-                }
-                return Err(ReplicationLagError::ConnectionError("Connection closed unexpectedly".to_string()));
-            }
-            // Send the request
-            response = sender.send_request(req) => {
-                response.map_err(|e| ReplicationLagError::HttpError(e.to_string()))?
-            }
-        };
-
-        // Check status
-        if !response.status().is_success() {
-            return Err(ReplicationLagError::HttpError(format!(
-                "HTTP {}: {}",
-                response.status().as_u16(),
-                response.status().canonical_reason().unwrap_or("Unknown")
-            )));
-        }
-
-        // Read body
-        let body = response
-            .into_body()
-            .collect()
-            .await
-            .map_err(|e| ReplicationLagError::HttpError(e.to_string()))?
-            .to_bytes();
+        let host_header = format!("{}:{}", pod_ip, PATRONI_PORT);
+        let body = fetch_cluster_endpoint(addr, &host_header).await?;
 
         let body_str = String::from_utf8_lossy(&body);
 
@@ -359,6 +316,80 @@ impl ReplicationLagCollector {
     fn process_cluster_info(&self, info: PatroniClusterResponse) -> ReplicationLagStatus {
         process_patroni_cluster_info(info, &self.lag_config)
     }
+}
+
+/// Open an HTTP/1.1 connection to `addr` and GET `/cluster`, returning the raw
+/// response body bytes.
+///
+/// This is a free function (rather than a method on the collector) so that it
+/// can be exercised in unit tests against an arbitrary local listener.
+///
+/// # Lifecycle note
+///
+/// hyper's `http1::handshake` returns a `(SendRequest, Connection)` pair where
+/// the connection future must be polled for any IO to progress. We spawn it on
+/// a dedicated task so it stays alive while we both send the request and
+/// collect the response body. A previous implementation used `tokio::select!`
+/// across the connection future and `send_request`, which dropped the
+/// connection as soon as the response head arrived and truncated bodies to
+/// ~8 KiB. See issue #49.
+async fn fetch_cluster_endpoint(addr: SocketAddr, host_header: &str) -> Result<Bytes> {
+    let stream = TcpStream::connect(addr)
+        .await
+        .map_err(|e| ReplicationLagError::ConnectionError(e.to_string()))?;
+
+    let io = TokioIo::new(stream);
+
+    let (mut sender, conn) = http1::handshake(io)
+        .await
+        .map_err(|e| ReplicationLagError::HttpError(e.to_string()))?;
+
+    let conn_handle = tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            debug!("HTTP connection ended: {e}");
+        }
+    });
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/cluster")
+        .header("Host", host_header)
+        .body(Empty::<Bytes>::new())
+        .map_err(|e| ReplicationLagError::HttpError(e.to_string()))?;
+
+    let response = sender
+        .send_request(req)
+        .await
+        .map_err(|e| ReplicationLagError::HttpError(e.to_string()))?;
+
+    if !response.status().is_success() {
+        return Err(ReplicationLagError::HttpError(format!(
+            "HTTP {}: {}",
+            response.status().as_u16(),
+            response.status().canonical_reason().unwrap_or("Unknown")
+        )));
+    }
+
+    let body = Limited::new(response.into_body(), MAX_PATRONI_RESPONSE_BYTES)
+        .collect()
+        .await
+        .map_err(|e| {
+            if e.downcast_ref::<LengthLimitError>().is_some() {
+                ReplicationLagError::HttpError(format!(
+                    "Patroni response exceeded {MAX_PATRONI_RESPONSE_BYTES} byte limit"
+                ))
+            } else {
+                ReplicationLagError::HttpError(format!("body collect failed: {e}"))
+            }
+        })?
+        .to_bytes();
+
+    // Drop the sender so the connection task observes EOF and exits, then
+    // await the handle so any trailing IO is flushed before we return.
+    drop(sender);
+    let _ = conn_handle.await;
+
+    Ok(body)
 }
 
 /// Validate that a string is valid for use in a Kubernetes label selector.
@@ -506,7 +537,12 @@ pub(crate) async fn collect_replication_lag(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
 mod tests {
     use super::*;
 
@@ -874,5 +910,114 @@ mod tests {
         // sync_standby should be included (it's not "leader")
         assert_eq!(status.replicas.len(), 1);
         assert_eq!(status.replicas[0].pod_name, "test-1");
+    }
+
+    // =========================================================================
+    // HTTP body collection regression tests (issue #49)
+    // =========================================================================
+
+    /// Helper that binds a `TcpListener` to a random local port and serves a
+    /// single HTTP/1.1 response with the given body, then returns the bound
+    /// address. The server reads the request line + headers until `\r\n\r\n`
+    /// before writing the response, so it cooperates with hyper's HTTP/1
+    /// state machine.
+    async fn spawn_oneshot_server(body: Vec<u8>) -> SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+
+            // Drain the request: read bytes until we see end-of-headers.
+            let mut buf = [0_u8; 1024];
+            let mut total = Vec::new();
+            loop {
+                let n = stream.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                total.extend_from_slice(&buf[..n]);
+                if total.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(header.as_bytes()).await.unwrap();
+            stream.write_all(&body).await.unwrap();
+            stream.shutdown().await.unwrap();
+        });
+
+        addr
+    }
+
+    /// Builds a JSON body of approximately `target_size` bytes by repeating
+    /// a synthetic Patroni member entry. The result parses as a valid
+    /// `PatroniClusterResponse`.
+    fn build_large_patroni_body(target_size: usize) -> Vec<u8> {
+        let mut members = String::new();
+        members.push_str(r#"{"name":"leader-0","role":"leader","state":"running"}"#);
+        let mut i = 0;
+        while members.len() < target_size {
+            members.push(',');
+            members.push_str(&format!(
+                r#"{{"name":"replica-{i:04}","role":"replica","lag":{lag},"state":"streaming"}}"#,
+                lag = i * 1024,
+            ));
+            i += 1;
+        }
+        format!(r#"{{"members":[{members}]}}"#).into_bytes()
+    }
+
+    #[tokio::test]
+    async fn fetch_cluster_endpoint_returns_full_body_above_8113_bytes() {
+        // The bug truncated bodies to exactly 8113 bytes. Serve a body that
+        // is comfortably larger and assert the full body comes back.
+        let body = build_large_patroni_body(32 * 1024);
+        assert!(
+            body.len() > 8113,
+            "test body must exceed the historic truncation point"
+        );
+
+        let addr = spawn_oneshot_server(body.clone()).await;
+        let got = fetch_cluster_endpoint(addr, &addr.to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(got.len(), body.len(), "received body was truncated");
+        assert!(got.len() > 8113);
+        assert_eq!(got.as_ref(), body.as_slice());
+
+        // Sanity: the body is still valid Patroni JSON.
+        let parsed: PatroniClusterResponse = serde_json::from_slice(&got).unwrap();
+        assert!(!parsed.members.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_cluster_endpoint_rejects_oversized_body() {
+        // Build a body that exceeds the 1 MiB cap.
+        let body = build_large_patroni_body(MAX_PATRONI_RESPONSE_BYTES + 64 * 1024);
+        assert!(body.len() > MAX_PATRONI_RESPONSE_BYTES);
+
+        let addr = spawn_oneshot_server(body).await;
+        let err = fetch_cluster_endpoint(addr, &addr.to_string())
+            .await
+            .expect_err("oversized body should be rejected");
+
+        match err {
+            ReplicationLagError::HttpError(msg) => {
+                assert!(
+                    msg.contains("exceeded"),
+                    "expected size-limit error, got: {msg}"
+                );
+            }
+            other => panic!("expected HttpError, got: {other:?}"),
+        }
     }
 }
