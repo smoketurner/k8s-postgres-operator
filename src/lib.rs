@@ -7,8 +7,8 @@ pub mod webhooks;
 pub use controller::{
     BackoffConfig, Context, DatabaseContext, DatabaseError, Error, FINALIZER, Result,
     UPGRADE_FINALIZER, UpgradeBackoffConfig, UpgradeContext, UpgradeError, UpgradeResult,
-    database_error_policy, error_policy, reconcile, reconcile_database, reconcile_upgrade,
-    upgrade_error_policy,
+    context::DEFAULT_OPERATOR_NAMESPACE, database_error_policy, error_policy, reconcile,
+    reconcile_database, reconcile_upgrade, upgrade_error_policy,
 };
 pub use crd::{PostgresCluster, PostgresDatabase, PostgresUpgrade};
 pub use health::{HealthState, Metrics};
@@ -82,9 +82,17 @@ where
 /// and reconciles them. It can be called from main.rs or spawned as a
 /// background task during integration tests.
 ///
+/// `operator_namespace` is the namespace the operator pod runs in; it is
+/// threaded into generated NetworkPolicy rules so Helm deployments to
+/// custom namespaces still allow operator-to-Patroni traffic.
+///
 /// If health_state is provided, metrics will be recorded for reconciliations.
-pub async fn run_controller(client: Client, health_state: Option<Arc<HealthState>>) {
-    run_controller_scoped(client, health_state, None).await
+pub async fn run_controller(
+    client: Client,
+    health_state: Option<Arc<HealthState>>,
+    operator_namespace: String,
+) {
+    run_controller_scoped(client, health_state, operator_namespace, None).await
 }
 
 /// Run the operator controller with optional namespace scoping.
@@ -96,6 +104,7 @@ pub async fn run_controller(client: Client, health_state: Option<Arc<HealthState
 pub async fn run_controller_scoped(
     client: Client,
     health_state: Option<Arc<HealthState>>,
+    operator_namespace: String,
     namespace: Option<&str>,
 ) {
     let scope_msg = namespace.unwrap_or("cluster-wide");
@@ -109,7 +118,11 @@ pub async fn run_controller_scoped(
         state.set_ready(true).await;
     }
 
-    let ctx = Arc::new(Context::new(client.clone(), health_state));
+    let ctx = Arc::new(Context::new(
+        client.clone(),
+        health_state,
+        operator_namespace,
+    ));
 
     // Set up APIs for the controller (namespaced or cluster-wide)
     let clusters: Api<PostgresCluster> = scoped_api(client.clone(), namespace);

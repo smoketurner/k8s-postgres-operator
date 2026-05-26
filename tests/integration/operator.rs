@@ -84,14 +84,15 @@ impl ScopedOperator {
 
     async fn run_controllers(client: Client, namespace: &str) {
         use postgres_operator::{
-            run_controller_scoped, run_database_controller_scoped, run_upgrade_controller_scoped,
+            DEFAULT_OPERATOR_NAMESPACE, run_controller_scoped, run_database_controller_scoped,
+            run_upgrade_controller_scoped,
         };
 
         // Run all controllers concurrently using select! (matching production behavior).
         // If any controller exits unexpectedly, panic to fail the test immediately
         // rather than timing out with an unclear error.
         tokio::select! {
-            _ = run_controller_scoped(client.clone(), None, Some(namespace)) => {
+            _ = run_controller_scoped(client.clone(), None, DEFAULT_OPERATOR_NAMESPACE.to_string(), Some(namespace)) => {
                 panic!("Cluster controller exited unexpectedly - controllers should run indefinitely");
             }
             _ = run_database_controller_scoped(client.clone(), Some(namespace)) => {

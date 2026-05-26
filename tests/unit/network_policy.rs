@@ -57,7 +57,7 @@ mod default_behavior_tests {
     #[test]
     fn test_network_policy_always_generated() {
         let cluster = create_test_cluster(None);
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
 
         assert!(np.metadata.name.is_some());
         assert!(np.spec.is_some());
@@ -66,7 +66,7 @@ mod default_behavior_tests {
     #[test]
     fn test_network_policy_name_format() {
         let cluster = create_test_cluster(None);
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
 
         assert_eq!(
             np.metadata.name,
@@ -77,7 +77,7 @@ mod default_behavior_tests {
     #[test]
     fn test_network_policy_namespace() {
         let cluster = create_test_cluster(None);
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
 
         assert_eq!(np.metadata.namespace, Some("test-ns".to_string()));
     }
@@ -85,7 +85,7 @@ mod default_behavior_tests {
     #[test]
     fn test_network_policy_labels() {
         let cluster = create_test_cluster(None);
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
 
         let labels = np.metadata.labels.as_ref().unwrap();
         assert_eq!(
@@ -101,7 +101,7 @@ mod default_behavior_tests {
     #[test]
     fn test_network_policy_owner_reference() {
         let cluster = create_test_cluster(None);
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
 
         let owner_refs = np.metadata.owner_references.as_ref().unwrap();
         assert_eq!(owner_refs.len(), 1);
@@ -112,7 +112,7 @@ mod default_behavior_tests {
     #[test]
     fn test_network_policy_pod_selector() {
         let cluster = create_test_cluster(None);
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
 
         let spec = np.spec.unwrap();
         let pod_selector = spec.pod_selector.unwrap();
@@ -127,7 +127,7 @@ mod default_behavior_tests {
     #[test]
     fn test_network_policy_policy_types() {
         let cluster = create_test_cluster(None);
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
 
         let spec = np.spec.unwrap();
         let policy_types = spec.policy_types.unwrap();
@@ -147,7 +147,7 @@ mod ingress_rules_tests {
     #[test]
     fn test_same_namespace_access_allowed() {
         let cluster = create_test_cluster(None);
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
 
         let spec = np.spec.unwrap();
         let ingress = spec.ingress.unwrap();
@@ -183,7 +183,7 @@ mod ingress_rules_tests {
     #[test]
     fn test_patroni_api_internal_only() {
         let cluster = create_test_cluster(None);
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
 
         let spec = np.spec.unwrap();
         let ingress = spec.ingress.unwrap();
@@ -222,7 +222,7 @@ mod ingress_rules_tests {
     #[test]
     fn test_operator_namespace_always_allowed() {
         let cluster = create_test_cluster(None);
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
 
         let spec = np.spec.unwrap();
         let ingress = spec.ingress.unwrap();
@@ -274,7 +274,7 @@ mod ingress_rules_tests {
     #[test]
     fn test_default_no_external_access() {
         let cluster = create_test_cluster(None);
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
 
         let spec = np.spec.unwrap();
         let ingress = spec.ingress.unwrap();
@@ -313,7 +313,7 @@ mod external_access_tests {
             allow_external_access: true,
             allow_from: vec![],
         }));
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
 
         let spec = np.spec.unwrap();
         let ingress = spec.ingress.unwrap();
@@ -347,7 +347,7 @@ mod external_access_tests {
             allow_external_access: true,
             allow_from: vec![],
         }));
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
 
         let spec = np.spec.unwrap();
         let ingress = spec.ingress.unwrap();
@@ -376,7 +376,7 @@ mod external_access_tests {
             allow_external_access: false,
             allow_from: vec![],
         }));
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
 
         let spec = np.spec.unwrap();
         let ingress = spec.ingress.unwrap();
@@ -417,7 +417,7 @@ mod cross_namespace_access_tests {
                 pod_selector: None,
             }],
         }));
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
 
         let spec = np.spec.unwrap();
         let ingress = spec.ingress.unwrap();
@@ -457,7 +457,7 @@ mod cross_namespace_access_tests {
                 }),
             }],
         }));
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
 
         let spec = np.spec.unwrap();
         let ingress = spec.ingress.unwrap();
@@ -494,7 +494,7 @@ mod cross_namespace_access_tests {
                 pod_selector: None,
             }],
         }));
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
 
         let spec = np.spec.unwrap();
         let ingress = spec.ingress.unwrap();
@@ -542,7 +542,7 @@ mod cross_namespace_access_tests {
                 },
             ],
         }));
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
 
         let spec = np.spec.unwrap();
         let ingress = spec.ingress.unwrap();
@@ -562,7 +562,7 @@ mod egress_rules_tests {
     #[test]
     fn test_replication_egress_allowed() {
         let cluster = create_test_cluster(None);
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
 
         let spec = np.spec.unwrap();
         let egress = spec.egress.unwrap();
@@ -590,7 +590,7 @@ mod egress_rules_tests {
     #[test]
     fn test_dns_egress_allowed() {
         let cluster = create_test_cluster(None);
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
 
         let spec = np.spec.unwrap();
         let egress = spec.egress.unwrap();
@@ -612,7 +612,7 @@ mod egress_rules_tests {
     #[test]
     fn test_kubernetes_api_egress_allowed() {
         let cluster = create_test_cluster(None);
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
 
         let spec = np.spec.unwrap();
         let egress = spec.egress.unwrap();
@@ -640,7 +640,7 @@ mod egress_rules_tests {
     #[test]
     fn test_egress_rule_count() {
         let cluster = create_test_cluster(None);
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
 
         let spec = np.spec.unwrap();
         let egress = spec.egress.unwrap();
@@ -797,7 +797,7 @@ mod edge_case_tests {
             allow_external_access: false,
             allow_from: vec![],
         }));
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
 
         let spec = np.spec.unwrap();
         let ingress = spec.ingress.unwrap();
@@ -822,7 +822,7 @@ mod edge_case_tests {
                 pod_selector: None,
             }],
         }));
-        let np = generate_network_policy(&cluster);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
 
         let spec = np.spec.unwrap();
         let ingress = spec.ingress.unwrap();
@@ -842,7 +842,7 @@ mod edge_case_tests {
             let mut cluster = create_test_cluster(None);
             cluster.metadata.namespace = Some(ns.to_string());
 
-            let np = generate_network_policy(&cluster);
+            let np = generate_network_policy(&cluster, "postgres-operator-system");
             assert_eq!(np.metadata.namespace, Some(ns.to_string()));
 
             // Verify same-namespace rule uses correct namespace
@@ -873,7 +873,7 @@ mod edge_case_tests {
             let mut cluster = create_test_cluster(None);
             cluster.metadata.name = Some(name.to_string());
 
-            let np = generate_network_policy(&cluster);
+            let np = generate_network_policy(&cluster, "postgres-operator-system");
             assert_eq!(np.metadata.name, Some(format!("{}-network-policy", name)));
         }
     }

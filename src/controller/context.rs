@@ -14,6 +14,9 @@ use crate::health::HealthState;
 /// Field manager name for the operator
 pub(crate) const FIELD_MANAGER: &str = "postgres-operator";
 
+/// Default operator namespace when `POD_NAMESPACE` is not set.
+pub const DEFAULT_OPERATOR_NAMESPACE: &str = "postgres-operator-system";
+
 /// Shared context for the controller
 #[derive(Clone)]
 pub struct Context {
@@ -23,11 +26,20 @@ pub struct Context {
     reporter: Reporter,
     /// Health state for metrics (optional for tests)
     pub health_state: Option<Arc<HealthState>>,
+    /// Namespace the operator pod is running in.
+    ///
+    /// Used to populate NetworkPolicy rules that allow operator-to-Patroni
+    /// traffic (port 8008) regardless of where the operator is deployed.
+    pub operator_namespace: String,
 }
 
 impl Context {
     /// Create a new context with the given Kubernetes client
-    pub fn new(client: Client, health_state: Option<Arc<HealthState>>) -> Self {
+    pub fn new(
+        client: Client,
+        health_state: Option<Arc<HealthState>>,
+        operator_namespace: String,
+    ) -> Self {
         Self {
             client,
             reporter: Reporter {
@@ -35,6 +47,7 @@ impl Context {
                 instance: std::env::var("POD_NAME").ok(),
             },
             health_state,
+            operator_namespace,
         }
     }
 

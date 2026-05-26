@@ -181,8 +181,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let controller_handle = {
         let health_state = health_state.clone();
         let controller_client = client.clone();
+        let operator_namespace = namespace.clone();
         tokio::spawn(async move {
-            run_controller(controller_client, Some(health_state)).await;
+            run_controller(controller_client, Some(health_state), operator_namespace).await;
         })
     };
 
