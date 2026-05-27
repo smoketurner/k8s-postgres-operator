@@ -206,7 +206,7 @@ Generates credential secrets:
 
 - `postgres` user password
 - `replication` user password
-- Passwords auto-generated if not specified
+- Passwords always auto-generated on secret creation
 
 ## Design Decisions
 
