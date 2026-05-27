@@ -125,7 +125,7 @@ The operator implements a formal finite state machine (FSM) for cluster lifecycl
 | Failed | Needs manual intervention | Recovery initiated |
 | Deleting | Cleanup in progress | Resources removed |
 
-#### Status Management (`status.rs`)
+#### Status Management (`cluster_status.rs`)
 
 The operator maintains Kubernetes-standard conditions:
 

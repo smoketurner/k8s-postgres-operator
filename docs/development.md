@@ -8,7 +8,7 @@ This guide covers setting up a development environment and contributing to the P
 
 | Tool | Version | Purpose |
 |------|---------|---------|
-| Rust | 1.92+ | Build the operator (uses Rust 2024 edition) |
+| Rust | 1.95+ | Build the operator (uses Rust 2024 edition) |
 | Docker | 20.10+ | Build container images |
 | kubectl | 1.35+ | Interact with Kubernetes cluster |
 | kind/k3d/minikube | Latest | Local Kubernetes cluster (must support K8s 1.35+) |
@@ -197,12 +197,12 @@ make fmt && make lint && make test
 │   │   ├── upgrade_reconciler.rs  # PostgresUpgrade reconciliation
 │   │   ├── upgrade_state_machine.rs # Upgrade lifecycle FSM
 │   │   ├── upgrade_error.rs       # Upgrade error types
-│   │   ├── status.rs              # Status/condition management
+│   │   ├── cluster_status.rs      # Status/condition management
 │   │   ├── context.rs             # Shared context
-│   │   ├── validation.rs          # Spec validation logic
+│   │   ├── cluster_validation.rs  # Spec validation logic
 │   │   ├── cleanup.rs             # Resource cleanup utilities
-│   │   ├── replication_lag.rs     # Replication lag monitoring
-│   │   └── backup_status.rs       # Backup status collection
+│   │   ├── cluster_replication_lag.rs # Replication lag monitoring
+│   │   └── cluster_backup_status.rs   # Backup status collection
 │   ├── crd/
 │   │   ├── mod.rs                 # Module exports
 │   │   ├── postgres_cluster.rs    # PostgresCluster CRD

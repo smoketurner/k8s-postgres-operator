@@ -39,7 +39,7 @@ check: ## Run cargo check
 
 ##@ Testing
 
-test: ## Run unit tests
+test: ## Run unit, proptest, and integration test binaries (non-ignored)
 	$(CARGO) test
 
 audit: ## Run security audit on dependencies
