@@ -175,6 +175,7 @@ Each module generates Kubernetes resources:
 - `backup.rs`: WAL-G backup configuration (encryption required)
 - `logical_backup.rs`: CronJob-based `pg_dumpall` logical backup (scheduled full SQL dumps to S3)
 - `ddl_audit.rs`: Server-side DDL audit (event trigger + audit table) installed on source during the upgrade replication window; cutover refused if non-zero count unless `spec.strategy.acknowledgeDDL=true`
+- `lsn.rs`: `Lsn(u64)` newtype for PostgreSQL Log Sequence Numbers — parses `"<hex>/<hex>"`, impls `PartialOrd`/`Sub` for type-safe comparisons in the cutover-readiness gate
 - `certificate.rs`: cert-manager Certificate CR for TLS
 - `common.rs`: Standard labels, owner references, user label merging
 - `scaled_object.rs`: KEDA ScaledObject for auto-scaling (CPU/connection metrics)

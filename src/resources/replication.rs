@@ -133,9 +133,9 @@ pub struct LagStatus {
     /// Estimated lag in seconds (based on write rate)
     pub lag_seconds: Option<i64>,
     /// Current LSN on source
-    pub source_lsn: String,
-    /// Current LSN on target
-    pub target_lsn: String,
+    pub source_lsn: crate::resources::lsn::Lsn,
+    /// Current LSN on target (the slot's `confirmed_flush_lsn`)
+    pub target_lsn: crate::resources::lsn::Lsn,
     /// Whether replication is in sync (lag is zero)
     pub in_sync: bool,
 }
@@ -473,9 +473,14 @@ pub async fn get_replication_lag(
     let row = row
         .ok_or_else(|| ReplicationError::ReplicationSlotNotFound(subscription_name.to_string()))?;
 
-    let source_lsn: String = row.get("source_lsn");
-    let target_lsn: String = row.get("target_lsn");
+    let source_lsn_str: String = row.get("source_lsn");
+    let target_lsn_str: String = row.get("target_lsn");
     let lag_bytes: i64 = row.get("lag_bytes");
+
+    let source_lsn = crate::resources::lsn::Lsn::parse(&source_lsn_str)
+        .map_err(|e| ReplicationError::InvalidLsn(format!("source_lsn={source_lsn_str:?}: {e}")))?;
+    let target_lsn = crate::resources::lsn::Lsn::parse(&target_lsn_str)
+        .map_err(|e| ReplicationError::InvalidLsn(format!("target_lsn={target_lsn_str:?}: {e}")))?;
 
     // Estimate lag in seconds based on typical write rate (rough estimate)
     let lag_seconds = if lag_bytes > 0 {
@@ -974,11 +979,12 @@ mod tests {
 
     #[test]
     fn test_lag_status_structure() {
+        use crate::resources::lsn::Lsn;
         let lag_status = LagStatus {
             lag_bytes: 1024,
             lag_seconds: Some(1),
-            source_lsn: "0/1000000".to_string(),
-            target_lsn: "0/0FF0000".to_string(),
+            source_lsn: Lsn::parse("0/1000000").unwrap(),
+            target_lsn: Lsn::parse("0/0FF0000").unwrap(),
             in_sync: false,
         };
 
@@ -988,8 +994,8 @@ mod tests {
         let synced_status = LagStatus {
             lag_bytes: 0,
             lag_seconds: Some(0),
-            source_lsn: "0/1000000".to_string(),
-            target_lsn: "0/1000000".to_string(),
+            source_lsn: Lsn::parse("0/1000000").unwrap(),
+            target_lsn: Lsn::parse("0/1000000").unwrap(),
             in_sync: true,
         };
 

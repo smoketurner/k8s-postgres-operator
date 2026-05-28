@@ -432,6 +432,15 @@ pub struct PostgresUpgradeStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cutover_started_at: Option<String>,
 
+    /// Timestamp when the source cluster was put into read-only mode by
+    /// the operator (RFC3339 format). Set during the `Verifying` phase
+    /// once row counts pass and the LSN-distance gate is met; presence
+    /// of this field is the signal that the source is no longer
+    /// accepting writes. Cleared on `RolledBack` when the source is
+    /// returned to read-write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_read_only_at: Option<String>,
+
     /// Source cluster information
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_cluster: Option<ClusterStatus>,
@@ -607,11 +616,11 @@ pub struct ReplicationStatus {
 
     /// Current WAL LSN on source
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_lsn: Option<String>,
+    pub source_lsn: Option<crate::resources::lsn::Lsn>,
 
     /// Received WAL LSN on target subscription
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_lsn: Option<String>,
+    pub target_lsn: Option<crate::resources::lsn::Lsn>,
 
     /// Whether LSN positions are in sync
     #[serde(default, skip_serializing_if = "Option::is_none")]

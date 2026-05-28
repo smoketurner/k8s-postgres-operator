@@ -540,6 +540,11 @@ async fn build_transition_context(
     // Get configuration
     tc.cutover_mode = upgrade.spec.strategy.cutover.mode;
     tc.ddl_acknowledged = upgrade.spec.strategy.acknowledge_ddl;
+    tc.source_read_only = upgrade
+        .status
+        .as_ref()
+        .and_then(|s| s.source_read_only_at.as_ref())
+        .is_some();
 
     tc.required_verification_passes = upgrade.spec.strategy.pre_checks.min_verification_passes;
 
@@ -759,20 +764,11 @@ async fn execute_phase_transition(
         }
 
         (UpgradePhase::Verifying, UpgradePhase::SyncingSequences) => {
-            // Set source to read-only before syncing sequences
-            let source_name = &upgrade.spec.source_cluster.name;
-            let source_ns = upgrade
-                .spec
-                .source_cluster
-                .namespace
-                .as_deref()
-                .unwrap_or(ns);
-
-            // Connect to source and set read-only
-            let source_conn =
-                PostgresConnection::connect_primary(&ctx.client, source_ns, source_name).await?;
-            replication::set_source_readonly(&source_conn).await?;
-
+            // Source is already read-only at this point — `take_source_read_only`
+            // ran during Verifying monitoring once row counts converged and
+            // LSN lag hit zero. `verification_complete()` (which gates this
+            // transition) requires both, so re-asserting here would be
+            // redundant.
             sync_sequences(upgrade, ctx, ns).await?;
         }
 
@@ -815,6 +811,12 @@ async fn execute_phase_monitoring(
         }
 
         UpgradePhase::Verifying => {
+            // Refresh replication lag so the LSN-distance gate decides
+            // against fresh data, not whatever was last recorded while we
+            // were still in Replicating.
+            let lag_status = get_replication_lag(upgrade, ctx, ns).await?;
+            update_replication_status(upgrade, ctx, ns, &lag_status).await?;
+
             // Run row count verification
             let verification = run_verification(upgrade, ctx, ns).await?;
             debug!(
@@ -825,6 +827,16 @@ async fn execute_phase_monitoring(
             );
             update_verification_status(upgrade, ctx, ns, &verification).await?;
             poll_ddl_audit_status(upgrade, ctx, ns).await?;
+
+            // Once row counts have converged and replication lag is zero,
+            // promote the source to read-only. This is what closes the
+            // last-mile race: any writes that would have arrived between
+            // here and `SyncingSequences` are now refused. The
+            // `verification_complete()` guard on the FSM transition then
+            // waits for a *re-checked* zero lag (the next monitoring tick
+            // will refresh and confirm) before firing.
+            promote_source_to_read_only_if_ready(upgrade, ctx, ns, &lag_status, &verification)
+                .await?;
         }
 
         _ => {
@@ -1518,6 +1530,104 @@ async fn fetch_target_storage_size(
             None
         }
     }
+}
+
+/// If row counts have converged and replication lag is zero, take the
+/// source primary read-only and record the timestamp on the upgrade
+/// status. Idempotent — re-running once `source_read_only_at` is set is
+/// a no-op (we don't want to flap the source between read-only and
+/// read-write).
+///
+/// This closes the "last-mile" race: PostgreSQL logical replication's
+/// `pg_current_wal_lsn() - confirmed_flush_lsn` only converges to zero
+/// at a moment in time, not durably. Without freezing source writes at
+/// that moment, by the time we begin sequence sync the source has
+/// already advanced and the cutover would lose data.
+async fn promote_source_to_read_only_if_ready(
+    upgrade: &PostgresUpgrade,
+    ctx: &UpgradeContext,
+    ns: &str,
+    lag: &LagStatus,
+    verification: &RowCountVerification,
+) -> UpgradeResult<()> {
+    // Already done — don't re-issue ALTER SYSTEM.
+    if upgrade
+        .status
+        .as_ref()
+        .and_then(|s| s.source_read_only_at.as_ref())
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    // `consecutive_passes` lives on the cumulative VerificationStatus
+    // (incremented by `update_verification_status`), not on this single
+    // run's result. Use the most recent status snapshot since it's been
+    // patched just before this helper is called.
+    let required_passes = upgrade.spec.strategy.pre_checks.min_verification_passes;
+    let consecutive_passes = upgrade
+        .status
+        .as_ref()
+        .and_then(|s| s.verification.as_ref())
+        .map(|v| v.consecutive_passes)
+        .unwrap_or(0);
+    let row_counts_ok =
+        consecutive_passes >= required_passes && verification.tables_mismatched == 0;
+    if !row_counts_ok || !lag.in_sync {
+        debug!(
+            "Not ready to promote source to read-only yet: passes={} required={} \
+             mismatches={} lag_bytes={} in_sync={}",
+            consecutive_passes,
+            required_passes,
+            verification.tables_mismatched,
+            lag.lag_bytes,
+            lag.in_sync
+        );
+        return Ok(());
+    }
+
+    let source_name = &upgrade.spec.source_cluster.name;
+    let source_ns = upgrade
+        .spec
+        .source_cluster
+        .namespace
+        .as_deref()
+        .unwrap_or(ns);
+
+    info!(
+        "Verification complete and lag at zero; promoting source {}/{} to read-only \
+         (source_lsn={}, target_lsn={})",
+        source_ns, source_name, lag.source_lsn, lag.target_lsn
+    );
+
+    let source_conn =
+        PostgresConnection::connect_primary(&ctx.client, source_ns, source_name).await?;
+    replication::set_source_readonly(&source_conn).await?;
+
+    let now = Timestamp::now().to_string();
+    let api: Api<PostgresUpgrade> = Api::namespaced(ctx.client.clone(), ns);
+    let patch = serde_json::json!({
+        "status": { "sourceReadOnlyAt": now }
+    });
+    api.patch_status(
+        &upgrade.name_any(),
+        &PatchParams::default(),
+        &Patch::Merge(&patch),
+    )
+    .await?;
+
+    ctx.publish_normal_event(
+        upgrade,
+        "SourceReadOnly",
+        "PromoteSourceReadOnly",
+        Some(format!(
+            "Source {source_ns}/{source_name} promoted to read-only; sequence sync will \
+             proceed once the next monitoring tick re-confirms zero LSN distance"
+        )),
+    )
+    .await;
+
+    Ok(())
 }
 
 /// Poll the source's DDL audit table for the current event count, patch
@@ -2455,8 +2565,8 @@ async fn update_replication_status(
         } else {
             ReplicationState::Syncing
         },
-        source_lsn: Some(lag.source_lsn.clone()),
-        target_lsn: Some(lag.target_lsn.clone()),
+        source_lsn: Some(lag.source_lsn),
+        target_lsn: Some(lag.target_lsn),
         lag_bytes: Some(lag.lag_bytes),
         lag_seconds: lag.lag_seconds,
         lsn_in_sync: Some(lag.in_sync),
