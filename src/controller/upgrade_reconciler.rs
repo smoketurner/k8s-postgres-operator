@@ -147,6 +147,7 @@ pub async fn reconcile_upgrade(
                     "phaseStartedAt": now,
                     "completedAt": now,
                     "lastError": format!("Source cluster {}/{} not found", source_ns, source_name),
+                    "reason": "UpgradeFailed",
                     "message": err_msg,
                     "conditions": conditions,
                 }
@@ -1495,6 +1496,11 @@ async fn update_phase(
         && phase != UpgradePhase::Pending;
 
     let conditions = conditions_for_phase(upgrade, phase, None);
+    let (reason, message) = conditions
+        .iter()
+        .find(|c| c.type_ == "Ready")
+        .map(|c| (c.reason.clone(), c.message.clone()))
+        .unwrap_or_default();
 
     let patch = match (is_terminal, is_starting) {
         (true, true) => serde_json::json!({
@@ -1505,6 +1511,8 @@ async fn update_phase(
                 "completedAt": now,
                 "startedAt": now,
                 "conditions": conditions,
+                "reason": reason,
+                "message": message,
             }
         }),
         (true, false) => serde_json::json!({
@@ -1514,6 +1522,8 @@ async fn update_phase(
                 "observedGeneration": upgrade.metadata.generation,
                 "completedAt": now,
                 "conditions": conditions,
+                "reason": reason,
+                "message": message,
             }
         }),
         (false, true) => serde_json::json!({
@@ -1523,6 +1533,8 @@ async fn update_phase(
                 "observedGeneration": upgrade.metadata.generation,
                 "startedAt": now,
                 "conditions": conditions,
+                "reason": reason,
+                "message": message,
             }
         }),
         (false, false) => serde_json::json!({
@@ -1531,6 +1543,8 @@ async fn update_phase(
                 "phaseStartedAt": now,
                 "observedGeneration": upgrade.metadata.generation,
                 "conditions": conditions,
+                "reason": reason,
+                "message": message,
             }
         }),
     };

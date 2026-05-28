@@ -35,6 +35,7 @@ use std::collections::BTreeMap;
     printcolumn = r#"{"name":"Source", "type":"string", "jsonPath":".spec.sourceCluster.name"}"#,
     printcolumn = r#"{"name":"TargetVer", "type":"string", "jsonPath":".spec.targetVersion"}"#,
     printcolumn = r#"{"name":"Phase", "type":"string", "jsonPath":".status.phase"}"#,
+    printcolumn = r#"{"name":"Reason", "type":"string", "jsonPath":".status.reason", "priority":1}"#,
     printcolumn = r#"{"name":"Lag", "type":"string", "jsonPath":".status.replication.lagSeconds"}"#,
     printcolumn = r#"{"name":"Age", "type":"date", "jsonPath":".metadata.creationTimestamp"}"#
 )]
@@ -379,6 +380,11 @@ pub struct PostgresUpgradeStatus {
     /// Timestamp when the current phase started (RFC3339 format)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase_started_at: Option<String>,
+
+    /// Short CamelCase explanation paired with `phase` and `message`.
+    /// Mirrors the `reason` of the most recent Ready condition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 
     /// Status message for the current phase
     #[serde(default, skip_serializing_if = "Option::is_none")]

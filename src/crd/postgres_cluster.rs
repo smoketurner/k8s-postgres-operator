@@ -80,6 +80,7 @@ impl PostgresVersion {
     printcolumn = r#"{"name":"Version", "type":"string", "jsonPath":".spec.version"}"#,
     printcolumn = r#"{"name":"Replicas", "type":"integer", "jsonPath":".spec.replicas"}"#,
     printcolumn = r#"{"name":"Phase", "type":"string", "jsonPath":".status.phase"}"#,
+    printcolumn = r#"{"name":"Reason", "type":"string", "jsonPath":".status.reason", "priority":1}"#,
     printcolumn = r#"{"name":"Successor", "type":"string", "jsonPath":".status.successor.name", "priority":1}"#,
     printcolumn = r#"{"name":"Ready", "type":"integer", "jsonPath":".status.readyReplicas"}"#,
     printcolumn = r#"{"name":"Age", "type":"date", "jsonPath":".metadata.creationTimestamp"}"#
@@ -1176,6 +1177,16 @@ pub struct PostgresClusterStatus {
     /// Kubernetes-style conditions
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
+
+    /// Short CamelCase explanation paired with `phase`. Mirrors the
+    /// `reason` of the most recent Ready condition so `kubectl get` callers
+    /// see the current state without parsing the conditions array.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+
+    /// Human-readable explanation paired with `phase` and `reason`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 
     /// Current retry count for exponential backoff
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
     printcolumn = r#"{"name":"Cluster", "type":"string", "jsonPath":".spec.clusterRef.name"}"#,
     printcolumn = r#"{"name":"Database", "type":"string", "jsonPath":".spec.database.name"}"#,
     printcolumn = r#"{"name":"Phase", "type":"string", "jsonPath":".status.phase"}"#,
+    printcolumn = r#"{"name":"Reason", "type":"string", "jsonPath":".status.reason", "priority":1}"#,
     printcolumn = r#"{"name":"Age", "type":"date", "jsonPath":".metadata.creationTimestamp"}"#
 )]
 // CEL validation rules - validated by API server before admission
@@ -240,6 +241,15 @@ pub struct PostgresDatabaseStatus {
     /// Conditions representing the current state
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
+
+    /// Short CamelCase explanation paired with `phase`. Mirrors the
+    /// `reason` of the most recent Ready condition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+
+    /// Human-readable explanation paired with `phase` and `reason`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 
     /// Connection information for the database
     #[serde(default, skip_serializing_if = "Option::is_none")]

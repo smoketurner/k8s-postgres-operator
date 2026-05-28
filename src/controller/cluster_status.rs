@@ -47,6 +47,18 @@ fn bool_status(value: bool) -> &'static str {
     }
 }
 
+/// Extract the Ready condition's `reason` and `message` so they can be
+/// surfaced as top-level status fields. Keeps `status.reason` /
+/// `status.message` in lockstep with the authoritative condition entry
+/// instead of maintaining two sources of truth.
+pub fn ready_summary(conditions: &[Condition]) -> (Option<String>, Option<String>) {
+    conditions
+        .iter()
+        .find(|c| c.type_ == condition_types::READY)
+        .map(|c| (Some(c.reason.clone()), Some(c.message.clone())))
+        .unwrap_or_default()
+}
+
 /// Builder for creating and updating status conditions on a PostgresCluster.
 ///
 /// Wraps [`set_status_condition`] so that callers get deduplication,
@@ -335,6 +347,7 @@ impl<'a> StatusManager<'a> {
                 )
             };
 
+        let (reason, message) = ready_summary(&conditions);
         let status = PostgresClusterStatus {
             phase: ClusterPhase::Running,
             ready_replicas,
@@ -344,6 +357,8 @@ impl<'a> StatusManager<'a> {
             backup: final_backup_status,
             observed_generation: generation,
             conditions,
+            reason,
+            message,
             // Clear error state on successful running
             retry_count: Some(0),
             last_error: None,
@@ -419,6 +434,7 @@ impl<'a> StatusManager<'a> {
         // Track when we entered this phase
         let phase_started_at = self.get_phase_started_at(ClusterPhase::Creating);
 
+        let (reason, message) = ready_summary(&conditions);
         let status = PostgresClusterStatus {
             phase: ClusterPhase::Creating,
             ready_replicas,
@@ -428,6 +444,8 @@ impl<'a> StatusManager<'a> {
             backup: self.get_backup_status(),
             observed_generation: generation,
             conditions,
+            reason,
+            message,
             retry_count: None,
             last_error: None,
             last_error_time: None,
@@ -509,6 +527,7 @@ impl<'a> StatusManager<'a> {
         // Track when we entered this phase
         let phase_started_at = self.get_phase_started_at(ClusterPhase::Updating);
 
+        let (reason, message) = ready_summary(&conditions);
         let status = PostgresClusterStatus {
             phase: ClusterPhase::Updating,
             ready_replicas,
@@ -518,6 +537,8 @@ impl<'a> StatusManager<'a> {
             backup: self.get_backup_status(),
             observed_generation: generation,
             conditions,
+            reason,
+            message,
             retry_count: self.cluster.status.as_ref().and_then(|s| s.retry_count),
             last_error: None,
             last_error_time: None,
@@ -614,6 +635,8 @@ impl<'a> StatusManager<'a> {
             backup: self.get_backup_status(),
             observed_generation: generation,
             conditions,
+            reason: Some(reason.to_string()),
+            message: Some(message.to_string()),
             retry_count: Some(current_retry + 1),
             last_error: Some(message.to_string()),
             last_error_time: Some(Timestamp::now().to_string()),
@@ -670,6 +693,7 @@ impl<'a> StatusManager<'a> {
         // Track when we entered this phase
         let phase_started_at = self.get_phase_started_at(ClusterPhase::Deleting);
 
+        let (reason, message) = ready_summary(&conditions);
         let status = PostgresClusterStatus {
             phase: ClusterPhase::Deleting,
             ready_replicas: 0,
@@ -679,6 +703,8 @@ impl<'a> StatusManager<'a> {
             backup: self.get_backup_status(),
             observed_generation: generation,
             conditions,
+            reason,
+            message,
             retry_count: None,
             last_error: None,
             last_error_time: None,
