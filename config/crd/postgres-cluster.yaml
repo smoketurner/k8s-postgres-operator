@@ -547,6 +547,24 @@ spec:
                                       type: array
                                       items:
                                         type: string
+                sidecars:
+                  type: array
+                  description: |
+                    Additional sidecar containers to inject into every Spilo pod.
+                    Accepts the full Kubernetes Container shape (image, env, ports,
+                    resources, volumeMounts, securityContext, probes, lifecycle, etc.).
+                    Names that collide with operator-managed containers
+                    (`postgres`, `init-permissions`) are rejected by the admission webhook.
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                    required:
+                      - name
+                    properties:
+                      name:
+                        type: string
+                        description: Container name (must be unique within the pod)
+                        minLength: 1
             status:
               type: object
               properties:

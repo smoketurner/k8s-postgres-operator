@@ -641,6 +641,7 @@ impl PostgresClusterBuilder {
                 restore: None,
                 scaling: self.scaling,
                 network_policy: self.network_policy,
+                sidecars: vec![],
             },
             status: None,
         }

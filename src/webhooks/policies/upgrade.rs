@@ -354,6 +354,7 @@ mod tests {
                 restore: None,
                 scaling: None,
                 network_policy: None,
+                sidecars: vec![],
             },
             status: Some(PostgresClusterStatus {
                 phase,

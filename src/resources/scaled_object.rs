@@ -546,6 +546,7 @@ mod tests {
                 service: None,
                 restore: None,
                 network_policy: None,
+                sidecars: vec![],
             },
             status: None,
         }

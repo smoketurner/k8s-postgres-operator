@@ -160,6 +160,7 @@ mod tests {
                 service: None,
                 restore: None,
                 scaling: None,
+                sidecars: vec![],
             },
             status: None,
         }

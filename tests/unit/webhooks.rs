@@ -49,6 +49,7 @@ fn create_test_cluster() -> PostgresCluster {
             restore: None,
             scaling: None,
             network_policy: None,
+            sidecars: vec![],
         },
         status: None,
     }

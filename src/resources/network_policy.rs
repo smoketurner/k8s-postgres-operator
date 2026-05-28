@@ -305,6 +305,7 @@ mod tests {
                 restore: None,
                 scaling: None,
                 network_policy,
+                sidecars: vec![],
             },
             status: None,
         }
