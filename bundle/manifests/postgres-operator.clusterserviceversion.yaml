@@ -1,0 +1,491 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: ClusterServiceVersion
+metadata:
+  annotations:
+    alm-examples: |-
+      [
+        {
+          "apiVersion": "postgres-operator.smoketurner.com/v1alpha1",
+          "kind": "PostgresCluster",
+          "metadata": { "name": "pg-sample" },
+          "spec": {
+            "version": "16",
+            "replicas": 3,
+            "storage": { "size": "10Gi" },
+            "tls": {
+              "enabled": true,
+              "issuerRef": { "name": "selfsigned-cluster-issuer", "kind": "ClusterIssuer" }
+            }
+          }
+        },
+        {
+          "apiVersion": "postgres-operator.smoketurner.com/v1alpha1",
+          "kind": "PostgresDatabase",
+          "metadata": { "name": "app-db" },
+          "spec": {
+            "clusterRef": { "name": "pg-sample" },
+            "database": { "name": "app", "owner": "app_owner" },
+            "roles": [
+              {
+                "name": "app_user",
+                "secretName": "app-db-credentials",
+                "privileges": ["LOGIN"]
+              }
+            ]
+          }
+        },
+        {
+          "apiVersion": "postgres-operator.smoketurner.com/v1alpha1",
+          "kind": "PostgresUpgrade",
+          "metadata": { "name": "pg-sample-upgrade" },
+          "spec": {
+            "sourceCluster": { "name": "pg-sample" },
+            "targetVersion": "17"
+          }
+        }
+      ]
+    capabilities: Basic Install
+    categories: Database
+    containerImage: ghcr.io/smoketurner/k8s-postgres-operator:0.2.0
+    createdAt: "2026-05-28T15:57:02Z"
+    description: |
+      Manages PostgreSQL clusters using Spilo (Patroni + PostgreSQL + WAL-G)
+      for high availability, with declarative database/role provisioning,
+      blue-green major version upgrades, scheduled backups, and PgBouncer
+      connection pooling.
+    operators.operatorframework.io/builder: operator-sdk-v1.42.2
+    operators.operatorframework.io/project_layout: unknown
+    repository: https://github.com/smoketurner/k8s-postgres-operator
+    support: https://github.com/smoketurner/k8s-postgres-operator/issues
+  name: postgres-operator.v0.2.0
+  namespace: placeholder
+spec:
+  apiservicedefinitions: {}
+  customresourcedefinitions:
+    owned:
+    - kind: PostgresCluster
+      name: postgresclusters.postgres-operator.smoketurner.com
+      version: v1alpha1
+    - kind: PostgresDatabase
+      name: postgresdatabases.postgres-operator.smoketurner.com
+      version: v1alpha1
+    - kind: PostgresUpgrade
+      name: postgresupgrades.postgres-operator.smoketurner.com
+      version: v1alpha1
+  description: |
+    The **PostgreSQL Operator** manages production-grade PostgreSQL clusters
+    on Kubernetes. Built on [Spilo](https://github.com/zalando/spilo)
+    (PostgreSQL + Patroni + WAL-G), it provides:
+
+    ### High availability
+    - Automatic primary failover via Patroni
+    - Configurable replica count and topology spread
+    - PodDisruptionBudget generated per cluster
+
+    ### Declarative data management
+    - **PostgresCluster** — the cluster itself (Spilo StatefulSet, Patroni DCS, services)
+    - **PostgresDatabase** — databases, roles, grants, extensions, with per-role credential Secrets
+    - **PostgresUpgrade** — blue-green major-version upgrades via logical replication, with verification + rollback
+
+    ### Backups
+    - Continuous WAL archiving via WAL-G to S3 / S3-compatible storage
+    - Encryption **required** for backups (security by default)
+    - Scheduled base backups + optional logical (`pg_dumpall`) backups via CronJob
+
+    ### Connection pooling
+    - PgBouncer Deployment per cluster, session/transaction/statement pool modes
+    - Optional replica pooler for read-heavy workloads
+
+    ### Kubernetes-native UX
+    - `kubectl scale postgrescluster/name --replicas=N` (scale subresource)
+    - `kubectl get all` / `kubectl get databases` integration via CRD categories
+    - Standard `metav1.Condition` status + Kubernetes Events on phase transitions
+    - Prometheus Operator `ServiceMonitor` integration
+
+    ### Safety by default
+    - TLS enabled by default for PostgreSQL connections (cert-manager Issuer required)
+    - Backup encryption required
+    - ValidatingAdmissionWebhook enforces backup, TLS, immutability, and production-namespace policies
+    - PostgreSQL version downgrades on Running clusters are rejected
+
+    ## Prerequisites
+    - **cert-manager** v1.0+ — required for webhook TLS and per-cluster PostgreSQL TLS
+    - **Kubernetes 1.35+**
+    - Optional: **Prometheus Operator** for ServiceMonitor generation
+    - Optional: **KEDA** for replica auto-scaling
+
+    See the [project README](https://github.com/smoketurner/k8s-postgres-operator)
+    for full configuration reference, upgrade procedures, and operational runbooks.
+  displayName: PostgreSQL Operator
+  install:
+    spec:
+      clusterPermissions:
+      - rules:
+        - apiGroups:
+          - postgres-operator.smoketurner.com
+          resources:
+          - postgresclusters
+          verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+        - apiGroups:
+          - postgres-operator.smoketurner.com
+          resources:
+          - postgresclusters/status
+          verbs:
+          - get
+          - update
+          - patch
+        - apiGroups:
+          - postgres-operator.smoketurner.com
+          resources:
+          - postgresclusters/finalizers
+          verbs:
+          - update
+        - apiGroups:
+          - postgres-operator.smoketurner.com
+          resources:
+          - postgresdatabases
+          verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+        - apiGroups:
+          - postgres-operator.smoketurner.com
+          resources:
+          - postgresdatabases/status
+          verbs:
+          - get
+          - update
+          - patch
+        - apiGroups:
+          - postgres-operator.smoketurner.com
+          resources:
+          - postgresdatabases/finalizers
+          verbs:
+          - update
+        - apiGroups:
+          - postgres-operator.smoketurner.com
+          resources:
+          - postgresupgrades
+          verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+        - apiGroups:
+          - postgres-operator.smoketurner.com
+          resources:
+          - postgresupgrades/status
+          verbs:
+          - get
+          - update
+          - patch
+        - apiGroups:
+          - postgres-operator.smoketurner.com
+          resources:
+          - postgresupgrades/finalizers
+          verbs:
+          - update
+        - apiGroups:
+          - ""
+          resources:
+          - pods
+          verbs:
+          - get
+          - list
+          - watch
+          - patch
+        - apiGroups:
+          - ""
+          resources:
+          - pods/exec
+          verbs:
+          - create
+        - apiGroups:
+          - ""
+          resources:
+          - endpoints
+          verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+        - apiGroups:
+          - ""
+          resources:
+          - serviceaccounts
+          verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+        - apiGroups:
+          - ""
+          resources:
+          - services
+          - configmaps
+          - secrets
+          verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+        - apiGroups:
+          - ""
+          resources:
+          - persistentvolumeclaims
+          verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+        - apiGroups:
+          - ""
+          resources:
+          - events
+          verbs:
+          - create
+          - patch
+        - apiGroups:
+          - apps
+          resources:
+          - statefulsets
+          verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+        - apiGroups:
+          - batch
+          resources:
+          - cronjobs
+          - jobs
+          verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+        - apiGroups:
+          - policy
+          resources:
+          - poddisruptionbudgets
+          verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+        - apiGroups:
+          - coordination.k8s.io
+          resources:
+          - leases
+          verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+        - apiGroups:
+          - rbac.authorization.k8s.io
+          resources:
+          - roles
+          - rolebindings
+          verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+        - apiGroups:
+          - events.k8s.io
+          resources:
+          - events
+          verbs:
+          - create
+          - patch
+        serviceAccountName: postgres-operator
+      deployments:
+      - label:
+          app.kubernetes.io/component: controller
+          app.kubernetes.io/name: postgres-operator
+        name: postgres-operator
+        spec:
+          minReadySeconds: 5
+          progressDeadlineSeconds: 300
+          replicas: 1
+          selector:
+            matchLabels:
+              app.kubernetes.io/name: postgres-operator
+          strategy:
+            type: Recreate
+          template:
+            metadata:
+              labels:
+                app.kubernetes.io/component: controller
+                app.kubernetes.io/name: postgres-operator
+            spec:
+              containers:
+              - env:
+                - name: RUST_LOG
+                  value: info
+                - name: POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+                - name: POD_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                image: ghcr.io/smoketurner/k8s-postgres-operator:0.2.0
+                imagePullPolicy: Always
+                livenessProbe:
+                  httpGet:
+                    path: /healthz
+                    port: 8080
+                  initialDelaySeconds: 15
+                  periodSeconds: 20
+                name: operator
+                ports:
+                - containerPort: 8080
+                  name: health
+                  protocol: TCP
+                - containerPort: 8443
+                  name: webhook
+                  protocol: TCP
+                readinessProbe:
+                  httpGet:
+                    path: /readyz
+                    port: 8080
+                  initialDelaySeconds: 5
+                  periodSeconds: 10
+                resources:
+                  limits:
+                    cpu: 500m
+                    memory: 256Mi
+                  requests:
+                    cpu: 100m
+                    memory: 128Mi
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop:
+                    - ALL
+                  readOnlyRootFilesystem: true
+                volumeMounts:
+                - mountPath: /etc/webhook/certs
+                  name: webhook-certs
+                  readOnly: true
+              securityContext:
+                fsGroup: 1000
+                runAsNonRoot: true
+                runAsUser: 1000
+              serviceAccountName: postgres-operator
+              terminationGracePeriodSeconds: 10
+              volumes:
+              - name: webhook-certs
+                secret:
+                  optional: true
+                  secretName: postgres-operator-webhook-tls
+    strategy: deployment
+  installModes:
+  - supported: true
+    type: OwnNamespace
+  - supported: true
+    type: SingleNamespace
+  - supported: false
+    type: MultiNamespace
+  - supported: true
+    type: AllNamespaces
+  keywords:
+  - postgresql
+  - postgres
+  - database
+  - patroni
+  - spilo
+  - wal-g
+  - ha
+  - high-availability
+  - backup
+  - upgrade
+  - pgbouncer
+  links:
+  - name: Source
+    url: https://github.com/smoketurner/k8s-postgres-operator
+  - name: Architecture
+    url: https://github.com/smoketurner/k8s-postgres-operator/blob/main/docs/architecture.md
+  - name: Operations
+    url: https://github.com/smoketurner/k8s-postgres-operator/blob/main/docs/operations.md
+  - name: Backup & restore
+    url: https://github.com/smoketurner/k8s-postgres-operator/blob/main/docs/backup-restore.md
+  - name: Upgrades
+    url: https://github.com/smoketurner/k8s-postgres-operator/blob/main/docs/upgrades.md
+  maintainers:
+  - email: justin@plock.net
+    name: Justin Plock
+  maturity: alpha
+  minKubeVersion: 1.35.0
+  provider:
+    name: smoketurner
+    url: https://github.com/smoketurner
+  version: 0.2.0
+  webhookdefinitions:
+  - admissionReviewVersions:
+    - v1
+    containerPort: 443
+    deploymentName: postgres-operator
+    failurePolicy: Fail
+    generateName: validate.postgrescluster.postgres-operator.smoketurner.com
+    matchPolicy: Equivalent
+    rules:
+    - apiGroups:
+      - postgres-operator.smoketurner.com
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - postgresclusters
+      scope: Namespaced
+    sideEffects: None
+    targetPort: 8443
+    timeoutSeconds: 10
+    type: ValidatingAdmissionWebhook
+    webhookPath: /validate

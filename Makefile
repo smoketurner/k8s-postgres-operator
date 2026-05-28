@@ -107,6 +107,20 @@ chart-lint: ## Run `helm lint` on the chart
 chart-template: ## Render the chart with default values
 	@helm template po charts/postgres-operator --namespace postgres-operator-system
 
+##@ OLM Bundle
+
+bundle-sync: ## Regenerate the OLM bundle under bundle/
+	@python3 hack/sync-bundle.py sync
+
+bundle-check: ## Verify the committed OLM bundle matches the source artifacts (CI)
+	@python3 hack/sync-bundle.py check
+
+bundle-validate: ## Run `operator-sdk bundle validate` against the committed bundle
+	@operator-sdk bundle validate ./bundle
+
+bundle-build: ## Build the OLM bundle container image (tag matches hack/sync-bundle.py)
+	@docker build -f bundle.Dockerfile -t postgres-operator-bundle:0.2.0 .
+
 ##@ Help
 
 help: ## Display this help

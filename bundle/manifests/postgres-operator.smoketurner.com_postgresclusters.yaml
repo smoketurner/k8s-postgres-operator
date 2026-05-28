@@ -1,0 +1,1042 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  creationTimestamp: null
+  name: postgresclusters.postgres-operator.smoketurner.com
+spec:
+  group: postgres-operator.smoketurner.com
+  names:
+    categories:
+    - databases
+    - postgresql
+    - all
+    kind: PostgresCluster
+    listKind: PostgresClusterList
+    plural: postgresclusters
+    shortNames:
+    - pgc
+    singular: postgrescluster
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.version
+      name: Version
+      type: string
+    - jsonPath: .spec.replicas
+      name: Replicas
+      type: integer
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.reason
+      name: Reason
+      priority: 1
+      type: string
+    - jsonPath: .status.readyReplicas
+      name: Ready
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          spec:
+            description: |
+              Desired state of a PostgreSQL cluster managed by the operator.
+              The operator runs Spilo (Patroni + PostgreSQL + WAL-G) as a
+              StatefulSet, reconciling the actual cluster state toward
+              this spec on every change.
+            properties:
+              backup:
+                description: |
+                  Backup configuration for continuous archiving and point-in-time recovery (PITR).
+                  Uses WAL-G for continuous WAL archiving and scheduled base backups.
+                properties:
+                  backupFromReplica:
+                    default: false
+                    description: Take backups from replica instead of primary (reduces
+                      primary load)
+                    type: boolean
+                  compression:
+                    default: lz4
+                    description: Compression method for backups
+                    enum:
+                    - lz4
+                    - lzma
+                    - brotli
+                    - zstd
+                    - none
+                    type: string
+                  deltaMaxSteps:
+                    default: 3
+                    description: Maximum delta backup steps before forcing full backup
+                    maximum: 10
+                    minimum: 1
+                    type: integer
+                  destination:
+                    description: S3 or S3-compatible storage destination for backups
+                    properties:
+                      S3:
+                        description: S3 or S3-compatible storage configuration
+                        properties:
+                          bucket:
+                            description: S3 bucket name
+                            type: string
+                          credentialsSecret:
+                            description: |
+                              Name of secret containing AWS credentials.
+                              Required keys: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+                              Optional: AWS_SESSION_TOKEN for temporary credentials
+                            type: string
+                          endpoint:
+                            description: Custom S3-compatible endpoint URL (for MinIO,
+                              DigitalOcean Spaces, etc.)
+                            type: string
+                          forcePathStyle:
+                            default: false
+                            description: Force path-style URLs (required for most
+                              S3-compatible storage)
+                            type: boolean
+                          path:
+                            description: Path prefix within the bucket (default is
+                              namespace/cluster-name)
+                            type: string
+                          region:
+                            description: AWS region (e.g., "us-east-1")
+                            type: string
+                        required:
+                        - bucket
+                        - region
+                        - credentialsSecret
+                        type: object
+                    type: object
+                  downloadConcurrency:
+                    default: 10
+                    description: Number of concurrent download streams for restore
+                    maximum: 64
+                    minimum: 1
+                    type: integer
+                  enableDeltaBackups:
+                    default: false
+                    description: Enable delta backups (only changed pages since last
+                      backup)
+                    type: boolean
+                  encryption:
+                    description: |
+                      Backup encryption configuration (REQUIRED for security).
+                      All backups must be encrypted at rest to protect sensitive data.
+                      The presence of this section enables encryption.
+                    properties:
+                      keySecret:
+                        description: |
+                          Secret containing encryption key.
+                          For AES: expects key named 'encryption-key'
+                          For PGP: expects key named 'pgp-key'
+                        type: string
+                      method:
+                        default: aes256
+                        description: Encryption method
+                        enum:
+                        - aes256
+                        - pgp
+                        type: string
+                    required:
+                    - keySecret
+                    type: object
+                  logical:
+                    description: |
+                      Scheduled `pg_dumpall` logical backup running as a CronJob.
+                      Orthogonal to WAL-G (continuous archiving + PITR); logical
+                      backups handle schema migrations, cross-major-version restores,
+                      and compliance snapshots. Uses the same S3 destination and
+                      credentials as WAL-G.
+                    properties:
+                      enabled:
+                        description: Enable scheduled logical backups.
+                        type: boolean
+                      failedJobsHistoryLimit:
+                        description: Number of failed job runs to keep (default 3).
+                        minimum: 0
+                        type: integer
+                      image:
+                        description: |
+                          Optional image override. Defaults to the cluster's Spilo
+                          image so `pg_dumpall` matches the source PostgreSQL major
+                          version.
+                        type: string
+                      resources:
+                        description: Optional CPU/memory requests and limits for the
+                          dump pod.
+                        properties:
+                          limits:
+                            description: Hard ceilings; the kubelet kills the container
+                              if exceeded.
+                            properties:
+                              cpu:
+                                type: string
+                              memory:
+                                type: string
+                            type: object
+                          requests:
+                            description: Guaranteed reservation used by the scheduler.
+                            properties:
+                              cpu:
+                                type: string
+                              memory:
+                                type: string
+                            type: object
+                        type: object
+                      schedule:
+                        description: |
+                          Cron schedule (e.g. `"0 3 * * *"` for 03:00 UTC daily).
+                        type: string
+                      successfulJobsHistoryLimit:
+                        description: Number of successful job runs to keep (default
+                          3).
+                        minimum: 0
+                        type: integer
+                    required:
+                    - enabled
+                    - schedule
+                    type: object
+                  retention:
+                    description: Retention policy for backups (uses Spilo's backup
+                      retention)
+                    properties:
+                      count:
+                        description: Number of base backups to retain (uses BACKUP_NUM_TO_RETAIN)
+                        minimum: 1
+                        type: integer
+                      maxAge:
+                        description: Maximum age of backups (e.g., "7d", "30d", "1w")
+                        type: string
+                    type: object
+                  schedule:
+                    description: |
+                      Backup schedule in cron format (e.g., "0 2 * * *" for 2 AM daily).
+                      Base backups are created on this schedule.
+                      WAL archiving happens continuously regardless of this schedule.
+                    type: string
+                  uploadConcurrency:
+                    default: 16
+                    description: Number of concurrent upload streams
+                    maximum: 64
+                    minimum: 1
+                    type: integer
+                  walArchiving:
+                    description: WAL archiving configuration (enabled by default when
+                      backup is configured)
+                    properties:
+                      enabled:
+                        default: true
+                        description: Enable WAL archiving
+                        type: boolean
+                      restoreTimeout:
+                        description: Timeout for WAL restore operations in seconds
+                          (0 to disable)
+                        minimum: 0
+                        type: integer
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: backup.schedule is required when backup.destination is
+                    configured
+                  rule: '!has(self.destination) || has(self.schedule)'
+              labels:
+                additionalProperties:
+                  type: string
+                description: |
+                  Custom labels to apply to all resources created for this cluster.
+                  Use for cost allocation, team ownership, and organizational tracking.
+                  Common labels: team, cost-center, project, environment
+                type: object
+              metrics:
+                description: |
+                  Metrics exposure. When `enabled` is true the operator
+                  creates a `<cluster>-metrics` Service targeting `port`
+                  on every Spilo pod; the user must wire a metrics-exporter
+                  sidecar via `spec.sidecars`. When `serviceMonitor.enabled`
+                  is true a Prometheus Operator ServiceMonitor is also
+                  generated, skipped silently if the
+                  `monitoring.coreos.com` CRDs are absent.
+                properties:
+                  enabled:
+                    type: boolean
+                  port:
+                    default: 9187
+                    type: integer
+                  serviceMonitor:
+                    description: |
+                      Prometheus Operator ServiceMonitor configuration.
+                      Has no effect if the Prometheus Operator CRDs are
+                      not installed.
+                    properties:
+                      enabled:
+                        default: false
+                        type: boolean
+                      interval:
+                        description: Scrape interval (e.g. '30s', '1m').
+                        type: string
+                      labels:
+                        additionalProperties:
+                          type: string
+                        description: |
+                          Additional labels for the ServiceMonitor so the
+                          cluster's Prometheus selector matches it.
+                        type: object
+                      path:
+                        description: HTTP path on the metrics endpoint (default /metrics).
+                        type: string
+                      scrapeTimeout:
+                        description: Scrape timeout. Must be ≤ interval.
+                        type: string
+                    type: object
+                required:
+                - enabled
+                type: object
+              networkPolicy:
+                description: |
+                  Network policy configuration for the cluster.
+                  Controls which pods and namespaces can connect to the PostgreSQL cluster.
+                properties:
+                  allowExternalAccess:
+                    default: false
+                    description: |
+                      Allow connections from RFC1918 private IP ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16).
+                      Use for development/testing environments.
+                      Default: false (secure by default)
+                    type: boolean
+                  allowFrom:
+                    description: |
+                      List of additional sources allowed to connect to the cluster.
+                      Useful for cross-namespace access.
+                    items:
+                      description: |
+                        One ingress source. At least one of `namespaceSelector`
+                        or `podSelector` must be set; they combine with AND.
+                      properties:
+                        namespaceSelector:
+                          description: Selects namespaces using labels
+                          properties:
+                            matchExpressions:
+                              items:
+                                properties:
+                                  key:
+                                    type: string
+                                  operator:
+                                    enum:
+                                    - In
+                                    - NotIn
+                                    - Exists
+                                    - DoesNotExist
+                                    type: string
+                                  values:
+                                    items:
+                                      type: string
+                                    type: array
+                                type: object
+                              type: array
+                            matchLabels:
+                              additionalProperties:
+                                type: string
+                              description: Labels that namespaces must have to be
+                                allowed
+                              type: object
+                          type: object
+                        podSelector:
+                          description: Selects pods within selected namespaces
+                          properties:
+                            matchExpressions:
+                              items:
+                                properties:
+                                  key:
+                                    type: string
+                                  operator:
+                                    enum:
+                                    - In
+                                    - NotIn
+                                    - Exists
+                                    - DoesNotExist
+                                    type: string
+                                  values:
+                                    items:
+                                      type: string
+                                    type: array
+                                type: object
+                              type: array
+                            matchLabels:
+                              additionalProperties:
+                                type: string
+                              description: Labels that pods must have to be allowed
+                              type: object
+                          type: object
+                      type: object
+                    type: array
+                type: object
+              nodeSelector:
+                additionalProperties:
+                  type: string
+                description: |
+                  Node selector applied to every Spilo pod. Pods are only scheduled
+                  onto nodes whose labels match all entries.
+                type: object
+              pgbouncer:
+                description: PgBouncer connection pooler configuration (deployed as
+                  separate Deployment)
+                properties:
+                  defaultPoolSize:
+                    default: 20
+                    description: Default pool size per user/database pair
+                    maximum: 1000
+                    minimum: 1
+                    type: integer
+                  enableReplicaPooler:
+                    default: false
+                    description: Enable separate connection pooler for read replicas
+                    type: boolean
+                  enabled:
+                    description: Enable PgBouncer connection pooler (deployed as separate
+                      Deployment)
+                    type: boolean
+                  image:
+                    description: PgBouncer container image (default bitnami/pgbouncer)
+                    type: string
+                  maxClientConn:
+                    default: 10000
+                    description: Maximum client connections per PgBouncer instance
+                    maximum: 100000
+                    minimum: 10
+                    type: integer
+                  maxDbConnections:
+                    default: 60
+                    description: Total max database connections distributed across
+                      all instances
+                    maximum: 10000
+                    minimum: 1
+                    type: integer
+                  poolMode:
+                    default: transaction
+                    description: Connection pool mode
+                    enum:
+                    - session
+                    - transaction
+                    - statement
+                    type: string
+                  replicas:
+                    default: 2
+                    description: Number of PgBouncer replicas
+                    maximum: 10
+                    minimum: 1
+                    type: integer
+                  resources:
+                    description: Resource requirements for PgBouncer pods
+                    properties:
+                      limits:
+                        description: Hard ceilings — the kubelet kills the container
+                          if it exceeds these.
+                        properties:
+                          cpu:
+                            type: string
+                          memory:
+                            type: string
+                        type: object
+                      requests:
+                        description: Guaranteed reservation used by the scheduler
+                          when placing the pod.
+                        properties:
+                          cpu:
+                            type: string
+                          memory:
+                            type: string
+                        type: object
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: pgbouncer.maxClientConn should be at least 10 when enabled
+                  rule: '!self.enabled || !has(self.maxClientConn) || self.maxClientConn
+                    >= 10'
+                - message: pgbouncer.defaultPoolSize must be at least 1 when enabled
+                  rule: '!self.enabled || !has(self.defaultPoolSize) || self.defaultPoolSize
+                    >= 1'
+              postgresqlParams:
+                additionalProperties:
+                  type: string
+                description: Custom PostgreSQL configuration parameters
+                type: object
+              priorityClassName:
+                description: |
+                  Priority class assigned to every Spilo pod. Higher-priority pods are
+                  scheduled ahead of lower-priority pods and are evicted last under
+                  node pressure. The referenced PriorityClass must already exist.
+                type: string
+              replicas:
+                default: 1
+                description: |
+                  Number of Patroni members in the cluster:
+                  - 1: single server
+                  - 2: primary + 1 read replica
+                  - 3+: highly available cluster
+                maximum: 100
+                minimum: 1
+                type: integer
+              resources:
+                description: |
+                  CPU and memory requests/limits for the Spilo container. Standard
+                  Kubernetes `ResourceRequirements`. When unset the container runs
+                  without resource constraints (best-effort QoS).
+                properties:
+                  limits:
+                    description: Hard ceilings — the kubelet kills the container if
+                      it exceeds these.
+                    properties:
+                      cpu:
+                        type: string
+                      memory:
+                        type: string
+                    type: object
+                  requests:
+                    description: Guaranteed reservation used by the scheduler when
+                      placing the pod.
+                    properties:
+                      cpu:
+                        type: string
+                      memory:
+                        type: string
+                    type: object
+                type: object
+              scaling:
+                description: |
+                  Auto-scaling configuration for the cluster.
+                  Requires KEDA to be installed in the cluster.
+                properties:
+                  idleTimeout:
+                    default: 30m
+                    description: |
+                      Time without connections before scaling to minReplicas.
+                      Format: duration string (e.g., "30m", "1h").
+                      Default: 30m
+                    type: string
+                  maxReplicas:
+                    default: 10
+                    description: Maximum number of replicas
+                    minimum: 1
+                    type: integer
+                  metrics:
+                    description: Scaling metrics configuration
+                    properties:
+                      connections:
+                        description: Connection-based scaling configuration
+                        properties:
+                          targetPerReplica:
+                            default: 100
+                            description: Target active connections per replica
+                            minimum: 1
+                            type: integer
+                        type: object
+                      cpu:
+                        description: CPU-based scaling configuration
+                        properties:
+                          targetUtilization:
+                            default: 70
+                            description: Target CPU utilization percentage (0-100)
+                            maximum: 100
+                            minimum: 1
+                            type: integer
+                        type: object
+                    type: object
+                  minReplicas:
+                    description: |
+                      Minimum number of replicas.
+                      Set to 0 to enable scale-to-zero for development clusters.
+                      Default: spec.replicas (no scale-down below desired)
+                    minimum: 0
+                    type: integer
+                  replicationLagThreshold:
+                    default: 30s
+                    description: |
+                      Replication lag threshold for reader service routing.
+                      Replicas exceeding this threshold are excluded from the reader service.
+                      Format: duration string (e.g., "30s", "1m").
+                      Default: 30s
+                    type: string
+                  wakeupTimeout:
+                    default: 5m
+                    description: |
+                      Maximum time to wait for cluster wake-up on connection attempt.
+                      Only applies when minReplicas=0 (scale-to-zero).
+                      Default: 5m
+                    type: string
+                type: object
+              service:
+                description: Service configuration for external access
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    description: Annotations to add to the services
+                    type: object
+                  externalTrafficPolicy:
+                    description: External traffic policy (Cluster or Local)
+                    enum:
+                    - Cluster
+                    - Local
+                    type: string
+                  loadBalancerSourceRanges:
+                    description: CIDR ranges allowed to access LoadBalancer
+                    items:
+                      type: string
+                    type: array
+                  nodePort:
+                    description: NodePort for PostgreSQL port (only for NodePort type)
+                    maximum: 32767
+                    minimum: 30000
+                    type: integer
+                  type:
+                    default: ClusterIP
+                    description: 'Service type: ClusterIP (default), NodePort, or
+                      LoadBalancer'
+                    enum:
+                    - ClusterIP
+                    - NodePort
+                    - LoadBalancer
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: nodePort is only valid when service type is NodePort
+                  rule: '!has(self.nodePort) || self.type == ''NodePort'''
+                - message: loadBalancerSourceRanges is only valid when service type
+                    is LoadBalancer
+                  rule: '!has(self.loadBalancerSourceRanges) || self.type == ''LoadBalancer'''
+                - message: externalTrafficPolicy is only valid for NodePort or LoadBalancer
+                    service types
+                  rule: '!has(self.externalTrafficPolicy) || self.type == ''NodePort''
+                    || self.type == ''LoadBalancer'''
+              sidecars:
+                description: |
+                  Additional sidecar containers to inject into every Spilo pod.
+                  Accepts the full Kubernetes Container shape (image, env, ports,
+                  resources, volumeMounts, securityContext, probes, lifecycle, etc.).
+                  Names that collide with operator-managed containers
+                  (`postgres`, `init-permissions`) are rejected by the admission webhook.
+                items:
+                  description: A Kubernetes Container spec to inject as a sidecar.
+                  properties:
+                    name:
+                      description: Container name (must be unique within the pod)
+                      minLength: 1
+                      type: string
+                  required:
+                  - name
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                type: array
+              storage:
+                description: |
+                  PostgreSQL data volume configuration. Backs a PersistentVolumeClaim
+                  template on the StatefulSet so every replica gets durable storage.
+                  Storage cannot be shrunk after creation (Kubernetes constraint).
+                properties:
+                  size:
+                    description: |
+                      PVC size as a Kubernetes quantity (e.g. `10Gi`, `500Mi`).
+                      Expansion to a larger size is supported if the StorageClass
+                      allows it; shrinking is not.
+                    type: string
+                  storageClass:
+                    description: |
+                      Name of the StorageClass used to provision PVCs. When unset
+                      the cluster's default StorageClass is used.
+                    type: string
+                required:
+                - size
+                type: object
+              tls:
+                description: |
+                  TLS configuration for encrypted connections.
+                  TLS is enabled by default for security. Requires cert-manager to be installed.
+                properties:
+                  additionalDnsNames:
+                    description: Additional DNS names to include in the certificate
+                    items:
+                      type: string
+                    type: array
+                  duration:
+                    description: Certificate validity duration (e.g., "2160h" for
+                      90 days)
+                    type: string
+                  enabled:
+                    default: true
+                    description: Enable TLS for PostgreSQL connections (default true)
+                    type: boolean
+                  issuerRef:
+                    description: Reference to a cert-manager Issuer or ClusterIssuer
+                      for certificate provisioning
+                    properties:
+                      group:
+                        default: cert-manager.io
+                        description: API group of the issuer (default cert-manager.io)
+                        type: string
+                      kind:
+                        default: ClusterIssuer
+                        description: Kind of issuer (Issuer or ClusterIssuer)
+                        enum:
+                        - Issuer
+                        - ClusterIssuer
+                        type: string
+                      name:
+                        description: Name of the Issuer or ClusterIssuer
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  renewBefore:
+                    description: Time before expiry to renew certificate (e.g., "360h"
+                      for 15 days)
+                    type: string
+                type: object
+              tolerations:
+                description: |
+                  Pod tolerations applied to every Spilo pod. Allows scheduling onto
+                  tainted nodes (for example, dedicated database node pools).
+                  Accepts the full Kubernetes Toleration shape.
+                items:
+                  description: A single Kubernetes Toleration entry.
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                type: array
+              topologySpreadConstraints:
+                description: |
+                  Topology spread constraints applied to every Spilo pod. Use to
+                  distribute replicas across failure domains (zones, hostnames, etc.)
+                  independently of the operator-managed anti-affinity rules.
+                  Accepts the full Kubernetes TopologySpreadConstraint shape.
+                items:
+                  description: |
+                    A single Kubernetes TopologySpreadConstraint. `maxSkew`,
+                    `topologyKey`, and `whenUnsatisfiable` are required.
+                  properties:
+                    maxSkew:
+                      minimum: 1
+                      type: integer
+                    topologyKey:
+                      type: string
+                    whenUnsatisfiable:
+                      enum:
+                      - DoNotSchedule
+                      - ScheduleAnyway
+                      type: string
+                  required:
+                  - maxSkew
+                  - topologyKey
+                  - whenUnsatisfiable
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                type: array
+              version:
+                description: PostgreSQL version (e.g., "15", "16")
+                pattern: ^[0-9]{1,2}(\.[0-9]+)?$
+                type: string
+            required:
+            - version
+            - storage
+            type: object
+            x-kubernetes-validations:
+            - message: version must be a valid PostgreSQL version (e.g., '15', '16',
+                '15.4')
+              rule: self.version.matches('^[0-9]{1,2}(\\.[0-9]+)?$')
+            - message: storage.size must be a valid Kubernetes quantity (e.g., '10Gi',
+                '500Mi')
+              rule: self.storage.size.matches('^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$')
+            - message: replicas must be at least 1
+              rule: self.replicas >= 1
+            - message: replicas cannot exceed 100
+              rule: self.replicas <= 100
+            - message: backup encryption is required when backups are configured
+              rule: '!has(self.backup) || has(self.backup.encryption)'
+          status:
+            description: |
+              Observed state of the cluster, populated by the operator on every
+              reconcile. `phase` is the coarse lifecycle position; `reason` /
+              `message` summarize the current Ready condition; `conditions[]`
+              carries the detailed breakdown.
+            properties:
+              backup:
+                description: Backup status information
+                properties:
+                  backupCount:
+                    description: Number of available base backups
+                    type: integer
+                  destinationType:
+                    description: Backup destination type (S3)
+                    type: string
+                  enabled:
+                    description: Whether backups are currently configured and enabled
+                    type: boolean
+                  lastBackupName:
+                    description: Name/ID of the last backup
+                    type: string
+                  lastBackupSizeBytes:
+                    description: Size of the last backup in bytes
+                    format: int64
+                    type: integer
+                  lastBackupTime:
+                    description: Timestamp of the last successful base backup (RFC3339)
+                    type: string
+                  lastError:
+                    description: Last backup error message, if any
+                    type: string
+                  lastErrorTime:
+                    description: Time of last error (RFC3339)
+                    type: string
+                  lastWalArchiveTime:
+                    description: Time of last WAL archive (RFC3339)
+                    type: string
+                  lastWalArchived:
+                    description: Last WAL file archived successfully
+                    type: string
+                  oldestBackupTime:
+                    description: Timestamp of the oldest available backup (RFC3339)
+                    type: string
+                  recoveryWindowEnd:
+                    description: Point-in-time recovery window end (most recent recoverable
+                      point)
+                    type: string
+                  recoveryWindowStart:
+                    description: Point-in-time recovery window start (oldest recoverable
+                      point)
+                    type: string
+                  walArchivingHealthy:
+                    description: Whether WAL archiving is healthy
+                    type: boolean
+                type: object
+              conditions:
+                description: Standard Kubernetes status conditions (metav1.Condition)
+                items:
+                  description: |
+                    A single condition. Same shape as Kubernetes
+                    `metav1.Condition` — `lastTransitionTime` only advances
+                    when `status` changes, and `observedGeneration` carries
+                    the spec generation the condition was set against.
+                  properties:
+                    lastTransitionTime:
+                      description: RFC 3339 timestamp of the last status change.
+                      format: date-time
+                      type: string
+                    message:
+                      description: Human-readable explanation of the condition.
+                      type: string
+                    observedGeneration:
+                      description: |
+                        `metadata.generation` value observed when this
+                        condition was set. Stale conditions have a value
+                        less than the current generation.
+                      format: int64
+                      type: integer
+                    reason:
+                      description: Machine-readable CamelCase code for the current
+                        status.
+                      type: string
+                    status:
+                      description: One of `True`, `False`, `Unknown`.
+                      type: string
+                    type:
+                      description: |
+                        Condition type in CamelCase, e.g. `Ready`,
+                        `Progressing`, `Degraded`, `ConfigurationValid`,
+                        `ResourceResizeInProgress`, `PodGenerationSynced`.
+                      type: string
+                  required:
+                  - type
+                  - status
+                  - reason
+                  - message
+                  - lastTransitionTime
+                  type: object
+                type: array
+              connectionInfo:
+                description: Connection information for applications to connect to
+                  this cluster
+                properties:
+                  credentialsSecret:
+                    description: Name of the Secret containing database credentials
+                    type: string
+                  database:
+                    description: Default database name
+                    type: string
+                  pooler:
+                    description: 'PgBouncer pooler endpoint for primary connections.
+                      Format: {cluster}-pooler.{namespace}.svc:6432'
+                    type: string
+                  poolerReplicas:
+                    description: 'PgBouncer pooler endpoint for replica connections.
+                      Format: {cluster}-pooler-repl.{namespace}.svc:6432'
+                    type: string
+                  primary:
+                    description: 'Primary (read-write) service endpoint. Format: {cluster}-primary.{namespace}.svc:5432'
+                    type: string
+                  replicas:
+                    description: 'Replica (read-only) service endpoint. Format: {cluster}-repl.{namespace}.svc:5432'
+                    type: string
+                type: object
+              currentVersion:
+                description: Current PostgreSQL version running in the cluster (used
+                  to prevent downgrades)
+                type: string
+              lastError:
+                description: Last error message encountered during reconciliation
+                type: string
+              lastErrorTime:
+                description: Timestamp of the last error
+                type: string
+              maxReplicationLagBytes:
+                description: Maximum replication lag across all replicas (in bytes)
+                format: int64
+                type: integer
+              message:
+                description: Human-readable explanation paired with phase and reason
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
+              origin:
+                description: Reference to the cluster this was upgraded from
+                properties:
+                  createdAt:
+                    description: Timestamp when the relationship was created (RFC3339
+                      format)
+                    type: string
+                  name:
+                    description: Name of the referenced cluster
+                    type: string
+                  namespace:
+                    description: Namespace of the referenced cluster
+                    type: string
+                  upgradeName:
+                    description: Name of the PostgresUpgrade that created this relationship
+                    type: string
+                type: object
+              pgbouncerEnabled:
+                description: Whether PgBouncer pooler is currently enabled
+                type: boolean
+              pgbouncerReadyReplicas:
+                description: Number of ready PgBouncer replicas
+                type: integer
+              phase:
+                description: |
+                  Coarse lifecycle position. `Running` is the steady state;
+                  `Creating` / `Updating` / `Scaling` indicate work in progress;
+                  `Degraded` / `Failed` indicate a problem that may need
+                  intervention; `Superseded` means a blue-green upgrade has
+                  promoted a target cluster over this one.
+                enum:
+                - Pending
+                - Creating
+                - Running
+                - Updating
+                - Scaling
+                - Degraded
+                - Failed
+                - Recovering
+                - Superseded
+                - Deleting
+                type: string
+              phaseStartedAt:
+                description: Timestamp when the current phase started (RFC3339 format)
+                type: string
+              previousReplicas:
+                description: Previous replica count (used for tracking scaling operations)
+                type: integer
+              primaryPod:
+                description: Name of the pod currently holding the Patroni leader
+                  lease.
+                type: string
+              readyReplicas:
+                description: Number of pods that are Ready and joined to the Patroni
+                  cluster.
+                type: integer
+              reason:
+                description: Short CamelCase explanation paired with phase
+                type: string
+              replicaPods:
+                description: Names of pods currently running as PostgreSQL replicas.
+                items:
+                  type: string
+                type: array
+              replicas:
+                description: Total replica count observed in the StatefulSet.
+                type: integer
+              replicasLagging:
+                description: Whether any replica exceeds the configured lag threshold
+                type: boolean
+              replicationLag:
+                description: Replication lag information for each replica pod
+                items:
+                  description: |
+                    Lag report for one replica pod, collected from the
+                    Patroni REST API on each reconcile.
+                  properties:
+                    exceedsThreshold:
+                      description: Whether this replica exceeds the configured lag
+                        threshold
+                      type: boolean
+                    lagBytes:
+                      description: Replication lag in bytes
+                      format: int64
+                      type: integer
+                    lagTime:
+                      description: Replication lag as duration string
+                      type: string
+                    lastMeasured:
+                      description: Last time the lag was measured (RFC3339)
+                      type: string
+                    podName:
+                      description: Name of the replica pod
+                      type: string
+                    state:
+                      description: Replication state (streaming, catchup, etc.)
+                      type: string
+                  type: object
+                type: array
+              retryCount:
+                description: Current retry count for exponential backoff
+                type: integer
+              successor:
+                description: Reference to the successor cluster that superseded this
+                  one after an upgrade
+                properties:
+                  createdAt:
+                    description: Timestamp when the relationship was created (RFC3339
+                      format)
+                    type: string
+                  name:
+                    description: Name of the referenced cluster
+                    type: string
+                  namespace:
+                    description: Namespace of the referenced cluster
+                    type: string
+                  upgradeName:
+                    description: Name of the PostgresUpgrade that created this relationship
+                    type: string
+                type: object
+              tlsEnabled:
+                description: Whether TLS is currently enabled on the cluster
+                type: boolean
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      scale:
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.replicas
+      status: {}
+status:
+  acceptedNames:
+    kind: ""
+    plural: ""
+  conditions: null
+  storedVersions: null
