@@ -1,0 +1,488 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  creationTimestamp: null
+  name: postgresupgrades.postgres-operator.smoketurner.com
+spec:
+  group: postgres-operator.smoketurner.com
+  names:
+    categories:
+    - databases
+    - postgresql
+    - all
+    kind: PostgresUpgrade
+    listKind: PostgresUpgradeList
+    plural: postgresupgrades
+    shortNames:
+    - pgup
+    - pgupgrade
+    singular: postgresupgrade
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.sourceCluster.name
+      name: Source
+      type: string
+    - jsonPath: .spec.targetVersion
+      name: TargetVer
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.reason
+      name: Reason
+      priority: 1
+      type: string
+    - jsonPath: .status.replication.lagSeconds
+      name: Lag
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          spec:
+            description: |
+              Desired state of a major-version upgrade. The operator
+              performs a blue-green upgrade using logical replication:
+              provisions a target cluster at `targetVersion`, replicates
+              from `sourceCluster`, verifies data, and cuts services over
+              in an atomic step. Source is never auto-deleted, so rollback
+              stays possible until you delete it manually.
+            properties:
+              sourceCluster:
+                description: Reference to the source PostgresCluster to upgrade
+                properties:
+                  name:
+                    description: Name of the source PostgresCluster
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: Namespace of the source PostgresCluster (defaults
+                      to same namespace)
+                    type: string
+                required:
+                - name
+                type: object
+              strategy:
+                description: Upgrade strategy configuration
+                properties:
+                  cutover:
+                    description: Cutover configuration
+                    properties:
+                      allowedWindow:
+                        description: Optional maintenance window for automatic cutover
+                        properties:
+                          endTime:
+                            description: End time in HH:MM format
+                            pattern: ^[0-2][0-9]:[0-5][0-9]$
+                            type: string
+                          startTime:
+                            description: Start time in HH:MM format
+                            pattern: ^[0-2][0-9]:[0-5][0-9]$
+                            type: string
+                          timezone:
+                            default: UTC
+                            description: Timezone (default UTC)
+                            type: string
+                        type: object
+                      mode:
+                        default: Manual
+                        description: Cutover mode (Manual requires annotation to trigger)
+                        enum:
+                        - Manual
+                        - Automatic
+                        type: string
+                    type: object
+                  postCutover:
+                    description: Post-cutover configuration
+                    properties:
+                      cleanupSourceCluster:
+                        default: false
+                        description: Whether to delete source cluster after successful
+                          upgrade
+                        type: boolean
+                      healthCheckDuration:
+                        default: 5m
+                        description: Duration to monitor health after cutover
+                        type: string
+                    type: object
+                  preChecks:
+                    description: Pre-cutover verification requirements
+                    properties:
+                      drainConnectionsTimeout:
+                        default: 5m
+                        description: Timeout for draining connections before cutover
+                        type: string
+                      maxReplicationLagSeconds:
+                        default: 0
+                        description: Maximum replication lag in seconds before cutover
+                          (0 for strictest)
+                        minimum: 0
+                        type: integer
+                      minVerificationPasses:
+                        default: 3
+                        description: Number of consecutive verification passes required
+                        minimum: 1
+                        type: integer
+                      requireBackupWithin:
+                        default: 1h
+                        description: Require a backup within this duration before
+                          cutover
+                        type: string
+                      rowCountTolerance:
+                        default: 0
+                        description: Allowed row count difference between source and
+                          target
+                        minimum: 0
+                        type: integer
+                      verificationInterval:
+                        default: 1m
+                        description: Time between verification checks
+                        type: string
+                    type: object
+                  strategyType:
+                    default: BlueGreen
+                    description: Type of upgrade strategy
+                    enum:
+                    - BlueGreen
+                    type: string
+                  timeouts:
+                    description: Phase timeout configuration
+                    properties:
+                      cutover:
+                        default: 15m
+                        description: Timeout for cutover phase
+                        type: string
+                      initialSync:
+                        default: 24h
+                        description: Timeout for initial data sync
+                        type: string
+                      replicationCatchup:
+                        default: 1h
+                        description: Timeout for replication to catch up
+                        type: string
+                      targetClusterReady:
+                        default: 30m
+                        description: Timeout for target cluster to become ready
+                        type: string
+                      verification:
+                        default: 30m
+                        description: Timeout for verification phase
+                        type: string
+                    type: object
+                type: object
+              targetClusterOverrides:
+                description: Optional overrides for the target cluster configuration
+                properties:
+                  name:
+                    description: Custom name for the target cluster (defaults to source-v{version})
+                    type: string
+                  replicas:
+                    description: Number of replicas for target cluster (defaults to
+                      source)
+                    maximum: 9
+                    minimum: 1
+                    type: integer
+                  resources:
+                    description: Resource requirements for target cluster
+                    properties:
+                      limits:
+                        description: Hard ceilings — the kubelet kills the container
+                          if it exceeds these.
+                        properties:
+                          cpu:
+                            type: string
+                          memory:
+                            type: string
+                        type: object
+                      requests:
+                        description: Guaranteed reservation used by the scheduler
+                          when placing the pod.
+                        properties:
+                          cpu:
+                            type: string
+                          memory:
+                            type: string
+                        type: object
+                    type: object
+                type: object
+              targetVersion:
+                description: Target PostgreSQL major version
+                enum:
+                - "15"
+                - "16"
+                - "17"
+                type: string
+            required:
+            - sourceCluster
+            - targetVersion
+            type: object
+            x-kubernetes-validations:
+            - message: maxReplicationLagSeconds must be non-negative
+              rule: '!has(self.strategy) || !has(self.strategy.preChecks) || self.strategy.preChecks.maxReplicationLagSeconds
+                >= 0'
+            - message: rowCountTolerance must be non-negative
+              rule: '!has(self.strategy) || !has(self.strategy.preChecks) || self.strategy.preChecks.rowCountTolerance
+                >= 0'
+            - message: minVerificationPasses must be at least 1
+              rule: '!has(self.strategy) || !has(self.strategy.preChecks) || self.strategy.preChecks.minVerificationPasses
+                >= 1'
+          status:
+            description: |
+              Observed state of the upgrade. `phase` walks through:
+              Pending → CreatingTarget → ConfiguringReplication →
+              Replicating → Verifying → SyncingSequences →
+              ReadyForCutover → CuttingOver → HealthChecking → Completed.
+              Failure paths terminate at `Failed`; manual rollback ends
+              at `RolledBack`.
+            properties:
+              completedAt:
+                description: When the upgrade completed
+                format: date-time
+                type: string
+              conditions:
+                description: Standard Kubernetes status conditions (metav1.Condition)
+                items:
+                  description: |
+                    A single condition. Same shape as Kubernetes
+                    `metav1.Condition` — `lastTransitionTime` only advances
+                    when `status` changes.
+                  properties:
+                    lastTransitionTime:
+                      description: Last time the condition transitioned
+                      format: date-time
+                      type: string
+                    message:
+                      description: Human-readable message
+                      type: string
+                    observedGeneration:
+                      description: Generation observed when the condition was set
+                      format: int64
+                      type: integer
+                    reason:
+                      description: Human-readable reason for the condition
+                      type: string
+                    status:
+                      description: Status of the condition (True, False, Unknown)
+                      type: string
+                    type:
+                      description: Type of condition
+                      type: string
+                  required:
+                  - type
+                  - status
+                  - reason
+                  - message
+                  - lastTransitionTime
+                  type: object
+                type: array
+              cutoverStartedAt:
+                description: When cutover began
+                format: date-time
+                type: string
+              lastError:
+                description: Last error message encountered during reconciliation
+                type: string
+              lastErrorTime:
+                description: Timestamp of the last error
+                format: date-time
+                type: string
+              message:
+                description: Human-readable message about current state
+                type: string
+              observedGeneration:
+                description: Last observed generation
+                format: int64
+                type: integer
+              phase:
+                description: Current phase of the upgrade
+                enum:
+                - Pending
+                - CreatingTarget
+                - ConfiguringReplication
+                - Replicating
+                - Verifying
+                - SyncingSequences
+                - ReadyForCutover
+                - WaitingForManualCutover
+                - CuttingOver
+                - HealthChecking
+                - Completed
+                - Failed
+                - RolledBack
+                type: string
+              phaseStartedAt:
+                description: When the current phase started
+                format: date-time
+                type: string
+              reason:
+                description: Short CamelCase explanation paired with phase
+                type: string
+              replication:
+                description: Replication status
+                properties:
+                  lagBytes:
+                    description: Replication lag in bytes
+                    format: int64
+                    type: integer
+                  lagSeconds:
+                    description: Replication lag in seconds
+                    format: int64
+                    type: integer
+                  lastSyncTime:
+                    description: Last time replication was checked
+                    format: date-time
+                    type: string
+                  lsnInSync:
+                    description: Whether LSN positions are in sync
+                    type: boolean
+                  publicationName:
+                    description: Name of the publication on source
+                    type: string
+                  sourceLsn:
+                    description: Current LSN on source
+                    type: string
+                  status:
+                    description: Current replication state
+                    enum:
+                    - NotConfigured
+                    - Syncing
+                    - Active
+                    - Synced
+                    - Stopped
+                    - Error
+                    type: string
+                  subscriptionName:
+                    description: Name of the subscription on target
+                    type: string
+                  targetLsn:
+                    description: Current LSN on target
+                    type: string
+                type: object
+              retryCount:
+                description: Current retry count for exponential backoff
+                format: int32
+                type: integer
+              rollback:
+                description: Rollback status and feasibility
+                properties:
+                  completedAt:
+                    description: When rollback completed
+                    format: date-time
+                    type: string
+                  dataLossRisk:
+                    description: Whether rollback would risk data loss
+                    type: boolean
+                  feasible:
+                    description: Whether rollback is currently feasible
+                    type: boolean
+                  reason:
+                    description: Reason for rollback feasibility
+                    type: string
+                  triggeredAt:
+                    description: When rollback was triggered
+                    format: date-time
+                    type: string
+                type: object
+              sequences:
+                description: Sequence sync status
+                properties:
+                  failedCount:
+                    description: Number of sequences that failed to sync
+                    type: integer
+                  synced:
+                    description: Whether sequences are synced
+                    type: boolean
+                  syncedAt:
+                    description: When sequences were synced
+                    format: date-time
+                    type: string
+                  syncedCount:
+                    description: Number of sequences synced
+                    type: integer
+                  totalSequences:
+                    description: Total number of sequences
+                    type: integer
+                type: object
+              sourceVersion:
+                description: PostgreSQL version of source cluster
+                type: string
+              startedAt:
+                description: When the upgrade started
+                format: date-time
+                type: string
+              targetClusterName:
+                description: Name of the target cluster being created
+                type: string
+              targetClusterReady:
+                description: Whether the target cluster is ready
+                type: boolean
+              verification:
+                description: Row count verification status
+                properties:
+                  consecutivePasses:
+                    description: Number of consecutive successful verification passes
+                    format: int32
+                    type: integer
+                  lastCheckTime:
+                    description: Last verification check time (RFC3339 format)
+                    format: date-time
+                    type: string
+                  mismatchedTables:
+                    description: Details of tables with row count mismatches
+                    items:
+                      description: |
+                        A table whose row counts disagreed between source and target
+                        during verification. Cutover is blocked until counts converge
+                        (or `verify_row_counts` is disabled in the strategy).
+                      properties:
+                        difference:
+                          description: Difference (source - target)
+                          format: int64
+                          type: integer
+                        schema:
+                          description: Schema name
+                          type: string
+                        sourceCount:
+                          description: Row count in source
+                          format: int64
+                          type: integer
+                        table:
+                          description: Table name
+                          type: string
+                        targetCount:
+                          description: Row count in target
+                          format: int64
+                          type: integer
+                      type: object
+                    type: array
+                  tablesMatched:
+                    description: Number of tables with matching row counts
+                    format: int32
+                    type: integer
+                  tablesMismatched:
+                    description: Number of tables with mismatched row counts
+                    format: int32
+                    type: integer
+                  tablesVerified:
+                    description: Number of tables verified
+                    format: int32
+                    type: integer
+                type: object
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+status:
+  acceptedNames:
+    kind: ""
+    plural: ""
+  conditions: null
+  storedVersions: null

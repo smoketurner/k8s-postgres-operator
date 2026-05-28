@@ -1,0 +1,7 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Base CSV with all the static (human-authored) metadata. operator-sdk
+# `generate bundle` merges this with the runtime-derived RBAC + Deployment
+# pulled from `--deploy-dir` and the CRDs from `--crds-dir`.
+resources:
+  - bases/postgres-operator.clusterserviceversion.yaml
