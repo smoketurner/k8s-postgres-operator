@@ -224,6 +224,25 @@ pub struct PreChecksConfig {
     /// Default is "5m".
     #[serde(default = "default_drain_timeout")]
     pub drain_connections_timeout: String,
+
+    /// Idle-in-transaction sessions older than this on the source block
+    /// `CREATE_REPLICATION_SLOT` from taking a consistent snapshot,
+    /// causing replication setup to hang. If
+    /// `terminate_idle_transactions` is true, the operator terminates
+    /// such sessions immediately before creating the publication.
+    /// Default is "5m".
+    #[serde(default = "default_idle_transaction_threshold")]
+    pub idle_transaction_threshold: String,
+
+    /// Whether to automatically `pg_terminate_backend()` idle-in-transaction
+    /// sessions older than `idle_transaction_threshold` on the source
+    /// before slot creation. Disabling this means slot creation may hang
+    /// indefinitely on busy clusters; users who can't tolerate the
+    /// termination should set this to `false` and arrange their own
+    /// cleanup before triggering the upgrade.
+    /// Default is `true`.
+    #[serde(default = "default_true")]
+    pub terminate_idle_transactions: bool,
 }
 
 impl Default for PreChecksConfig {
@@ -236,8 +255,14 @@ impl Default for PreChecksConfig {
             verification_interval: "1m".to_string(),
             require_backup_within: "1h".to_string(),
             drain_connections_timeout: "5m".to_string(),
+            idle_transaction_threshold: "5m".to_string(),
+            terminate_idle_transactions: true,
         }
     }
+}
+
+fn default_idle_transaction_threshold() -> String {
+    "5m".to_string()
 }
 
 fn default_true() -> bool {

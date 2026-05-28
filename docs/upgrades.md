@@ -83,6 +83,7 @@ start an upgrade if any of the following are true on the source cluster:
 | **Unlogged tables** | User-schema tables with `relpersistence = 'u'`. These won't be replicated, and the user usually expects them to migrate. | `ALTER TABLE ... SET LOGGED`, or accept the table will be empty on the new cluster. |
 | **Blocking extensions** | `pg_cron` or `pg_partman` active. These interfere with logical replication (per Wiz's documented Aurora playbook). | `DROP EXTENSION pg_cron CASCADE;` (and similarly for `pg_partman`) on the source before the upgrade, then recreate on the target after cutover. |
 | **Materialized view refresh in progress** | `pg_stat_activity` shows an active `REFRESH MATERIALIZED VIEW`. Concurrent refresh can break the publication mid-stream. | Wait for the refresh to finish, or pause the refresh schedule before retrying. |
+| **Target storage capacity** | Source's total `pg_database_size` × 1.5 must fit in the target storage spec. Without that headroom, WAL accumulation during initial sync fills the target PVC. | Expand the source cluster's `spec.storage.size` (the target inherits it), or wait for a future release that supports `targetClusterOverrides.storage`. |
 
 When preflight fails, the upgrade resource will have a `PreflightPassed=False`
 condition with the specific failures inline and a `PreflightFailed` event:
@@ -113,6 +114,34 @@ Events:
 
 After the user resolves the failures, they must delete the failed upgrade
 and create a fresh `PostgresUpgrade` to retry.
+
+### Idle-in-transaction purger
+
+The single biggest cause of opaque `ConfiguringReplication` stalls on busy
+clusters is `CREATE_REPLICATION_SLOT` hanging while it waits for a consistent
+snapshot — any long-running `idle in transaction` session blocks the snapshot
+until it commits or rolls back. Wiz's published Aurora playbook calls this out
+explicitly and ships an idle-transaction purger as their workaround.
+
+Before the operator triggers slot creation (via `CREATE SUBSCRIPTION` on the
+target), it queries `pg_stat_activity` on the source for sessions in
+`idle in transaction` state for at least `spec.strategy.preChecks.idleTransactionThreshold`
+(default 5 minutes), excluding its own backend.
+
+| Setting | Default | Behavior |
+|---------|---------|----------|
+| `idleTransactionThreshold` | `"5m"` | Only sessions older than this are considered. Shorter is more aggressive. |
+| `terminateIdleTransactions` | `true` | If `true`, the operator calls `pg_terminate_backend()` on each session and emits a `IdleTransactionsPurged` Normal Event. If `false`, the operator emits a `IdleTransactionsNotPurged` Warning Event listing the offenders and leaves them in place — the user is responsible for cleanup. |
+
+If a *new* idle session appears in the window between the purge and slot
+creation and trips the publisher on a `consistent snapshot` error, the operator
+re-runs the purge and retries `CREATE SUBSCRIPTION` up to 3 times with bounded
+exponential backoff (2s, 4s, 8s) before failing the upgrade.
+
+The operator's database role on the source must have either the
+`pg_signal_backend` predefined role or superuser status for
+`pg_terminate_backend()` to work. The default Spilo `postgres` role provided
+by this operator already has this.
 
 ### Supported Versions
 
@@ -159,11 +188,14 @@ spec:
       mode: Manual  # or Automatic
 
     preChecks:
-      maxReplicationLagSeconds: 0    # Must be fully synced
-      minVerificationPasses: 3       # Row counts must match 3 times
-      verificationInterval: "1m"     # Time between checks
-      requireBackupWithin: "1h"      # Required for Automatic mode
-      drainConnectionsTimeout: "5m"  # Wait for connections to close
+      maxReplicationLagSeconds: 0          # Must be fully synced
+      minVerificationPasses: 3             # Row counts must match 3 times
+      verificationInterval: "1m"           # Time between checks
+      requireBackupWithin: "1h"            # Required for Automatic mode
+      drainConnectionsTimeout: "5m"        # Wait for connections to close
+      idleTransactionThreshold: "5m"       # Idle-in-tx sessions older than this
+                                           # are terminated before slot creation
+      terminateIdleTransactions: true      # Opt out only if you can't tolerate it
 
     timeouts:
       targetClusterReady: "30m"

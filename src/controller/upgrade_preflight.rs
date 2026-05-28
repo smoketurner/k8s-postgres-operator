@@ -81,7 +81,23 @@ pub enum PreflightFailure {
 
     /// `pg_stat_activity` shows an in-progress `REFRESH MATERIALIZED VIEW`.
     MaterializedViewRefreshInProgress,
+
+    /// The target cluster's storage spec is smaller than
+    /// `source_data_bytes * STORAGE_SAFETY_MARGIN`. Without headroom for
+    /// WAL accumulation during initial sync, the target PVC fills up
+    /// before logical replication catches up.
+    InsufficientTargetStorage {
+        source_data_bytes: i64,
+        target_storage_bytes: i64,
+        required_bytes: i64,
+        target_storage_size: String,
+    },
 }
+
+/// Required free headroom on the target PVC, expressed as a multiplier of
+/// the source's current `pg_database_size` total. Covers WAL accumulation
+/// during initial sync plus normal write growth.
+pub const STORAGE_SAFETY_MARGIN: f64 = 1.5;
 
 impl fmt::Display for PreflightFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -119,6 +135,19 @@ impl fmt::Display for PreflightFailure {
                 "REFRESH MATERIALIZED VIEW is in progress on the source. Concurrent \
                  materialized view refresh can break logical replication mid-stream. \
                  Wait for the refresh to complete or pause the schedule before retrying."
+            ),
+            PreflightFailure::InsufficientTargetStorage {
+                source_data_bytes,
+                target_storage_bytes,
+                required_bytes,
+                target_storage_size,
+            } => write!(
+                f,
+                "Target storage spec ({target_storage_size} = {} bytes) is smaller than the \
+                 required headroom for initial sync (source data = {} bytes, requires at least \
+                 {}× = {} bytes). Expand the source cluster's storage spec (the target \
+                 inherits it) or set targetClusterOverrides.storage on the PostgresUpgrade.",
+                target_storage_bytes, source_data_bytes, STORAGE_SAFETY_MARGIN, required_bytes
             ),
         }
     }
@@ -170,10 +199,16 @@ impl PreflightOutcome {
 /// `PostgresCluster`'s primary. Returns an `Ok(outcome)` whether the
 /// checks pass or fail — the `Err` case is reserved for *infrastructure*
 /// failures (couldn't connect, query errored).
+///
+/// `target_storage_size` is the storage spec that the target cluster will
+/// be created with (typically inherited from the source spec). It is
+/// compared against the source's actual data size for the
+/// `InsufficientTargetStorage` check.
 pub async fn run_preflight_checks(
     client: &Client,
     source_ns: &str,
     source_cluster: &str,
+    target_storage_size: &str,
 ) -> Result<PreflightOutcome, PreflightError> {
     info!(
         "Running upgrade preflight checks against source {}/{}",
@@ -202,6 +237,9 @@ pub async fn run_preflight_checks(
         outcome
             .failures
             .push(PreflightFailure::MaterializedViewRefreshInProgress);
+    }
+    if let Some(failure) = check_target_storage_size(&conn, target_storage_size).await? {
+        outcome.failures.push(failure);
     }
 
     if outcome.passed() {
@@ -330,6 +368,122 @@ async fn check_active_matview_refresh(conn: &PostgresConnection) -> Result<bool,
     Ok(active)
 }
 
+/// Compare the source's actual on-disk data size against the target's
+/// declared storage capacity, requiring [`STORAGE_SAFETY_MARGIN`] of
+/// headroom for WAL accumulation during initial sync. Returns `Ok(None)`
+/// if storage is adequate.
+///
+/// Source size is `SUM(pg_database_size)` across all non-template
+/// databases — that's what actually lives on the PVC. Comparing against
+/// just `current_database()` would miss multi-database clusters.
+async fn check_target_storage_size(
+    conn: &PostgresConnection,
+    target_storage_size: &str,
+) -> Result<Option<PreflightFailure>, PreflightError> {
+    let Some(target_storage_bytes) = parse_kube_quantity_bytes(target_storage_size) else {
+        // Unparseable spec — surface as a failure rather than skip the
+        // check silently. The user can read the message and fix the spec.
+        warn!(
+            "target storage spec {:?} could not be parsed as a Kubernetes quantity",
+            target_storage_size
+        );
+        return Ok(Some(PreflightFailure::InsufficientTargetStorage {
+            source_data_bytes: 0,
+            target_storage_bytes: 0,
+            required_bytes: 0,
+            target_storage_size: target_storage_size.to_string(),
+        }));
+    };
+
+    let row = conn
+        .query_one(
+            "SELECT COALESCE(SUM(pg_database_size(datname)), 0)::bigint AS total_bytes
+             FROM pg_catalog.pg_database
+             WHERE datistemplate = false",
+            &[],
+        )
+        .await?;
+    let source_data_bytes: i64 = row.get("total_bytes");
+    let required_bytes = required_target_bytes(source_data_bytes);
+
+    if target_storage_bytes < required_bytes {
+        debug!(
+            "Storage preflight: target {} bytes < required {} bytes (source {} bytes × {})",
+            target_storage_bytes, required_bytes, source_data_bytes, STORAGE_SAFETY_MARGIN
+        );
+        return Ok(Some(PreflightFailure::InsufficientTargetStorage {
+            source_data_bytes,
+            target_storage_bytes,
+            required_bytes,
+            target_storage_size: target_storage_size.to_string(),
+        }));
+    }
+
+    Ok(None)
+}
+
+/// `source_data_bytes * STORAGE_SAFETY_MARGIN`, clamped to non-negative
+/// `i64`. Extracted so the saturation logic is testable without a live
+/// Postgres connection.
+fn required_target_bytes(source_data_bytes: i64) -> i64 {
+    if source_data_bytes < 0 {
+        return 0;
+    }
+    let scaled = (source_data_bytes as f64) * STORAGE_SAFETY_MARGIN;
+    if !scaled.is_finite() || scaled < 0.0 {
+        return 0;
+    }
+    if scaled >= i64::MAX as f64 {
+        return i64::MAX;
+    }
+    scaled as i64
+}
+
+/// Parse a Kubernetes [resource.Quantity] string to bytes.
+///
+/// Accepts binary suffixes (`Ki`, `Mi`, `Gi`, `Ti`, `Pi`, `Ei`), decimal
+/// suffixes (`k`, `M`, `G`, `T`, `P`, `E`, plus capital `K` as a tolerated
+/// non-standard), and a raw integer (interpreted as bytes). Returns
+/// `None` on malformed input or overflow.
+///
+/// [resource.Quantity]: https://kubernetes.io/docs/reference/kubernetes-api/common-definitions/quantity/
+fn parse_kube_quantity_bytes(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    // Longest suffixes first so "Ki" matches before "K".
+    const BINARY: &[(&str, i64)] = &[
+        ("Ei", 1i64 << 60),
+        ("Pi", 1i64 << 50),
+        ("Ti", 1i64 << 40),
+        ("Gi", 1i64 << 30),
+        ("Mi", 1i64 << 20),
+        ("Ki", 1i64 << 10),
+    ];
+    const DECIMAL: &[(&str, i64)] = &[
+        ("E", 1_000_000_000_000_000_000),
+        ("P", 1_000_000_000_000_000),
+        ("T", 1_000_000_000_000),
+        ("G", 1_000_000_000),
+        ("M", 1_000_000),
+        ("k", 1_000),
+        // Capital K is non-standard but tolerated by some tools; accept it.
+        ("K", 1_000),
+    ];
+
+    for (suffix, multiplier) in BINARY.iter().chain(DECIMAL.iter()) {
+        if let Some(prefix) = s.strip_suffix(suffix) {
+            let value: i64 = prefix.trim().parse().ok()?;
+            return value.checked_mul(*multiplier);
+        }
+    }
+
+    // Raw bytes (no suffix), e.g. "500000000".
+    s.parse().ok()
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -443,5 +597,91 @@ mod tests {
         assert!(s.contains("t0"));
         assert!(s.contains("t4"));
         assert!(s.contains("(+5 more)"));
+    }
+
+    #[test]
+    fn parse_quantity_binary_suffixes() {
+        assert_eq!(parse_kube_quantity_bytes("1Ki"), Some(1024));
+        assert_eq!(parse_kube_quantity_bytes("1Mi"), Some(1 << 20));
+        assert_eq!(parse_kube_quantity_bytes("1Gi"), Some(1 << 30));
+        assert_eq!(parse_kube_quantity_bytes("10Gi"), Some(10i64 << 30));
+        assert_eq!(parse_kube_quantity_bytes("100Gi"), Some(100i64 << 30));
+        assert_eq!(parse_kube_quantity_bytes("1Ti"), Some(1i64 << 40));
+    }
+
+    #[test]
+    fn parse_quantity_decimal_suffixes() {
+        assert_eq!(parse_kube_quantity_bytes("1k"), Some(1_000));
+        assert_eq!(parse_kube_quantity_bytes("1K"), Some(1_000));
+        assert_eq!(parse_kube_quantity_bytes("1M"), Some(1_000_000));
+        assert_eq!(parse_kube_quantity_bytes("1G"), Some(1_000_000_000));
+        assert_eq!(parse_kube_quantity_bytes("1T"), Some(1_000_000_000_000));
+    }
+
+    #[test]
+    fn parse_quantity_raw_bytes_and_zero() {
+        assert_eq!(parse_kube_quantity_bytes("500000000"), Some(500_000_000));
+        assert_eq!(parse_kube_quantity_bytes("0"), Some(0));
+        assert_eq!(parse_kube_quantity_bytes("  10Gi  "), Some(10i64 << 30));
+    }
+
+    #[test]
+    fn parse_quantity_rejects_garbage() {
+        assert_eq!(parse_kube_quantity_bytes(""), None);
+        assert_eq!(parse_kube_quantity_bytes("   "), None);
+        assert_eq!(parse_kube_quantity_bytes("Gi"), None);
+        assert_eq!(parse_kube_quantity_bytes("10XB"), None);
+        assert_eq!(parse_kube_quantity_bytes("ten gigabytes"), None);
+        // Floating-point sizes are not in the K8s quantity spec we accept;
+        // reject explicitly so users get a clear failure.
+        assert_eq!(parse_kube_quantity_bytes("1.5Gi"), None);
+    }
+
+    #[test]
+    fn parse_quantity_overflow_returns_none() {
+        // i64::MAX is ~9.2 EiB; 100 Ei overflows.
+        assert_eq!(parse_kube_quantity_bytes("100Ei"), None);
+        assert_eq!(parse_kube_quantity_bytes("99999999999999999999Gi"), None);
+    }
+
+    #[test]
+    fn required_target_bytes_scales_by_safety_margin() {
+        // 10 Gi source needs at least 15 Gi target.
+        let ten_gib: i64 = 10 << 30;
+        let fifteen_gib: i64 = 15 << 30;
+        assert_eq!(required_target_bytes(ten_gib), fifteen_gib);
+    }
+
+    #[test]
+    fn required_target_bytes_handles_zero_and_negative() {
+        // Zero-byte source: zero requirement.
+        assert_eq!(required_target_bytes(0), 0);
+        // Defensive: negative input clamped to zero (pg_database_size
+        // should never be negative, but be paranoid).
+        assert_eq!(required_target_bytes(-1), 0);
+    }
+
+    #[test]
+    fn required_target_bytes_saturates_at_i64_max() {
+        // Multiplying near i64::MAX by 1.5 overflows; the helper clamps.
+        let result = required_target_bytes(i64::MAX);
+        assert_eq!(result, i64::MAX);
+    }
+
+    #[test]
+    fn insufficient_storage_message_is_actionable() {
+        let failure = PreflightFailure::InsufficientTargetStorage {
+            source_data_bytes: 10 * 1_000_000_000, // 10 GB
+            target_storage_bytes: 10 * (1 << 30),  // 10 Gi
+            required_bytes: 15 * 1_000_000_000,    // 15 GB
+            target_storage_size: "10Gi".to_string(),
+        };
+        let msg = failure.to_string();
+        assert!(msg.contains("10Gi"), "got: {msg}");
+        assert!(msg.contains("1.5"), "got: {msg}");
+        assert!(
+            msg.contains("targetClusterOverrides") || msg.contains("source cluster"),
+            "should suggest a remediation; got: {msg}"
+        );
     }
 }

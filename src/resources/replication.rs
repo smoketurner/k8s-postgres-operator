@@ -793,6 +793,91 @@ pub async fn wait_for_connections_drain(
 }
 
 // =============================================================================
+// Idle-in-transaction purger (Wiz playbook)
+// =============================================================================
+
+/// One idle-in-transaction session on the source, as observed by
+/// [`find_idle_in_transaction`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdleInTransaction {
+    pub pid: i32,
+    pub username: Option<String>,
+    pub state_change_age_secs: i64,
+}
+
+/// Find sessions on the source that have been `'idle in transaction'` for
+/// at least `threshold_secs`. Excludes the caller's own backend so we
+/// never accidentally terminate the connection running this query.
+///
+/// **Why this exists:** PostgreSQL's `CREATE_REPLICATION_SLOT` and the
+/// `CREATE SUBSCRIPTION` flow that drives it have to take a consistent
+/// snapshot. Any long-running `idle in transaction` session blocks that
+/// snapshot until it commits or rolls back, causing slot creation to hang
+/// silently. This is the single biggest cause of opaque
+/// `ConfiguringReplication` stalls on busy clusters per Wiz's published
+/// Aurora playbook.
+#[instrument(skip(conn))]
+pub async fn find_idle_in_transaction(
+    conn: &PostgresConnection,
+    threshold_secs: i64,
+) -> ReplicationResult<Vec<IdleInTransaction>> {
+    let rows = conn
+        .query(
+            "SELECT pid,
+                    usename,
+                    EXTRACT(EPOCH FROM (now() - state_change))::bigint AS age_secs
+             FROM pg_catalog.pg_stat_activity
+             WHERE state = 'idle in transaction'
+               AND pid <> pg_backend_pid()
+               AND state_change < now() - make_interval(secs => $1::bigint)
+             ORDER BY state_change ASC",
+            &[&threshold_secs],
+        )
+        .await?;
+
+    let mut result = Vec::with_capacity(rows.len());
+    for row in rows {
+        result.push(IdleInTransaction {
+            pid: row.get::<_, i32>("pid"),
+            username: row.try_get::<_, Option<String>>("usename").unwrap_or(None),
+            state_change_age_secs: row.get::<_, i64>("age_secs"),
+        });
+    }
+    Ok(result)
+}
+
+/// Terminate the given backend PIDs on the source via
+/// `pg_terminate_backend`. Returns the number successfully terminated.
+/// Sessions that have already disconnected before we got to them are
+/// counted as not-terminated but are not treated as errors.
+///
+/// Requires the operator's database role to have either the
+/// `pg_signal_backend` predefined role or superuser status against the
+/// source.
+#[instrument(skip(conn, pids))]
+pub async fn terminate_sessions(
+    conn: &PostgresConnection,
+    pids: &[i32],
+) -> ReplicationResult<usize> {
+    let mut terminated = 0;
+    for pid in pids {
+        let row = conn
+            .query_one("SELECT pg_terminate_backend($1) AS ok", &[pid])
+            .await?;
+        let ok: bool = row.get("ok");
+        if ok {
+            terminated += 1;
+        } else {
+            debug!(
+                pid = %pid,
+                "pg_terminate_backend returned false; session likely already gone"
+            );
+        }
+    }
+    Ok(terminated)
+}
+
+// =============================================================================
 // Cleanup Operations
 // =============================================================================
 

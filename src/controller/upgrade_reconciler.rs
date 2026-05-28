@@ -954,6 +954,13 @@ async fn setup_replication(
         PostgresConnection::connect_primary(&ctx.client, source_ns, source_name).await?;
     replication::setup_publication(&source_conn, &pub_name).await?;
 
+    // Purge idle-in-transaction sessions on the source so the slot
+    // creation triggered by `CREATE SUBSCRIPTION` below can take a
+    // consistent snapshot. Without this, slot creation can hang silently
+    // on busy clusters — the most common opaque ConfiguringReplication
+    // stall per Wiz's documented Aurora playbook.
+    purge_source_idle_transactions(upgrade, ctx, source_ns, source_name, &source_conn).await?;
+
     // Get source cluster service host
     let source_host = format!("{}-primary.{}.svc", source_name, source_ns);
 
@@ -962,11 +969,15 @@ async fn setup_replication(
 
     // Connect to target cluster and create subscription
     let target_conn = PostgresConnection::connect_primary(&ctx.client, ns, &target_name).await?;
-    replication::setup_subscription(
+    setup_subscription_with_consistent_snapshot_retry(
+        upgrade,
+        ctx,
+        source_ns,
+        source_name,
+        &source_conn,
         &target_conn,
         &sub_name,
         &source_host,
-        5432,
         &pub_name,
         &source_password,
     )
@@ -1316,6 +1327,169 @@ fn map_service_switch_error(err: ServiceSwitchError) -> UpgradeError {
     }
 }
 
+/// Attempt `CREATE SUBSCRIPTION` with bounded retries when the publisher
+/// fails to take a consistent snapshot. A new idle-in-transaction session
+/// could appear in the window between our purge and the slot creation; if
+/// it does, we re-purge and retry up to [`MAX_CONSISTENT_SNAPSHOT_RETRIES`]
+/// times with bounded backoff.
+#[allow(clippy::too_many_arguments)]
+async fn setup_subscription_with_consistent_snapshot_retry(
+    upgrade: &PostgresUpgrade,
+    ctx: &UpgradeContext,
+    source_ns: &str,
+    source_name: &str,
+    source_conn: &PostgresConnection,
+    target_conn: &PostgresConnection,
+    sub_name: &str,
+    source_host: &str,
+    pub_name: &str,
+    source_password: &str,
+) -> UpgradeResult<()> {
+    const MAX_CONSISTENT_SNAPSHOT_RETRIES: usize = 3;
+
+    let mut attempt: usize = 0;
+    loop {
+        match replication::setup_subscription(
+            target_conn,
+            sub_name,
+            source_host,
+            5432,
+            pub_name,
+            source_password,
+        )
+        .await
+        {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                let msg = e.to_string();
+                let retryable = msg.to_ascii_lowercase().contains("consistent snapshot");
+                if !retryable || attempt >= MAX_CONSISTENT_SNAPSHOT_RETRIES {
+                    return Err(UpgradeError::ReplicationError(e));
+                }
+                attempt += 1;
+                let backoff = Duration::from_secs(2u64.saturating_pow(attempt as u32));
+                warn!(
+                    "CREATE SUBSCRIPTION failed to take a consistent snapshot (attempt {}/{}): {}; \
+                     re-purging idle-in-transaction sessions and retrying after {:?}",
+                    attempt, MAX_CONSISTENT_SNAPSHOT_RETRIES, msg, backoff
+                );
+                purge_source_idle_transactions(upgrade, ctx, source_ns, source_name, source_conn)
+                    .await?;
+                tokio::time::sleep(backoff).await;
+            }
+        }
+    }
+}
+
+/// Purge long-running idle-in-transaction sessions on the source before
+/// the publisher's slot gets created (via `CREATE SUBSCRIPTION` on the
+/// target). Honours `spec.strategy.preChecks.terminate_idle_transactions`
+/// — if the user opted out, we still surface the offending sessions so
+/// they can clean them up before slot creation hangs.
+async fn purge_source_idle_transactions(
+    upgrade: &PostgresUpgrade,
+    ctx: &UpgradeContext,
+    source_ns: &str,
+    source_name: &str,
+    source_conn: &PostgresConnection,
+) -> UpgradeResult<()> {
+    let pre_checks = &upgrade.spec.strategy.pre_checks;
+    let threshold_secs = parse_duration(&pre_checks.idle_transaction_threshold)
+        .map(|d| d.as_secs().max(0))
+        .unwrap_or(300);
+
+    let sessions = replication::find_idle_in_transaction(source_conn, threshold_secs).await?;
+
+    if sessions.is_empty() {
+        debug!(
+            "No idle-in-transaction sessions older than {}s on source {}/{}",
+            threshold_secs, source_ns, source_name
+        );
+        return Ok(());
+    }
+
+    let pids: Vec<i32> = sessions.iter().map(|s| s.pid).collect();
+    let oldest_age = sessions
+        .iter()
+        .map(|s| s.state_change_age_secs)
+        .max()
+        .unwrap_or(0);
+
+    if !pre_checks.terminate_idle_transactions {
+        let summary = format!(
+            "Found {} idle-in-transaction session(s) on source {}/{} older than {}s \
+             (oldest {}s), but spec.strategy.preChecks.terminateIdleTransactions=false. \
+             Slot creation may hang until these sessions are cleaned up manually.",
+            pids.len(),
+            source_ns,
+            source_name,
+            threshold_secs,
+            oldest_age
+        );
+        warn!("{}", summary);
+        ctx.publish_warning_event(
+            upgrade,
+            "IdleTransactionsNotPurged",
+            "PurgeIdleTransactions",
+            Some(summary),
+        )
+        .await;
+        return Ok(());
+    }
+
+    info!(
+        "Terminating {} idle-in-transaction session(s) on source {}/{} (oldest {}s) \
+         before slot creation",
+        pids.len(),
+        source_ns,
+        source_name,
+        oldest_age
+    );
+
+    let terminated = replication::terminate_sessions(source_conn, &pids).await?;
+
+    ctx.publish_normal_event(
+        upgrade,
+        "IdleTransactionsPurged",
+        "PurgeIdleTransactions",
+        Some(format!(
+            "Terminated {terminated}/{} idle-in-transaction session(s) on source {source_ns}/{source_name} \
+             (oldest was {oldest_age}s old) so the publication slot can take a consistent snapshot",
+            pids.len()
+        )),
+    )
+    .await;
+
+    Ok(())
+}
+
+/// Read the storage size string that the target cluster will be created
+/// with. Mirrors the storage portion of [`build_target_spec`]: today the
+/// target inherits source storage verbatim because
+/// `target_cluster_overrides` only touches `resources` and `replicas`.
+///
+/// Returns `None` only if the source cluster isn't reachable; callers
+/// pass the empty string in that case so the parser surfaces a clear
+/// preflight failure instead of skipping the check silently.
+async fn fetch_target_storage_size(
+    ctx: &UpgradeContext,
+    source_ns: &str,
+    source_name: &str,
+) -> Option<String> {
+    let clusters: Api<PostgresCluster> = Api::namespaced(ctx.client.clone(), source_ns);
+    match clusters.get_opt(source_name).await {
+        Ok(Some(cluster)) => Some(cluster.spec.storage.size),
+        Ok(None) => None,
+        Err(e) => {
+            debug!(
+                "fetch_target_storage_size: failed to read source cluster {}/{}: {}",
+                source_ns, source_name, e
+            );
+            None
+        }
+    }
+}
+
 /// Run replication-compatibility preflight checks against the source
 /// cluster. On failure: patch a `PreflightPassed=False` condition with the
 /// concrete failure messages, emit a Warning Event, and return a permanent
@@ -1335,23 +1509,39 @@ async fn run_preflight_or_fail(
         .as_deref()
         .unwrap_or(ns);
 
-    let outcome =
-        match upgrade_preflight::run_preflight_checks(&ctx.client, source_ns, source_name).await {
-            Ok(outcome) => outcome,
-            Err(e) => {
-                // Couldn't *run* the preflight (connectivity, query error).
-                // Surface as transient — the FSM will retry rather than fail
-                // the upgrade just because the source primary was momentarily
-                // unreachable.
-                warn!(
-                    "Preflight run failed against source {}/{}: {}; will retry",
-                    source_ns, source_name, e
-                );
-                return Err(UpgradeError::TransientError(format!(
-                    "preflight unavailable against {source_ns}/{source_name}: {e}"
-                )));
-            }
-        };
+    // Look up the source cluster's storage spec so we can compare it
+    // against the source's actual data size (U13). Target inherits this
+    // verbatim today (see `build_target_spec`); a future override would
+    // be applied here. If the source is missing the field, fall back to
+    // an empty string so the parser fails the check loudly rather than
+    // silently skipping it.
+    let target_storage_size = fetch_target_storage_size(ctx, source_ns, source_name)
+        .await
+        .unwrap_or_default();
+
+    let outcome = match upgrade_preflight::run_preflight_checks(
+        &ctx.client,
+        source_ns,
+        source_name,
+        &target_storage_size,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            // Couldn't *run* the preflight (connectivity, query error).
+            // Surface as transient — the FSM will retry rather than fail
+            // the upgrade just because the source primary was momentarily
+            // unreachable.
+            warn!(
+                "Preflight run failed against source {}/{}: {}; will retry",
+                source_ns, source_name, e
+            );
+            return Err(UpgradeError::TransientError(format!(
+                "preflight unavailable against {source_ns}/{source_name}: {e}"
+            )));
+        }
+    };
 
     if outcome.passed() {
         record_preflight_passed(upgrade, ctx, ns).await?;
