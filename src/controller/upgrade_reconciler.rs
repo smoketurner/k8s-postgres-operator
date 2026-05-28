@@ -27,13 +27,14 @@ use kube::{Client, ResourceExt};
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::controller::cleanup::{cleanup_stuck_resource, is_namespace_not_found_error};
+use crate::controller::conditions::{new_condition, set_status_condition, status as cond_status};
 use crate::controller::finalizer::remove_operator_finalizer;
 use crate::controller::upgrade_error::{UpgradeBackoffConfig, UpgradeError, UpgradeResult};
 use crate::controller::upgrade_state_machine::{
     UpgradeEvent, UpgradeStateMachine, UpgradeTransitionContext, UpgradeTransitionResult,
 };
 use crate::crd::{
-    ClusterPhase, CutoverMode, PostgresCluster, PostgresClusterSpec, PostgresUpgrade,
+    ClusterPhase, Condition, CutoverMode, PostgresCluster, PostgresClusterSpec, PostgresUpgrade,
     ReplicationStatus, SequenceSyncStatus, UpgradeLineageRef, UpgradePhase, VerificationStatus,
 };
 use crate::resources::postgres_client::PostgresConnection;
@@ -135,13 +136,19 @@ pub async fn reconcile_upgrade(
 
             let api: Api<PostgresUpgrade> = Api::namespaced(ctx.client.clone(), &ns);
             let now = Timestamp::now().to_string();
+            let err_msg = format!(
+                "Upgrade failed: source cluster {}/{} does not exist",
+                source_ns, source_name
+            );
+            let conditions = conditions_for_phase(&upgrade, UpgradePhase::Failed, Some(&err_msg));
             let patch = serde_json::json!({
                 "status": {
                     "phase": UpgradePhase::Failed,
                     "phaseStartedAt": now,
                     "completedAt": now,
                     "lastError": format!("Source cluster {}/{} not found", source_ns, source_name),
-                    "message": format!("Upgrade failed: source cluster {}/{} does not exist", source_ns, source_name)
+                    "message": err_msg,
+                    "conditions": conditions,
                 }
             });
 
@@ -1368,6 +1375,102 @@ async fn add_finalizer(
     Ok(())
 }
 
+/// Build the Ready / Progressing / Degraded conditions that describe an
+/// upgrade in the given phase, merged into the upgrade's existing condition
+/// list. Mirrors the convention used by valkey-operator and the cluster
+/// controller in this repo: every status update emits the same three
+/// top-level conditions so consumers can `kubectl wait --for=condition=Ready`.
+fn conditions_for_phase(
+    upgrade: &PostgresUpgrade,
+    phase: UpgradePhase,
+    error_message: Option<&str>,
+) -> Vec<Condition> {
+    let generation = upgrade.metadata.generation;
+    let mut conditions = upgrade
+        .status
+        .as_ref()
+        .map(|s| s.conditions.clone())
+        .unwrap_or_default();
+
+    let (ready, ready_reason, ready_msg): (bool, &str, &str) = match phase {
+        UpgradePhase::Completed => (true, "UpgradeCompleted", "Major-version upgrade complete"),
+        UpgradePhase::RolledBack => (false, "RolledBack", "Upgrade was rolled back to the source"),
+        UpgradePhase::Failed => (
+            false,
+            "UpgradeFailed",
+            error_message.unwrap_or("Upgrade failed"),
+        ),
+        _ => (false, "InProgress", "Upgrade is in progress"),
+    };
+
+    let progressing = !matches!(
+        phase,
+        UpgradePhase::Completed | UpgradePhase::Failed | UpgradePhase::RolledBack
+    );
+    let progressing_reason = match phase {
+        UpgradePhase::Pending => "Pending",
+        UpgradePhase::CreatingTarget => "CreatingTarget",
+        UpgradePhase::ConfiguringReplication => "ConfiguringReplication",
+        UpgradePhase::Replicating => "Replicating",
+        UpgradePhase::Verifying => "Verifying",
+        UpgradePhase::SyncingSequences => "SyncingSequences",
+        UpgradePhase::ReadyForCutover => "ReadyForCutover",
+        UpgradePhase::WaitingForManualCutover => "WaitingForManualCutover",
+        UpgradePhase::CuttingOver => "CuttingOver",
+        UpgradePhase::HealthChecking => "HealthChecking",
+        UpgradePhase::Completed => "UpgradeCompleted",
+        UpgradePhase::Failed => "UpgradeFailed",
+        UpgradePhase::RolledBack => "RolledBack",
+    };
+
+    let degraded = matches!(phase, UpgradePhase::Failed | UpgradePhase::RolledBack);
+
+    set_status_condition(
+        &mut conditions,
+        new_condition(
+            "Ready",
+            if ready {
+                cond_status::TRUE
+            } else {
+                cond_status::FALSE
+            },
+            ready_reason,
+            ready_msg,
+            generation,
+        ),
+    );
+    set_status_condition(
+        &mut conditions,
+        new_condition(
+            "Progressing",
+            if progressing {
+                cond_status::TRUE
+            } else {
+                cond_status::FALSE
+            },
+            progressing_reason,
+            &format!("Phase: {}", phase),
+            generation,
+        ),
+    );
+    set_status_condition(
+        &mut conditions,
+        new_condition(
+            "Degraded",
+            if degraded {
+                cond_status::TRUE
+            } else {
+                cond_status::FALSE
+            },
+            if degraded { "UpgradeFailed" } else { "Healthy" },
+            error_message.unwrap_or(""),
+            generation,
+        ),
+    );
+
+    conditions
+}
+
 /// Update the upgrade phase in status
 async fn update_phase(
     upgrade: &PostgresUpgrade,
@@ -1391,6 +1494,8 @@ async fn update_phase(
         .unwrap_or(true)
         && phase != UpgradePhase::Pending;
 
+    let conditions = conditions_for_phase(upgrade, phase, None);
+
     let patch = match (is_terminal, is_starting) {
         (true, true) => serde_json::json!({
             "status": {
@@ -1398,7 +1503,8 @@ async fn update_phase(
                 "phaseStartedAt": now,
                 "observedGeneration": upgrade.metadata.generation,
                 "completedAt": now,
-                "startedAt": now
+                "startedAt": now,
+                "conditions": conditions,
             }
         }),
         (true, false) => serde_json::json!({
@@ -1406,7 +1512,8 @@ async fn update_phase(
                 "phase": phase,
                 "phaseStartedAt": now,
                 "observedGeneration": upgrade.metadata.generation,
-                "completedAt": now
+                "completedAt": now,
+                "conditions": conditions,
             }
         }),
         (false, true) => serde_json::json!({
@@ -1414,14 +1521,16 @@ async fn update_phase(
                 "phase": phase,
                 "phaseStartedAt": now,
                 "observedGeneration": upgrade.metadata.generation,
-                "startedAt": now
+                "startedAt": now,
+                "conditions": conditions,
             }
         }),
         (false, false) => serde_json::json!({
             "status": {
                 "phase": phase,
                 "phaseStartedAt": now,
-                "observedGeneration": upgrade.metadata.generation
+                "observedGeneration": upgrade.metadata.generation,
+                "conditions": conditions,
             }
         }),
     };

@@ -1012,7 +1012,7 @@ async fn test_database_status_connection_info() {
     let ready_condition = status
         .conditions
         .iter()
-        .find(|c| c.condition_type == DatabaseConditionType::Ready);
+        .find(|c| c.type_ == DatabaseConditionType::Ready.as_str());
     assert!(ready_condition.is_some(), "Ready condition should exist");
     assert_eq!(
         ready_condition.unwrap().status,

@@ -481,14 +481,16 @@ The status subresource is read-only and managed by the operator.
 
 ### Condition
 
+Standard Kubernetes `metav1.Condition` (`k8s.io/apimachinery/pkg/apis/meta/v1.Condition`). All three CRDs (`PostgresCluster`, `PostgresDatabase`, `PostgresUpgrade`) use the same shape, and updates go through the equivalent of `meta.SetStatusCondition` so `lastTransitionTime` only advances when `status` changes.
+
 | Field | Type | Description |
 |-------|------|-------------|
-| `type` | string | Condition type |
+| `type` | string | Condition type (CamelCase) |
 | `status` | string | True, False, or Unknown |
-| `reason` | string | Machine-readable reason |
+| `reason` | string | Machine-readable reason (CamelCase) |
 | `message` | string | Human-readable message |
-| `lastTransitionTime` | string | Last status change timestamp |
-| `observedGeneration` | integer | Generation when condition set |
+| `lastTransitionTime` | string (date-time) | Last status change timestamp |
+| `observedGeneration` | integer | `metadata.generation` observed when condition was set |
 
 ### Condition Types
 

@@ -805,9 +805,12 @@ async fn test_cluster_status_conditions_populated() {
         !progressing.reason.is_empty(),
         "Condition should have a reason"
     );
+    // metav1.Time wraps a Timestamp; just confirm it serializes (any non-default value).
+    let serialized = serde_json::to_string(&progressing.last_transition_time)
+        .expect("lastTransitionTime should serialize");
     assert!(
-        !progressing.last_transition_time.is_empty(),
-        "Condition should have lastTransitionTime"
+        serialized.contains('T'),
+        "Condition should have lastTransitionTime, got {serialized}"
     );
 }
 

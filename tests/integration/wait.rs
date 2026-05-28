@@ -514,13 +514,14 @@ pub fn database_has_condition(
     condition_type: DatabaseConditionType,
     expected_status: &str,
 ) -> impl Condition<PostgresDatabase> {
+    let type_str = condition_type.as_str().to_string();
     let status = expected_status.to_string();
     move |obj: Option<&PostgresDatabase>| {
         obj.and_then(|db| db.status.as_ref())
             .map(|s| {
                 s.conditions
                     .iter()
-                    .any(|c| c.condition_type == condition_type && c.status == status)
+                    .any(|c| c.type_ == type_str && c.status == status)
             })
             .unwrap_or(false)
     }

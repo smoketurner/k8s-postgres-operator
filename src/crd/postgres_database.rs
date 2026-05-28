@@ -7,6 +7,7 @@
 //! - Generate Kubernetes secrets with credentials and connection strings
 //! - Apply grants to control access
 
+use crate::crd::Condition;
 use kube::{CustomResource, KubeSchema};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -238,7 +239,7 @@ pub struct PostgresDatabaseStatus {
 
     /// Conditions representing the current state
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub conditions: Vec<DatabaseCondition>,
+    pub conditions: Vec<Condition>,
 
     /// Connection information for the database
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -284,32 +285,11 @@ impl std::fmt::Display for DatabasePhase {
     }
 }
 
-/// Condition of the database resource
-#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct DatabaseCondition {
-    /// Type of condition
-    #[serde(rename = "type")]
-    pub condition_type: DatabaseConditionType,
-
-    /// Status of the condition (True, False, Unknown)
-    pub status: String,
-
-    /// Last time the condition transitioned
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_transition_time: Option<String>,
-
-    /// Human-readable reason for the condition
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-
-    /// Human-readable message
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-}
-
-/// Types of conditions for PostgresDatabase
-#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+/// Condition type names emitted by the database controller. The struct is
+/// `k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition` (see
+/// [`crate::crd::Condition`]); this enum exists only to give call sites a
+/// typed handle on the well-known type strings.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
 pub enum DatabaseConditionType {
     /// Parent cluster is available and running
     ClusterReady,
@@ -323,6 +303,26 @@ pub enum DatabaseConditionType {
     SecretsCreated,
     /// Resource is ready for use
     Ready,
+}
+
+impl DatabaseConditionType {
+    /// The CamelCase string written to `status.conditions[*].type`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DatabaseConditionType::ClusterReady => "ClusterReady",
+            DatabaseConditionType::DatabaseCreated => "DatabaseCreated",
+            DatabaseConditionType::RolesCreated => "RolesCreated",
+            DatabaseConditionType::GrantsApplied => "GrantsApplied",
+            DatabaseConditionType::SecretsCreated => "SecretsCreated",
+            DatabaseConditionType::Ready => "Ready",
+        }
+    }
+}
+
+impl std::fmt::Display for DatabaseConditionType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Connection information for the database

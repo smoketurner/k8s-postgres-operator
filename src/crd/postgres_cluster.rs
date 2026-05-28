@@ -1,3 +1,4 @@
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::{CustomResource, KubeSchema};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -1396,31 +1397,6 @@ impl std::fmt::Display for ClusterPhase {
             ClusterPhase::Deleting => write!(f, "Deleting"),
         }
     }
-}
-
-/// Kubernetes-style condition
-#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct Condition {
-    /// Type of condition
-    #[serde(rename = "type")]
-    pub type_: String,
-
-    /// Status of the condition: True, False, or Unknown
-    pub status: String,
-
-    /// Reason for the condition's last transition
-    pub reason: String,
-
-    /// Human-readable message
-    pub message: String,
-
-    /// Last time the condition transitioned
-    pub last_transition_time: String,
-
-    /// Generation observed when condition was set
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observed_generation: Option<i64>,
 }
 
 /// Detailed pod information including generation tracking (Kubernetes 1.35+)

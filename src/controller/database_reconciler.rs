@@ -14,9 +14,10 @@ use kube::{Client, Resource, ResourceExt};
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::controller::cleanup::{cleanup_stuck_resource, is_namespace_not_found_error};
+use crate::controller::conditions::{new_condition, set_status_condition, status as cond_status};
 use crate::controller::finalizer::remove_operator_finalizer;
 use crate::crd::{
-    ClusterPhase, DatabaseCondition, DatabaseConditionType, DatabaseConnectionInfo, DatabasePhase,
+    ClusterPhase, Condition, DatabaseConditionType, DatabaseConnectionInfo, DatabasePhase,
     GrantSpec, PostgresCluster, PostgresDatabase, PostgresDatabaseStatus, RoleSpec,
 };
 use crate::resources::postgres_client::PostgresConnection;
@@ -71,6 +72,33 @@ pub type Result<T, E = DatabaseError> = std::result::Result<T, E>;
 pub(crate) const DATABASE_FINALIZER: &str =
     "postgresdatabase.postgres-operator.smoketurner.com/finalizer";
 
+/// Return the prior condition list for a PostgresDatabase, or an empty Vec
+/// if none has been recorded yet.
+fn existing_conditions(db: &PostgresDatabase) -> Vec<Condition> {
+    db.status
+        .as_ref()
+        .map(|s| s.conditions.clone())
+        .unwrap_or_default()
+}
+
+/// Merge a single condition update into the existing list using
+/// [`set_status_condition`] so dedup, transition time, and observedGeneration
+/// follow the standard `metav1.Condition` semantics.
+fn merge_condition(
+    mut conditions: Vec<Condition>,
+    type_: DatabaseConditionType,
+    status: &str,
+    reason: &str,
+    message: &str,
+    generation: Option<i64>,
+) -> Vec<Condition> {
+    set_status_condition(
+        &mut conditions,
+        new_condition(type_.as_str(), status, reason, message, generation),
+    );
+    conditions
+}
+
 /// Reconcile a PostgresDatabase resource
 #[instrument(skip(db, ctx), fields(name = %db.name_any(), namespace = db.namespace().unwrap_or_default()))]
 pub async fn reconcile_database(
@@ -104,18 +132,20 @@ pub async fn reconcile_database(
             );
 
             // Update status to show we're waiting for cluster
+            let conditions = merge_condition(
+                existing_conditions(&db),
+                DatabaseConditionType::ClusterReady,
+                cond_status::FALSE,
+                "ClusterNotFound",
+                &format!("Cluster {}/{} not found", ns, cluster_name),
+                db.metadata.generation,
+            );
             update_status(
                 &db,
                 &ctx,
                 &namespace,
                 DatabasePhase::Pending,
-                vec![DatabaseCondition {
-                    condition_type: DatabaseConditionType::ClusterReady,
-                    status: "False".to_string(),
-                    last_transition_time: Some(jiff::Timestamp::now().to_string()),
-                    reason: Some("ClusterNotFound".to_string()),
-                    message: Some(format!("Cluster {}/{} not found", ns, cluster_name)),
-                }],
+                conditions,
                 None,
                 vec![],
             )
@@ -143,21 +173,23 @@ pub async fn reconcile_database(
         );
 
         // Update status to show we're waiting
+        let conditions = merge_condition(
+            existing_conditions(&db),
+            DatabaseConditionType::ClusterReady,
+            cond_status::FALSE,
+            "ClusterNotReady",
+            &format!(
+                "Cluster {} is in phase {}",
+                db.spec.cluster_ref.name, cluster_phase
+            ),
+            db.metadata.generation,
+        );
         update_status(
             &db,
             &ctx,
             &namespace,
             DatabasePhase::Pending,
-            vec![DatabaseCondition {
-                condition_type: DatabaseConditionType::ClusterReady,
-                status: "False".to_string(),
-                last_transition_time: Some(jiff::Timestamp::now().to_string()),
-                reason: Some("ClusterNotReady".to_string()),
-                message: Some(format!(
-                    "Cluster {} is in phase {}",
-                    db.spec.cluster_ref.name, cluster_phase
-                )),
-            }],
+            conditions,
             None,
             vec![],
         )
@@ -180,48 +212,52 @@ pub async fn reconcile_database(
             };
 
             // Update status to Ready
+            let generation = db.metadata.generation;
+            let mut conditions = existing_conditions(&db);
+            for (type_, reason, message) in [
+                (
+                    DatabaseConditionType::ClusterReady,
+                    "ClusterRunning",
+                    "Parent cluster is running",
+                ),
+                (
+                    DatabaseConditionType::DatabaseCreated,
+                    "DatabaseProvisioned",
+                    "Database has been provisioned",
+                ),
+                (
+                    DatabaseConditionType::RolesCreated,
+                    "RolesProvisioned",
+                    "Roles have been provisioned",
+                ),
+                (
+                    DatabaseConditionType::SecretsCreated,
+                    "SecretsCreated",
+                    "Credential secrets have been created",
+                ),
+                (
+                    DatabaseConditionType::Ready,
+                    "Ready",
+                    "Database is ready for use",
+                ),
+            ] {
+                set_status_condition(
+                    &mut conditions,
+                    new_condition(
+                        type_.as_str(),
+                        cond_status::TRUE,
+                        reason,
+                        message,
+                        generation,
+                    ),
+                );
+            }
             update_status(
                 &db,
                 &ctx,
                 &namespace,
                 DatabasePhase::Ready,
-                vec![
-                    DatabaseCondition {
-                        condition_type: DatabaseConditionType::ClusterReady,
-                        status: "True".to_string(),
-                        last_transition_time: Some(jiff::Timestamp::now().to_string()),
-                        reason: Some("ClusterRunning".to_string()),
-                        message: None,
-                    },
-                    DatabaseCondition {
-                        condition_type: DatabaseConditionType::DatabaseCreated,
-                        status: "True".to_string(),
-                        last_transition_time: Some(jiff::Timestamp::now().to_string()),
-                        reason: Some("DatabaseProvisioned".to_string()),
-                        message: None,
-                    },
-                    DatabaseCondition {
-                        condition_type: DatabaseConditionType::RolesCreated,
-                        status: "True".to_string(),
-                        last_transition_time: Some(jiff::Timestamp::now().to_string()),
-                        reason: Some("RolesProvisioned".to_string()),
-                        message: None,
-                    },
-                    DatabaseCondition {
-                        condition_type: DatabaseConditionType::SecretsCreated,
-                        status: "True".to_string(),
-                        last_transition_time: Some(jiff::Timestamp::now().to_string()),
-                        reason: Some("SecretsCreated".to_string()),
-                        message: None,
-                    },
-                    DatabaseCondition {
-                        condition_type: DatabaseConditionType::Ready,
-                        status: "True".to_string(),
-                        last_transition_time: Some(jiff::Timestamp::now().to_string()),
-                        reason: Some("Ready".to_string()),
-                        message: None,
-                    },
-                ],
+                conditions,
                 Some(connection_info),
                 secrets,
             )
@@ -247,18 +283,20 @@ pub async fn reconcile_database(
             );
 
             // Update status to Failed
+            let conditions = merge_condition(
+                existing_conditions(&db),
+                DatabaseConditionType::Ready,
+                cond_status::FALSE,
+                "ProvisioningFailed",
+                &e.to_string(),
+                db.metadata.generation,
+            );
             update_status(
                 &db,
                 &ctx,
                 &namespace,
                 DatabasePhase::Failed,
-                vec![DatabaseCondition {
-                    condition_type: DatabaseConditionType::Ready,
-                    status: "False".to_string(),
-                    last_transition_time: Some(jiff::Timestamp::now().to_string()),
-                    reason: Some("ProvisioningFailed".to_string()),
-                    message: Some(e.to_string()),
-                }],
+                conditions,
                 None,
                 vec![],
             )
@@ -650,7 +688,7 @@ async fn update_status(
     ctx: &DatabaseContext,
     namespace: &str,
     phase: DatabasePhase,
-    conditions: Vec<DatabaseCondition>,
+    conditions: Vec<Condition>,
     connection_info: Option<DatabaseConnectionInfo>,
     credential_secrets: Vec<String>,
 ) -> Result<()> {

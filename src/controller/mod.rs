@@ -6,6 +6,7 @@ pub(crate) mod cluster_replication_lag;
 pub mod cluster_state_machine;
 pub mod cluster_status;
 pub mod cluster_validation;
+pub mod conditions;
 pub mod context;
 pub mod database_reconciler;
 pub mod finalizer;
