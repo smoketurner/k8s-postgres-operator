@@ -3,6 +3,7 @@ pub(crate) mod certificate;
 pub(crate) mod common;
 pub mod ddl_audit;
 pub mod logical_backup;
+pub mod lsn;
 pub mod network_policy;
 pub mod patroni;
 pub mod pdb;

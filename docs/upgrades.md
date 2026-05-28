@@ -166,6 +166,45 @@ The cutover guard then allows the transition. The Warning Event and
 
 The operator never auto-acknowledges. The default is always `false`.
 
+### Cutover-readiness gate
+
+Even when row counts match, logical-replication lag can still be non-zero —
+new writes may be arriving on the source faster than the target catches up.
+And even if lag momentarily hits zero, the next write on the source advances
+it again. Cutting over at a moment-in-time zero is a race against ongoing
+writes.
+
+To make the gate type-safe and durable, the operator:
+
+1. Refreshes replication lag at the start of every `Verifying` tick using
+   the slot's `pg_current_wal_lsn() - confirmed_flush_lsn` (Wiz's exact
+   query, expressed via the new `Lsn` newtype on
+   `status.replication.{sourceLsn,targetLsn}`).
+2. Once row counts have converged for the configured number of consecutive
+   passes **and** the LSN distance is zero, takes the source primary
+   read-only via `ALTER SYSTEM SET default_transaction_read_only = on` and
+   records `status.sourceReadOnlyAt`.
+3. On the **next** tick, refreshes lag again. With the source no longer
+   accepting writes, the target's `confirmed_flush_lsn` catches up to the
+   final `pg_current_wal_lsn()` and the distance is durably zero.
+4. The FSM transition from `Verifying → SyncingSequences` is guarded on
+   all four: passes ≥ required, no mismatches, lag = 0, source read-only.
+   Sequence sync runs only after all four hold.
+
+```bash
+kubectl get postgresupgrade my-cluster-upgrade -o jsonpath='{.status}' | jq '
+  {phase, sourceReadOnlyAt,
+   verification: {consecutivePasses: .verification.consecutivePasses,
+                  tablesMismatched: .verification.tablesMismatched},
+   replication: {lagBytes: .replication.lagBytes,
+                 sourceLsn: .replication.sourceLsn,
+                 targetLsn: .replication.targetLsn}}'
+```
+
+The source returns to read-write only on rollback. Once `sourceReadOnlyAt`
+is set, the timestamp persists on the status as an audit record even after
+the upgrade completes.
+
 ### Idle-in-transaction purger
 
 The single biggest cause of opaque `ConfiguringReplication` stalls on busy

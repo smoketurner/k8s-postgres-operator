@@ -125,6 +125,12 @@ pub struct UpgradeTransitionContext {
     /// `spec.strategy.acknowledgeDDL`. Only meaningful when
     /// `ddl_observed` is true.
     pub ddl_acknowledged: bool,
+    /// Whether the operator has put the source cluster into read-only
+    /// mode (set during `Verifying`, once verification passes and the
+    /// LSN-distance gate is met). Required for `Verifying →
+    /// SyncingSequences` so the source can't accumulate new WAL between
+    /// the last lag check and sequence sync.
+    pub source_read_only: bool,
 }
 
 impl Default for UpgradeTransitionContext {
@@ -148,6 +154,7 @@ impl Default for UpgradeTransitionContext {
             row_count_mismatches: 0,
             ddl_observed: false,
             ddl_acknowledged: false,
+            source_read_only: false,
         }
     }
 }
@@ -158,10 +165,25 @@ impl UpgradeTransitionContext {
         matches!(self.replication_lag_bytes, Some(lag) if lag <= max_lag_bytes)
     }
 
-    /// Check if verification has passed enough times
+    /// Check if verification is complete and the FSM may transition out of
+    /// `Verifying` into `SyncingSequences`.
+    ///
+    /// Requires:
+    /// 1. Row counts have matched the configured number of times.
+    /// 2. No outstanding row-count mismatches.
+    /// 3. Replication lag is zero (`lsn_distance = 0` on the slot).
+    /// 4. The operator has put the source into read-only mode (so the
+    ///    zero-lag observation can't drift by the time we sync sequences).
+    ///
+    /// Conditions 3 and 4 implement Wiz's "we learned not to switch over
+    /// with high replication lag" rule from their Aurora playbook, plus
+    /// the additional safety of holding source read-only across the
+    /// sequence-sync boundary.
     pub fn verification_complete(&self) -> bool {
-        self.verification_passes >= self.required_verification_passes
-            && self.row_count_mismatches == 0
+        let row_counts_ok = self.verification_passes >= self.required_verification_passes
+            && self.row_count_mismatches == 0;
+        let lag_zero = matches!(self.replication_lag_bytes, Some(0));
+        row_counts_ok && lag_zero && self.source_read_only
     }
 
     /// Check if ready for automatic cutover
@@ -851,6 +873,17 @@ mod tests {
         assert!(matches!(result, UpgradeTransitionResult::Success { .. }));
     }
 
+    /// Convenience: build a context where the only *row-count* prerequisites
+    /// for `verification_complete()` are met. Caller still needs to set lag
+    /// and read-only to make the gate fire.
+    fn verifying_ctx_with_row_counts_ok() -> UpgradeTransitionContext {
+        let mut ctx = default_ctx();
+        ctx.verification_passes = 3;
+        ctx.required_verification_passes = 3;
+        ctx.row_count_mismatches = 0;
+        ctx
+    }
+
     #[test]
     fn test_verification_guard() {
         let sm = UpgradeStateMachine::new();
@@ -859,6 +892,8 @@ mod tests {
         let mut ctx = default_ctx();
         ctx.verification_passes = 2;
         ctx.required_verification_passes = 3;
+        ctx.replication_lag_bytes = Some(0);
+        ctx.source_read_only = true;
         let result = sm.transition(
             &UpgradePhase::Verifying,
             UpgradeEvent::VerificationPassed,
@@ -870,10 +905,10 @@ mod tests {
         ));
 
         // Should fail with row count mismatches
-        let mut ctx = default_ctx();
-        ctx.verification_passes = 3;
-        ctx.required_verification_passes = 3;
+        let mut ctx = verifying_ctx_with_row_counts_ok();
         ctx.row_count_mismatches = 1;
+        ctx.replication_lag_bytes = Some(0);
+        ctx.source_read_only = true;
         let result = sm.transition(
             &UpgradePhase::Verifying,
             UpgradeEvent::VerificationPassed,
@@ -884,17 +919,78 @@ mod tests {
             UpgradeTransitionResult::GuardFailed { .. }
         ));
 
-        // Should succeed with enough passes and no mismatches
-        let mut ctx = default_ctx();
-        ctx.verification_passes = 3;
-        ctx.required_verification_passes = 3;
-        ctx.row_count_mismatches = 0;
+        // Should succeed with all four prerequisites met
+        let mut ctx = verifying_ctx_with_row_counts_ok();
+        ctx.replication_lag_bytes = Some(0);
+        ctx.source_read_only = true;
         let result = sm.transition(
             &UpgradePhase::Verifying,
             UpgradeEvent::VerificationPassed,
             &ctx,
         );
         assert!(matches!(result, UpgradeTransitionResult::Success { .. }));
+    }
+
+    #[test]
+    fn test_verification_blocked_by_nonzero_lag() {
+        let sm = UpgradeStateMachine::new();
+
+        // Row counts converged + source read-only, but lag still > 0.
+        // The U2 gate refuses the transition until LSN-distance is zero.
+        let mut ctx = verifying_ctx_with_row_counts_ok();
+        ctx.replication_lag_bytes = Some(4096);
+        ctx.source_read_only = true;
+        let result = sm.transition(
+            &UpgradePhase::Verifying,
+            UpgradeEvent::VerificationPassed,
+            &ctx,
+        );
+        assert!(matches!(
+            result,
+            UpgradeTransitionResult::GuardFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn test_verification_blocked_when_lag_unknown() {
+        let sm = UpgradeStateMachine::new();
+
+        // No lag observation yet (None). Without a confirmed zero, the
+        // gate has to refuse — silently treating None as "probably zero"
+        // would defeat the safety check.
+        let mut ctx = verifying_ctx_with_row_counts_ok();
+        ctx.replication_lag_bytes = None;
+        ctx.source_read_only = true;
+        let result = sm.transition(
+            &UpgradePhase::Verifying,
+            UpgradeEvent::VerificationPassed,
+            &ctx,
+        );
+        assert!(matches!(
+            result,
+            UpgradeTransitionResult::GuardFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn test_verification_blocked_until_source_read_only() {
+        let sm = UpgradeStateMachine::new();
+
+        // Row counts converged and lag is zero, but source still
+        // read-write. Cutover from here would race: writes between this
+        // observation and sequence sync would not replicate.
+        let mut ctx = verifying_ctx_with_row_counts_ok();
+        ctx.replication_lag_bytes = Some(0);
+        ctx.source_read_only = false;
+        let result = sm.transition(
+            &UpgradePhase::Verifying,
+            UpgradeEvent::VerificationPassed,
+            &ctx,
+        );
+        assert!(matches!(
+            result,
+            UpgradeTransitionResult::GuardFailed { .. }
+        ));
     }
 
     #[test]
