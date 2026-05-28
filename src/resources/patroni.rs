@@ -878,7 +878,12 @@ pub fn generate_patroni_statefulset(
                 spec: Some(PodSpec {
                     service_account_name: Some(sa_name),
                     init_containers: Some(vec![init_container]),
-                    containers: vec![container],
+                    containers: {
+                        let mut all = Vec::with_capacity(1 + cluster.spec.sidecars.len());
+                        all.push(container);
+                        all.extend(cluster.spec.sidecars.iter().cloned());
+                        all
+                    },
                     volumes: Some(volumes),
                     // Increased to 60s to allow Patroni preStop hook to complete gracefully
                     termination_grace_period_seconds: Some(60),

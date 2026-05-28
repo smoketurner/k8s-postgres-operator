@@ -5,12 +5,14 @@
 pub(crate) mod backup;
 pub(crate) mod immutability;
 pub(crate) mod production;
+pub(crate) mod sidecars;
 pub(crate) mod tls;
 pub mod upgrade;
 
 pub use backup::validate_backup;
 pub use immutability::validate_immutability;
 pub use production::validate_production;
+pub use sidecars::validate_sidecars;
 pub use tls::validate_tls;
 pub use upgrade::{
     UpgradeValidationContext, UpgradeValidationResult, validate_no_concurrent_upgrade,
@@ -84,8 +86,12 @@ impl<'a> ValidationContext<'a> {
 /// Run all validation policies and return the first failure
 pub fn validate_all(ctx: &ValidationContext) -> ValidationResult {
     // Tier 1: Critical policies (always enforced)
-    let tier1_policies: Vec<fn(&ValidationContext) -> ValidationResult> =
-        vec![validate_backup, validate_tls, validate_immutability];
+    let tier1_policies: Vec<fn(&ValidationContext) -> ValidationResult> = vec![
+        validate_backup,
+        validate_tls,
+        validate_immutability,
+        validate_sidecars,
+    ];
 
     for policy in tier1_policies {
         let result = policy(ctx);

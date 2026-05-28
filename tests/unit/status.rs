@@ -42,6 +42,7 @@ fn create_test_cluster_with_status(
             restore: None,
             scaling: None,
             network_policy: None,
+            sidecars: vec![],
         },
         status,
     }

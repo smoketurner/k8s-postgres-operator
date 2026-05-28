@@ -403,6 +403,7 @@ mod tests {
                 service: None,
                 scaling: None,
                 network_policy: None,
+                sidecars: vec![],
             },
             status: None,
         }

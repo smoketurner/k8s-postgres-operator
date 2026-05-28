@@ -53,6 +53,7 @@ fn minimal_spec() -> PostgresClusterSpec {
         restore: None,
         scaling: None,
         network_policy: None,
+        sidecars: vec![],
     }
 }
 
@@ -413,6 +414,7 @@ fn valid_spec() -> impl Strategy<Value = PostgresClusterSpec> {
                         restore: None,
                         scaling,
                         network_policy: None,
+                        sidecars: vec![],
                     }
                 },
             )
@@ -468,6 +470,7 @@ fn valid_spec_with_scaling() -> impl Strategy<Value = PostgresClusterSpec> {
                             ..Default::default()
                         }),
                         network_policy: None,
+                        sidecars: vec![],
                     }
                 },
             )
@@ -775,6 +778,7 @@ proptest! {
                 ..Default::default()
             }),
             network_policy: None,
+            sidecars: vec![],
         };
         let cluster = cluster_from_spec(spec);
         let obj = scaled_object::generate_trigger_auth(&cluster);
@@ -817,6 +821,7 @@ proptest! {
                 ..Default::default()
             }),
             network_policy: None,
+            sidecars: vec![],
         };
         let cluster = cluster_from_spec(spec);
         let obj = scaled_object::generate_trigger_auth(&cluster);
@@ -855,6 +860,7 @@ proptest! {
                 ..Default::default()
             }),
             network_policy: None,
+            sidecars: vec![],
         };
         let cluster = cluster_from_spec(spec);
         let is_managing = scaled_object::is_keda_managing_replicas(&cluster);
@@ -940,6 +946,7 @@ mod edge_case_tests {
             restore: None,
             scaling: None,
             network_policy: None,
+            sidecars: vec![],
         };
         let cluster = cluster_from_spec(spec);
 
@@ -975,6 +982,7 @@ mod edge_case_tests {
             restore: None,
             scaling: None,
             network_policy: None,
+            sidecars: vec![],
         });
 
         cluster.status = Some(PostgresClusterStatus {
@@ -1113,6 +1121,7 @@ mod network_policy_tests {
             restore: None,
             scaling: None,
             network_policy,
+            sidecars: vec![],
         };
         cluster_from_spec(spec)
     }
@@ -1570,6 +1579,7 @@ mod webhook_policy_tests {
                 restore: None,
                 scaling: None,
                 network_policy: None,
+                sidecars: vec![],
             };
 
             let cluster = test_cluster_from_spec(spec);
@@ -1616,6 +1626,7 @@ mod webhook_policy_tests {
                 restore: None,
                 scaling: None,
                 network_policy: None,
+                sidecars: vec![],
             };
 
             let cluster = test_cluster_from_spec(spec);
@@ -1658,6 +1669,7 @@ mod webhook_policy_tests {
                 restore: None,
                 scaling: None,
                 network_policy: None,
+                sidecars: vec![],
             };
 
             let new_spec = PostgresClusterSpec {
@@ -1717,6 +1729,7 @@ mod webhook_policy_tests {
                     allow_external_access: false,
                     allow_from: vec![],
                 }),
+                sidecars: vec![],
             };
 
             let cluster = test_cluster_from_spec(spec);

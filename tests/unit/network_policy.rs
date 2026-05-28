@@ -42,6 +42,7 @@ fn create_test_cluster(network_policy: Option<CrdNetworkPolicySpec>) -> Postgres
             restore: None,
             scaling: None,
             network_policy,
+            sidecars: vec![],
         },
         status: None,
     }

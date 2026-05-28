@@ -1,3 +1,4 @@
+use k8s_openapi::api::core::v1::Container;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::{CustomResource, KubeSchema};
 use schemars::JsonSchema;
@@ -169,6 +170,21 @@ pub struct PostgresClusterSpec {
     /// NetworkPolicy is always generated - this controls additional access rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_policy: Option<NetworkPolicySpec>,
+
+    /// Additional sidecar containers to inject into every Spilo pod.
+    ///
+    /// Useful for monitoring agents, log shippers, mesh sidecars, or
+    /// per-cluster custom tooling. Sidecars are appended to the pod's
+    /// container list (after the Spilo container) and share the pod's
+    /// network namespace, but **not** the Spilo container's filesystem
+    /// unless they declare matching `volumeMounts`. The CRD accepts the
+    /// full Kubernetes Container shape (image, env, ports, resources,
+    /// volumeMounts, securityContext, probes, lifecycle, etc.).
+    ///
+    /// Names that collide with the Spilo container name are rejected by
+    /// the admission webhook.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sidecars: Vec<Container>,
 }
 
 fn default_replicas() -> i32 {
