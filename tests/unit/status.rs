@@ -1,5 +1,6 @@
 //! Unit tests for status management
 
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use postgres_operator::controller::cluster_status::{
     ConditionBuilder, condition_status, condition_types, get_replica_pod_names, spec_changed,
 };
@@ -69,16 +70,26 @@ mod condition_builder_tests {
         assert_eq!(conditions[0].observed_generation, Some(1));
     }
 
-    #[test]
-    fn test_set_condition_updates_existing_same_status() {
-        let existing = vec![Condition {
-            type_: "TestCondition".to_string(),
-            status: "True".to_string(),
+    fn seed_condition(type_: &str, status: &str, ts: &str, generation: Option<i64>) -> Condition {
+        Condition {
+            type_: type_.to_string(),
+            status: status.to_string(),
             reason: "OldReason".to_string(),
             message: "Old message".to_string(),
-            last_transition_time: "2024-01-01T00:00:00Z".to_string(),
-            observed_generation: Some(1),
-        }];
+            last_transition_time: Time(ts.parse().unwrap()),
+            observed_generation: generation,
+        }
+    }
+
+    #[test]
+    fn test_set_condition_updates_existing_same_status() {
+        let existing = vec![seed_condition(
+            "TestCondition",
+            "True",
+            "2024-01-01T00:00:00Z",
+            Some(1),
+        )];
+        let original_ts = existing[0].last_transition_time.clone();
 
         let conditions = ConditionBuilder::from_existing(existing, Some(2))
             .set_condition("TestCondition", "True", "NewReason", "New message")
@@ -86,10 +97,7 @@ mod condition_builder_tests {
 
         assert_eq!(conditions.len(), 1);
         // Status same, so transition time should NOT change
-        assert_eq!(
-            conditions[0].last_transition_time,
-            "2024-01-01T00:00:00Z".to_string()
-        );
+        assert_eq!(conditions[0].last_transition_time, original_ts);
         // But reason and message should update
         assert_eq!(conditions[0].reason, "NewReason");
         assert_eq!(conditions[0].message, "New message");
@@ -98,14 +106,13 @@ mod condition_builder_tests {
 
     #[test]
     fn test_set_condition_updates_existing_different_status() {
-        let existing = vec![Condition {
-            type_: "TestCondition".to_string(),
-            status: "True".to_string(),
-            reason: "OldReason".to_string(),
-            message: "Old message".to_string(),
-            last_transition_time: "2024-01-01T00:00:00Z".to_string(),
-            observed_generation: Some(1),
-        }];
+        let existing = vec![seed_condition(
+            "TestCondition",
+            "True",
+            "2024-01-01T00:00:00Z",
+            Some(1),
+        )];
+        let original_ts = existing[0].last_transition_time.clone();
 
         let conditions = ConditionBuilder::from_existing(existing, Some(2))
             .set_condition("TestCondition", "False", "NewReason", "New message")
@@ -114,10 +121,7 @@ mod condition_builder_tests {
         assert_eq!(conditions.len(), 1);
         assert_eq!(conditions[0].status, "False");
         // Status changed, so transition time SHOULD change
-        assert_ne!(
-            conditions[0].last_transition_time,
-            "2024-01-01T00:00:00Z".to_string()
-        );
+        assert_ne!(conditions[0].last_transition_time, original_ts);
     }
 
     #[test]

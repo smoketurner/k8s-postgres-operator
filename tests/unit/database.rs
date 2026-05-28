@@ -771,3 +771,84 @@ mod extension_tests {
         assert_eq!(db.spec.extensions.len(), common.len());
     }
 }
+
+// =============================================================================
+// Condition merge semantics
+// =============================================================================
+
+mod condition_merge_tests {
+    use super::*;
+    use postgres_operator::controller::conditions::{new_condition, set_status_condition, status};
+
+    #[test]
+    fn database_condition_type_to_string_is_camel_case() {
+        assert_eq!(DatabaseConditionType::ClusterReady.as_str(), "ClusterReady");
+        assert_eq!(DatabaseConditionType::Ready.as_str(), "Ready");
+    }
+
+    #[test]
+    fn observed_generation_is_propagated_into_merged_condition() {
+        let mut conditions = Vec::new();
+        set_status_condition(
+            &mut conditions,
+            new_condition(
+                DatabaseConditionType::Ready.as_str(),
+                status::TRUE,
+                "Ready",
+                "ok",
+                Some(7),
+            ),
+        );
+
+        assert_eq!(conditions.len(), 1);
+        assert_eq!(conditions[0].observed_generation, Some(7));
+    }
+
+    #[test]
+    fn merging_same_status_preserves_transition_time() {
+        let mut conditions = Vec::new();
+        set_status_condition(
+            &mut conditions,
+            new_condition(
+                DatabaseConditionType::Ready.as_str(),
+                status::TRUE,
+                "Ready",
+                "ok",
+                Some(1),
+            ),
+        );
+        let original_ts = conditions[0].last_transition_time.clone();
+
+        set_status_condition(
+            &mut conditions,
+            new_condition(
+                DatabaseConditionType::Ready.as_str(),
+                status::TRUE,
+                "StillReady",
+                "still ok",
+                Some(2),
+            ),
+        );
+
+        assert_eq!(conditions[0].last_transition_time, original_ts);
+        assert_eq!(conditions[0].reason, "StillReady");
+        assert_eq!(conditions[0].observed_generation, Some(2));
+    }
+
+    #[test]
+    fn merging_distinct_types_does_not_collapse_entries() {
+        let mut conditions = Vec::new();
+        for type_ in [
+            DatabaseConditionType::ClusterReady,
+            DatabaseConditionType::DatabaseCreated,
+            DatabaseConditionType::Ready,
+        ] {
+            set_status_condition(
+                &mut conditions,
+                new_condition(type_.as_str(), status::TRUE, "Seed", "", Some(1)),
+            );
+        }
+
+        assert_eq!(conditions.len(), 3);
+    }
+}

@@ -9,6 +9,7 @@ use kube::{Api, ResourceExt};
 
 use crate::controller::Context;
 use crate::controller::cluster_error::Result;
+use crate::controller::conditions::{new_condition, set_status_condition, status as cond_status};
 use crate::crd::{
     BackupStatus, ClusterPhase, Condition, ConnectionInfo, PostgresCluster, PostgresClusterStatus,
 };
@@ -32,14 +33,25 @@ pub mod condition_types {
     pub const POD_GENERATION_SYNCED: &str = "PodGenerationSynced";
 }
 
-/// Condition status values
+/// Condition status values. Re-exported from [`crate::controller::conditions`]
+/// to preserve the historical `cluster_status::condition_status::TRUE` path.
 pub mod condition_status {
-    pub const TRUE: &str = "True";
-    pub const FALSE: &str = "False";
-    pub const UNKNOWN: &str = "Unknown";
+    pub use crate::controller::conditions::status::{FALSE, TRUE, UNKNOWN};
 }
 
-/// Builder for creating and updating status conditions
+fn bool_status(value: bool) -> &'static str {
+    if value {
+        cond_status::TRUE
+    } else {
+        cond_status::FALSE
+    }
+}
+
+/// Builder for creating and updating status conditions on a PostgresCluster.
+///
+/// Wraps [`set_status_condition`] so that callers get deduplication,
+/// `lastTransitionTime` preservation across no-op updates, and
+/// `observedGeneration` propagation for free.
 pub struct ConditionBuilder {
     conditions: Vec<Condition>,
     generation: Option<i64>,
@@ -64,71 +76,51 @@ impl ConditionBuilder {
 
     /// Set a condition, updating if it exists or adding if it doesn't
     pub fn set_condition(mut self, type_: &str, status: &str, reason: &str, message: &str) -> Self {
-        let now = Timestamp::now().to_string();
-
-        // Find existing condition of this type
-        if let Some(existing) = self.conditions.iter_mut().find(|c| c.type_ == type_) {
-            // Only update transition time if status changed
-            if existing.status != status {
-                existing.last_transition_time = now;
-            }
-            // Always update reason, message, and status
-            existing.status = status.to_string();
-            existing.reason = reason.to_string();
-            existing.message = message.to_string();
-            existing.observed_generation = self.generation;
-        } else {
-            // Add new condition
-            self.conditions.push(Condition {
-                type_: type_.to_string(),
-                status: status.to_string(),
-                reason: reason.to_string(),
-                message: message.to_string(),
-                last_transition_time: now,
-                observed_generation: self.generation,
-            });
-        }
+        set_status_condition(
+            &mut self.conditions,
+            new_condition(type_, status, reason, message, self.generation),
+        );
         self
     }
 
     /// Set the Ready condition
     pub fn ready(self, is_ready: bool, reason: &str, message: &str) -> Self {
-        let status = if is_ready {
-            condition_status::TRUE
-        } else {
-            condition_status::FALSE
-        };
-        self.set_condition(condition_types::READY, status, reason, message)
+        self.set_condition(
+            condition_types::READY,
+            bool_status(is_ready),
+            reason,
+            message,
+        )
     }
 
     /// Set the Progressing condition
     pub fn progressing(self, is_progressing: bool, reason: &str, message: &str) -> Self {
-        let status = if is_progressing {
-            condition_status::TRUE
-        } else {
-            condition_status::FALSE
-        };
-        self.set_condition(condition_types::PROGRESSING, status, reason, message)
+        self.set_condition(
+            condition_types::PROGRESSING,
+            bool_status(is_progressing),
+            reason,
+            message,
+        )
     }
 
     /// Set the Degraded condition
     pub fn degraded(self, is_degraded: bool, reason: &str, message: &str) -> Self {
-        let status = if is_degraded {
-            condition_status::TRUE
-        } else {
-            condition_status::FALSE
-        };
-        self.set_condition(condition_types::DEGRADED, status, reason, message)
+        self.set_condition(
+            condition_types::DEGRADED,
+            bool_status(is_degraded),
+            reason,
+            message,
+        )
     }
 
     /// Set the ConfigurationValid condition
     pub fn config_valid(self, is_valid: bool, reason: &str, message: &str) -> Self {
-        let status = if is_valid {
-            condition_status::TRUE
-        } else {
-            condition_status::FALSE
-        };
-        self.set_condition(condition_types::CONFIG_VALID, status, reason, message)
+        self.set_condition(
+            condition_types::CONFIG_VALID,
+            bool_status(is_valid),
+            reason,
+            message,
+        )
     }
 
     /// Set the ResourceResizeInProgress condition (Kubernetes 1.35+, KEP-1287)
@@ -138,14 +130,9 @@ impl ConditionBuilder {
         reason: &str,
         message: &str,
     ) -> Self {
-        let status = if is_resizing {
-            condition_status::TRUE
-        } else {
-            condition_status::FALSE
-        };
         self.set_condition(
             condition_types::RESOURCE_RESIZE_IN_PROGRESS,
-            status,
+            bool_status(is_resizing),
             reason,
             message,
         )
@@ -153,14 +140,9 @@ impl ConditionBuilder {
 
     /// Set the PodGenerationSynced condition (Kubernetes 1.35+, KEP-5067)
     pub fn pod_generation_synced(self, is_synced: bool, reason: &str, message: &str) -> Self {
-        let status = if is_synced {
-            condition_status::TRUE
-        } else {
-            condition_status::FALSE
-        };
         self.set_condition(
             condition_types::POD_GENERATION_SYNCED,
-            status,
+            bool_status(is_synced),
             reason,
             message,
         )
