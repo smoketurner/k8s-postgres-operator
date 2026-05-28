@@ -293,8 +293,13 @@ spec:
 
 | Field | Description |
 |-------|-------------|
-| `enabled` | Enable Prometheus metrics exporter |
+| `enabled` | Enable Prometheus metrics. Creates a `<cluster>-metrics` Service |
 | `port` | Metrics port (default: 9187) |
+| `serviceMonitor.enabled` | Generate a Prometheus Operator ServiceMonitor (requires `monitoring.coreos.com` CRDs) |
+| `serviceMonitor.interval` | Scrape interval (e.g. `"30s"`) |
+| `serviceMonitor.scrapeTimeout` | Scrape timeout |
+| `serviceMonitor.path` | HTTP path on the metrics endpoint (default: `/metrics`) |
+| `serviceMonitor.labels` | Additional labels so the Prometheus `serviceMonitorSelector` matches the monitor |
 
 ## Examples
 
