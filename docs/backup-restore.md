@@ -10,7 +10,8 @@ This guide covers how to configure, monitor, and restore PostgreSQL backups mana
 4. [Monitoring Backups](#monitoring-backups)
 5. [Restore Operations](#restore-operations)
 6. [Point-in-Time Recovery](#point-in-time-recovery)
-7. [Troubleshooting](#troubleshooting)
+7. [Logical Backups (pg_dumpall)](#logical-backups-pg_dumpall)
+8. [Troubleshooting](#troubleshooting)
 
 ## Overview
 
@@ -21,6 +22,7 @@ The operator integrates with [WAL-G](https://github.com/wal-g/wal-g) through the
 - **Point-in-time recovery (PITR)**: Restore to any moment between backups
 - **Delta backups**: Store only changed pages to reduce backup size
 - **Encryption**: AES-256 or PGP encryption for backups at rest
+- **Logical backups**: Optional scheduled `pg_dumpall` CronJob (see [`spec.backup.logical`](#logical-backups-pg_dumpall)) for schema migrations, cross-major-version restores, and compliance snapshots
 
 ### Architecture
 
@@ -460,6 +462,54 @@ backup:
 - **Backup your keys**: Without the key, backups cannot be restored
 - **Key rotation**: Not supported for existing backups; create new cluster with new key
 - **Key validation**: The operator validates the secret exists before deploying the cluster
+
+## Logical Backups (pg_dumpall)
+
+In addition to WAL-G physical backups, the operator can run a scheduled `pg_dumpall` CronJob that streams the full SQL dump through `gzip` and uploads it to the same S3 destination WAL-G uses. Logical backups are orthogonal to WAL-G: WAL-G covers continuous archiving and PITR; logical backups are useful for schema migrations, cross-major-version restores, and compliance snapshots.
+
+### Enabling Logical Backups
+
+Add a `logical` block inside `spec.backup`:
+
+```yaml
+backup:
+  schedule: "0 2 * * *"
+  retention:
+    count: 7
+  destination:
+    S3:
+      bucket: my-backups
+      region: us-east-1
+      credentialsSecret: aws-credentials
+  encryption:
+    method: aes256
+    keySecret: backup-encryption-key
+  logical:
+    enabled: true
+    schedule: "0 3 * * *"   # Daily at 3 AM (independent of WAL-G schedule)
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+```
+
+### How It Works
+
+- The operator reconciles a `batch/v1.CronJob` named `<cluster>-logical-backup` in the cluster namespace.
+- The CronJob pod uses the cluster's Spilo image by default (so `pg_dumpall` and the `aws` CLI are both present). Override with `spec.backup.logical.image`.
+- Dumps land at `s3://<bucket>/<path>/logical/<timestamp>.sql.gz`.
+- `concurrencyPolicy: Forbid` prevents overlapping runs if a dump is slow.
+- `PGPASSWORD` is sourced from the cluster credentials Secret; AWS credentials are sourced from `spec.backup.destination.S3.credentialsSecret`.
+- When `spec.backup.logical.enabled` is set to `false` (or the `logical` block is removed), the operator deletes any previously-managed CronJob.
+
+### LogicalBackupSpec Fields
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean | Yes | - | Enable scheduled logical backups |
+| `schedule` | string | Yes | - | Cron schedule (e.g. `"0 3 * * *"`) |
+| `image` | string | No | Cluster Spilo image | Image override for the dump pod |
+| `resources` | ResourceRequirements | No | - | CPU/memory requests and limits for the dump pod |
+| `successfulJobsHistoryLimit` | integer | No | 3 | Successful job runs to keep |
+| `failedJobsHistoryLimit` | integer | No | 3 | Failed job runs to keep |
 
 ## Troubleshooting
 

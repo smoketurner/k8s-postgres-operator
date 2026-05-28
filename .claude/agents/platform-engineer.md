@@ -89,7 +89,7 @@ When reviewing changes, flag these patterns:
 ## Specific Domain Knowledge
 
 ### PostgreSQL Operations
-- Backups: WAL-G continuous archiving + scheduled base backups
+- Backups: WAL-G continuous archiving + scheduled base backups; optional `pg_dumpall` logical backup CronJob (`spec.backup.logical`)
 - HA: Patroni automatic failover, minimum 3 replicas for quorum
 - Connection pooling: PgBouncer for connection efficiency
 - Monitoring: pg_stat_statements for query analysis, postgres_exporter for metrics
@@ -137,7 +137,7 @@ Every feature should make at least one of these journeys easier, not harder.
 
 This is a Kubernetes operator for PostgreSQL using:
 - Patroni/Spilo for HA (automatic failover via Kubernetes Endpoints DCS)
-- WAL-G for backups to S3/GCS/Azure
+- WAL-G for backups to S3/GCS/Azure; optional `pg_dumpall` CronJob for logical backups
 - PgBouncer for connection pooling
 - kube-rs 2.x in Rust
 - Target Kubernetes version: 1.35+

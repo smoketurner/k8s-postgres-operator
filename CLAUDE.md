@@ -172,6 +172,7 @@ Each module generates Kubernetes resources:
 - `pdb.rs`: PodDisruptionBudget
 - `pgbouncer.rs`: PgBouncer Deployment for connection pooling
 - `backup.rs`: WAL-G backup configuration (encryption required)
+- `logical_backup.rs`: CronJob-based `pg_dumpall` logical backup (scheduled full SQL dumps to S3)
 - `certificate.rs`: cert-manager Certificate CR for TLS
 - `common.rs`: Standard labels, owner references, user label merging
 - `scaled_object.rs`: KEDA ScaledObject for auto-scaling (CPU/connection metrics)
@@ -261,6 +262,7 @@ These features are available natively via k8s-openapi v1_35 (`ContainerResizePol
 - Supports S3 and S3-compatible storage backends (AWS S3, MinIO, DigitalOcean Spaces, etc.)
 - **Encryption required**: Must specify `encryption.keySecret` when backups are configured
 - Environment variables injected into Spilo container for WAL-G configuration
+- Optional `spec.backup.logical` enables a scheduled `pg_dumpall` CronJob for logical backups (orthogonal to WAL-G)
 - See `docs/backup-restore.md` for detailed configuration
 
 ## Operator Design Principles
@@ -303,5 +305,5 @@ For detailed documentation, see:
 - `docs/development.md` - Build, test, debug instructions
 - `docs/operations.md` - Day-2 operations, monitoring, troubleshooting
 - `docs/api-reference.md` - CRD field reference
-- `docs/backup-restore.md` - WAL-G backup configuration (encryption required)
+- `docs/backup-restore.md` - WAL-G backup configuration and logical (`pg_dumpall`) backups (encryption required)
 - `docs/upgrades.md` - Blue-green major version upgrades using logical replication

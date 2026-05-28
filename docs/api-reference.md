@@ -231,6 +231,20 @@ metrics:
 | `downloadConcurrency` | integer | No | 10 | WAL-G download concurrency |
 | `enableDeltaBackups` | boolean | No | false | Enable delta backups |
 | `deltaMaxSteps` | integer | No | - | Max delta steps before full backup |
+| `logical` | [LogicalBackupSpec](#logicalbackupspec) | No | - | Scheduled `pg_dumpall` logical backup CronJob |
+
+### LogicalBackupSpec
+
+Optional scheduled `pg_dumpall` backup. The operator reconciles a `batch/v1.CronJob` in the cluster namespace. Orthogonal to WAL-G: WAL-G covers continuous archiving + PITR; logical backups cover schema migrations, cross-major-version restores, and compliance snapshots.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean | Yes | - | Enable scheduled logical backups |
+| `schedule` | string | Yes | - | Cron schedule (e.g. `"0 3 * * *"`) |
+| `image` | string | No | Cluster Spilo image | Image override for the dump pod |
+| `resources` | ResourceRequirements | No | - | CPU/memory requests and limits for the dump pod |
+| `successfulJobsHistoryLimit` | integer | No | 3 | Successful job runs to keep |
+| `failedJobsHistoryLimit` | integer | No | 3 | Failed job runs to keep |
 
 ### EncryptionSpec
 
