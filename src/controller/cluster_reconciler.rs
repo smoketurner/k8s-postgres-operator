@@ -37,8 +37,8 @@ use crate::controller::context::Context;
 use crate::controller::finalizer::remove_operator_finalizer;
 use crate::crd::{ClusterPhase, PostgresCluster};
 use crate::resources::{
-    backup, certificate, network_policy, patroni, pdb, pgbouncer, scaled_object, secret, service,
-    service_monitor,
+    backup, certificate, logical_backup, network_policy, patroni, pdb, pgbouncer, scaled_object,
+    secret, service, service_monitor,
 };
 
 /// Finalizer name for cleanup
@@ -565,6 +565,15 @@ async fn check_and_update_status(
         );
     }
 
+    // Apply the optional logical backup CronJob (pg_dumpall). Non-fatal.
+    if let Err(e) = reconcile_logical_backup(cluster, ctx, ns).await {
+        warn!(
+            cluster = %name,
+            error = %e,
+            "Failed to reconcile logical backup CronJob (non-fatal)"
+        );
+    }
+
     // Update PgBouncer ready replicas status if PgBouncer is enabled
     if pgbouncer::is_pgbouncer_enabled(cluster) {
         let deploy_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), ns);
@@ -992,6 +1001,15 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
             cluster = %name,
             error = %e,
             "Failed to reconcile monitoring resources (non-fatal)"
+        );
+    }
+
+    // Apply the optional logical backup CronJob (pg_dumpall). Non-fatal.
+    if let Err(e) = reconcile_logical_backup(cluster, ctx, ns).await {
+        warn!(
+            cluster = %name,
+            error = %e,
+            "Failed to reconcile logical backup CronJob (non-fatal)"
         );
     }
 
@@ -1730,6 +1748,33 @@ async fn reconcile_monitoring_resources(
             &format!("{name}-metrics"),
         )
         .await?;
+    }
+
+    Ok(())
+}
+
+/// Reconcile the optional `pg_dumpall` CronJob. Creates/updates it when
+/// `spec.backup.logical.enabled` is true; deletes a previously-managed
+/// CronJob otherwise.
+async fn reconcile_logical_backup(
+    cluster: &PostgresCluster,
+    ctx: &Context,
+    ns: &str,
+) -> Result<()> {
+    let name = cluster.name_any();
+    let cj_name = format!("{name}-logical-backup");
+
+    if let Some(cj) = logical_backup::generate_logical_backup_cronjob(cluster) {
+        debug!(cluster = %name, "Applying logical backup CronJob");
+        apply_resource(ctx, ns, &cj).await?;
+    } else {
+        let api: Api<k8s_openapi::api::batch::v1::CronJob> =
+            Api::namespaced(ctx.client.clone(), ns);
+        match api.delete(&cj_name, &DeleteParams::default()).await {
+            Ok(_) => {}
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+            Err(e) => return Err(Error::KubeError(e)),
+        }
     }
 
     Ok(())

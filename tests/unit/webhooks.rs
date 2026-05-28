@@ -86,6 +86,7 @@ fn create_valid_backup() -> BackupSpec {
         download_concurrency: None,
         enable_delta_backups: false,
         delta_max_steps: None,
+        logical: None,
     }
 }
 
@@ -113,6 +114,7 @@ fn create_backup_without_encryption() -> BackupSpec {
         download_concurrency: None,
         enable_delta_backups: false,
         delta_max_steps: None,
+        logical: None,
     }
 }
 
@@ -655,6 +657,7 @@ mod edge_case_tests {
             download_concurrency: None,
             enable_delta_backups: false,
             delta_max_steps: None,
+            logical: None,
         });
 
         let ctx = ValidationContext::new(&cluster, None, BTreeMap::new());

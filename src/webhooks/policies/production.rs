@@ -113,6 +113,7 @@ mod tests {
             download_concurrency: None,
             enable_delta_backups: false,
             delta_max_steps: None,
+            logical: None,
         }
     }
 
