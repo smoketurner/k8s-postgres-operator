@@ -106,7 +106,7 @@ The `_scoped` variants take an optional namespace and are used by integration te
 
 #### PostgresCluster (`postgres_cluster.rs`)
 `PostgresCluster` custom resource with:
-- **Spec**: `version`, `replicas`, `storage`, `resources`, `postgresql_params`, `labels`, `backup`, `pgbouncer`, `tls`, `metrics`, `service`, `restore`, `scaling`, `networkPolicy`
+- **Spec**: `version`, `replicas`, `storage`, `resources`, `postgresql_params`, `labels`, `backup`, `pgbouncer`, `tls`, `metrics`, `service`, `restore`, `scaling`, `networkPolicy`, `sidecars`, `nodeSelector`, `tolerations`, `topologySpreadConstraints`, `priorityClassName`
 - **Status**: `phase`, `readyReplicas`, `primaryPod`, `replicaPods`, `conditions`, `observedGeneration`, `backup`, `restoredFrom`, `replicationLag`, `connectionInfo`
 
 API version: `postgres-operator.smoketurner.com/v1alpha1`
