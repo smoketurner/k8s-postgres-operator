@@ -224,6 +224,65 @@ pub fn generate_headless_service(cluster: &PostgresCluster) -> Service {
     }
 }
 
+/// Generate a metrics Service that targets the metrics-exporter sidecar
+/// declared via `spec.sidecars`. Returns `None` if metrics are not enabled.
+///
+/// The Service name is `<cluster>-metrics`; the single port is named
+/// `metrics` so the Prometheus Operator ServiceMonitor can reference it
+/// by name. The `postgres-operator.smoketurner.com/service: metrics` label
+/// distinguishes this Service from the primary/replica/headless trio in
+/// the ServiceMonitor's selector.
+pub fn generate_metrics_service(cluster: &PostgresCluster) -> Option<Service> {
+    let metrics = cluster.spec.metrics.as_ref()?;
+    if !metrics.enabled {
+        return None;
+    }
+
+    let cluster_name = cluster.name_any();
+    let name = format!("{cluster_name}-metrics");
+    let ns = cluster.namespace();
+
+    let mut labels = standard_labels(&cluster_name);
+    labels.insert(
+        "postgres-operator.smoketurner.com/service".to_string(),
+        "metrics".to_string(),
+    );
+
+    let selector = BTreeMap::from([
+        ("app.kubernetes.io/name".to_string(), cluster_name.clone()),
+        (
+            "postgres-operator.smoketurner.com/cluster".to_string(),
+            cluster_name,
+        ),
+    ]);
+
+    Some(Service {
+        metadata: ObjectMeta {
+            name: Some(name),
+            namespace: ns,
+            labels: Some(labels),
+            owner_references: Some(vec![owner_reference(cluster)]),
+            ..Default::default()
+        },
+        spec: Some(K8sServiceSpec {
+            selector: Some(selector),
+            ports: Some(vec![ServicePort {
+                port: metrics.port,
+                target_port: Some(IntOrString::Int(metrics.port)),
+                name: Some("metrics".to_string()),
+                protocol: Some("TCP".to_string()),
+                ..Default::default()
+            }]),
+            type_: Some("ClusterIP".to_string()),
+            // Include unready pods so Prometheus keeps scraping during
+            // rolling restarts.
+            publish_not_ready_addresses: Some(true),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+}
+
 // ============================================================================
 // Service Switching for Blue-Green Upgrades
 // ============================================================================

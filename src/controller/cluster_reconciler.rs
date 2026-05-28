@@ -38,6 +38,7 @@ use crate::controller::finalizer::remove_operator_finalizer;
 use crate::crd::{ClusterPhase, PostgresCluster};
 use crate::resources::{
     backup, certificate, network_policy, patroni, pdb, pgbouncer, scaled_object, secret, service,
+    service_monitor,
 };
 
 /// Finalizer name for cleanup
@@ -554,6 +555,16 @@ async fn check_and_update_status(
         );
     }
 
+    // Apply Prometheus Operator resources (metrics Service + ServiceMonitor).
+    // Non-fatal: missing Prometheus Operator CRDs are tolerated.
+    if let Err(e) = reconcile_monitoring_resources(cluster, ctx, ns).await {
+        warn!(
+            cluster = %name,
+            error = %e,
+            "Failed to reconcile monitoring resources (non-fatal)"
+        );
+    }
+
     // Update PgBouncer ready replicas status if PgBouncer is enabled
     if pgbouncer::is_pgbouncer_enabled(cluster) {
         let deploy_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), ns);
@@ -972,6 +983,16 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
         );
         // Don't fail reconciliation if KEDA resources can't be applied
         // The cluster will still work, just without auto-scaling
+    }
+
+    // Apply Prometheus Operator resources (metrics Service + ServiceMonitor).
+    // Non-fatal: missing Prometheus Operator CRDs are tolerated.
+    if let Err(e) = reconcile_monitoring_resources(cluster, ctx, ns).await {
+        warn!(
+            cluster = %name,
+            error = %e,
+            "Failed to reconcile monitoring resources (non-fatal)"
+        );
     }
 
     // Check StatefulSet status
@@ -1432,7 +1453,11 @@ async fn apply_certificate(ctx: &Context, ns: &str, cert: &certificate::Certific
 ///
 /// Uses the dynamic API since KEDA CRDs are not built-in Kubernetes resources.
 /// Gracefully handles the case where KEDA is not installed.
-async fn apply_keda_resource(
+/// Apply a third-party CRD instance (KEDA, Prometheus Operator, etc.) via
+/// server-side apply. A 404 response is treated as "CRD not installed" and
+/// downgraded to a warning so the operator works against clusters that
+/// don't have the optional CRDs installed.
+async fn apply_dynamic_resource(
     ctx: &Context,
     ns: &str,
     obj: &kube::api::DynamicObject,
@@ -1483,14 +1508,13 @@ async fn apply_keda_resource(
 
     match api.patch(&name, &params, &Patch::Apply(obj)).await {
         Ok(_) => {
-            debug!("Applied KEDA resource {}: {}", ar.kind, name);
+            debug!("Applied {} resource: {}", ar.kind, name);
             Ok(())
         }
         Err(kube::Error::Api(ae)) if ae.code == 404 => {
-            // CRD not found - KEDA is not installed
             warn!(
-                "KEDA CRD {} not found - KEDA may not be installed. Skipping {}",
-                ar.kind, name
+                "{} CRD ({}/{}) not found; skipping {}. Install the relevant operator to enable this resource.",
+                ar.kind, ar.group, ar.version, name
             );
             Ok(())
         }
@@ -1498,10 +1522,9 @@ async fn apply_keda_resource(
     }
 }
 
-/// Delete a KEDA resource if it exists
-///
-/// Used to clean up KEDA resources when scaling is disabled.
-async fn delete_keda_resource(
+/// Delete a third-party CRD instance if it exists. Used when an optional
+/// feature is disabled so the previously-managed resource is cleaned up.
+async fn delete_dynamic_resource(
     ctx: &Context,
     ns: &str,
     group: &str,
@@ -1523,11 +1546,11 @@ async fn delete_keda_resource(
 
     match api.delete(name, &DeleteParams::default()).await {
         Ok(_) => {
-            debug!("Deleted KEDA resource {}: {}", kind, name);
+            debug!("Deleted {} resource: {}", kind, name);
             Ok(())
         }
         Err(kube::Error::Api(ae)) if ae.code == 404 => {
-            // Resource doesn't exist, nothing to delete
+            // Resource doesn't exist (or the CRD itself isn't installed) — nothing to do.
             Ok(())
         }
         Err(e) => Err(Error::KubeError(e)),
@@ -1635,15 +1658,15 @@ async fn reconcile_keda_resources(
         }
 
         info!(cluster = %name, "Applying KEDA ScaledObject for reader auto-scaling");
-        apply_keda_resource(ctx, ns, &scaled_obj).await?;
+        apply_dynamic_resource(ctx, ns, &scaled_obj).await?;
 
         // Also create TriggerAuthentication if needed for connection-based scaling
         if let Some(trigger_auth) = scaled_object::generate_trigger_auth(cluster) {
-            apply_keda_resource(ctx, ns, &trigger_auth).await?;
+            apply_dynamic_resource(ctx, ns, &trigger_auth).await?;
         }
     } else {
         // Clean up ScaledObject if scaling is disabled
-        delete_keda_resource(
+        delete_dynamic_resource(
             ctx,
             ns,
             scaled_object::KEDA_API_GROUP,
@@ -1653,13 +1676,58 @@ async fn reconcile_keda_resources(
         )
         .await?;
 
-        delete_keda_resource(
+        delete_dynamic_resource(
             ctx,
             ns,
             scaled_object::KEDA_API_GROUP,
             scaled_object::KEDA_API_VERSION,
             "TriggerAuthentication",
             &format!("{}-pg-auth", name),
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+/// Reconcile Prometheus Operator resources: the metrics Service is created
+/// when `spec.metrics.enabled` is true, and a ServiceMonitor is created when
+/// `spec.metrics.serviceMonitor.enabled` is true. Both are no-ops when the
+/// corresponding spec block is absent, and the ServiceMonitor apply is
+/// tolerant of the Prometheus Operator CRDs not being installed.
+async fn reconcile_monitoring_resources(
+    cluster: &PostgresCluster,
+    ctx: &Context,
+    ns: &str,
+) -> Result<()> {
+    let name = cluster.name_any();
+
+    if let Some(svc) = service::generate_metrics_service(cluster) {
+        debug!(cluster = %name, "Applying metrics Service");
+        apply_resource(ctx, ns, &svc).await?;
+    } else {
+        // Metrics disabled or unconfigured — remove a previously-managed metrics Service.
+        let api: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
+        let svc_name = format!("{name}-metrics");
+        match api.delete(&svc_name, &DeleteParams::default()).await {
+            Ok(_) => {}
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+            Err(e) => return Err(Error::KubeError(e)),
+        }
+    }
+
+    if let Some(sm) = service_monitor::generate_service_monitor(cluster) {
+        debug!(cluster = %name, "Applying Prometheus ServiceMonitor");
+        apply_dynamic_resource(ctx, ns, &sm).await?;
+    } else {
+        // ServiceMonitor disabled — clean up if one was previously managed.
+        delete_dynamic_resource(
+            ctx,
+            ns,
+            service_monitor::PROMETHEUS_API_GROUP,
+            service_monitor::PROMETHEUS_API_VERSION,
+            service_monitor::SERVICE_MONITOR_KIND,
+            &format!("{name}-metrics"),
         )
         .await?;
     }

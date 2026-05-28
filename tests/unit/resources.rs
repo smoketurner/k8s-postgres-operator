@@ -336,6 +336,59 @@ mod service_tests {
         assert!(pg_port.is_some());
         assert!(patroni_port.is_some());
     }
+
+    #[test]
+    fn metrics_service_absent_without_metrics_spec() {
+        let cluster = create_test_cluster("my-cluster", "default", 1);
+        assert!(service::generate_metrics_service(&cluster).is_none());
+    }
+
+    #[test]
+    fn metrics_service_absent_when_metrics_disabled() {
+        let cluster = PostgresClusterBuilder::single("my-cluster", "default")
+            .with_storage("1Gi", None)
+            .build();
+        // Force the spec to have metrics: { enabled: false } via the builder
+        let mut cluster = cluster;
+        cluster.spec.metrics = Some(postgres_operator::crd::MetricsSpec {
+            enabled: false,
+            port: 9187,
+            service_monitor: None,
+        });
+        assert!(service::generate_metrics_service(&cluster).is_none());
+    }
+
+    #[test]
+    fn metrics_service_uses_configured_port_and_selector() {
+        let cluster = PostgresClusterBuilder::single("my-cluster", "default")
+            .with_storage("1Gi", None)
+            .with_metrics_port(9999)
+            .build();
+
+        let svc = service::generate_metrics_service(&cluster).expect("metrics service");
+        assert_eq!(svc.name_any(), "my-cluster-metrics");
+
+        let ports = svc.spec.as_ref().unwrap().ports.as_ref().unwrap();
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].port, 9999);
+        assert_eq!(ports[0].name.as_deref(), Some("metrics"));
+
+        let labels = svc.metadata.labels.as_ref().unwrap();
+        assert_eq!(
+            labels
+                .get("postgres-operator.smoketurner.com/service")
+                .map(String::as_str),
+            Some("metrics")
+        );
+
+        let selector = svc.spec.as_ref().unwrap().selector.as_ref().unwrap();
+        assert_eq!(
+            selector
+                .get("postgres-operator.smoketurner.com/cluster")
+                .map(String::as_str),
+            Some("my-cluster")
+        );
+    }
 }
 
 mod secret_tests {
