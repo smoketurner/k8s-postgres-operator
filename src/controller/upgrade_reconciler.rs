@@ -32,6 +32,7 @@ use crate::controller::conditions::{new_condition, set_status_condition, status 
 use crate::controller::events;
 use crate::controller::finalizer::remove_operator_finalizer;
 use crate::controller::upgrade_error::{UpgradeBackoffConfig, UpgradeError, UpgradeResult};
+use crate::controller::upgrade_preflight;
 use crate::controller::upgrade_state_machine::{
     UpgradeEvent, UpgradeStateMachine, UpgradeTransitionContext, UpgradeTransitionResult,
 };
@@ -740,6 +741,11 @@ async fn execute_phase_transition(
 
     match (from, to) {
         (UpgradePhase::Pending, UpgradePhase::CreatingTarget) => {
+            // Replication-compatibility preflight runs *before* we touch
+            // anything on the source cluster. A failure is permanent —
+            // the FSM drives the upgrade to Failed; the user fixes the
+            // source and creates a new PostgresUpgrade to retry.
+            run_preflight_or_fail(upgrade, ctx, ns).await?;
             mark_source_upgrade_in_progress(upgrade, ctx, ns).await?;
             create_target_cluster(upgrade, ctx, ns).await?;
         }
@@ -1308,6 +1314,160 @@ fn map_service_switch_error(err: ServiceSwitchError) -> UpgradeError {
             UpgradeError::ServiceSwitchFailed(format!("invalid service configuration: {msg}"))
         }
     }
+}
+
+/// Run replication-compatibility preflight checks against the source
+/// cluster. On failure: patch a `PreflightPassed=False` condition with the
+/// concrete failure messages, emit a Warning Event, and return a permanent
+/// [`UpgradeError::PreflightCheckFailed`] which the reconciler will route
+/// to the `Failed` phase. On success: patch `PreflightPassed=True` and
+/// emit a Normal Event.
+async fn run_preflight_or_fail(
+    upgrade: &PostgresUpgrade,
+    ctx: &UpgradeContext,
+    ns: &str,
+) -> UpgradeResult<()> {
+    let source_name = &upgrade.spec.source_cluster.name;
+    let source_ns = upgrade
+        .spec
+        .source_cluster
+        .namespace
+        .as_deref()
+        .unwrap_or(ns);
+
+    let outcome =
+        match upgrade_preflight::run_preflight_checks(&ctx.client, source_ns, source_name).await {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                // Couldn't *run* the preflight (connectivity, query error).
+                // Surface as transient — the FSM will retry rather than fail
+                // the upgrade just because the source primary was momentarily
+                // unreachable.
+                warn!(
+                    "Preflight run failed against source {}/{}: {}; will retry",
+                    source_ns, source_name, e
+                );
+                return Err(UpgradeError::TransientError(format!(
+                    "preflight unavailable against {source_ns}/{source_name}: {e}"
+                )));
+            }
+        };
+
+    if outcome.passed() {
+        record_preflight_passed(upgrade, ctx, ns).await?;
+        ctx.publish_normal_event(
+            upgrade,
+            "PreflightPassed",
+            "RunPreflight",
+            Some(format!(
+                "Replication-compatibility preflight passed against source {source_ns}/{source_name}"
+            )),
+        )
+        .await;
+        return Ok(());
+    }
+
+    let failures = outcome.failure_messages();
+    let summary = outcome.summary();
+
+    record_preflight_failed(upgrade, ctx, ns, &summary, &failures).await?;
+
+    ctx.publish_warning_event(
+        upgrade,
+        "PreflightFailed",
+        "RunPreflight",
+        Some(format!("{summary}: {}", failures.join("; "))),
+    )
+    .await;
+
+    Err(UpgradeError::PreflightCheckFailed { summary, failures })
+}
+
+/// Patch a `PreflightPassed=True` condition onto the upgrade status.
+async fn record_preflight_passed(
+    upgrade: &PostgresUpgrade,
+    ctx: &UpgradeContext,
+    ns: &str,
+) -> UpgradeResult<()> {
+    patch_preflight_condition(
+        upgrade,
+        ctx,
+        ns,
+        cond_status::TRUE,
+        "PreflightPassed",
+        "Replication-compatibility preflight passed",
+    )
+    .await
+}
+
+/// Patch a `PreflightPassed=False` condition with the structured failure
+/// messages. Surfaces the concrete failures so `kubectl describe pgu`
+/// gives the user actionable text without making them grep logs.
+async fn record_preflight_failed(
+    upgrade: &PostgresUpgrade,
+    ctx: &UpgradeContext,
+    ns: &str,
+    summary: &str,
+    failures: &[String],
+) -> UpgradeResult<()> {
+    // Truncate the joined message so we don't exceed Kubernetes' 32 KiB
+    // condition-message limit on pathological inputs (thousands of bad
+    // tables). 4 KiB is plenty for human consumption.
+    const MAX_MESSAGE_BYTES: usize = 4096;
+    let mut message = format!("{summary}: {}", failures.join("; "));
+    if message.len() > MAX_MESSAGE_BYTES {
+        message.truncate(MAX_MESSAGE_BYTES);
+        message.push_str(" […truncated]");
+    }
+
+    patch_preflight_condition(
+        upgrade,
+        ctx,
+        ns,
+        cond_status::FALSE,
+        "PreflightFailed",
+        &message,
+    )
+    .await
+}
+
+async fn patch_preflight_condition(
+    upgrade: &PostgresUpgrade,
+    ctx: &UpgradeContext,
+    ns: &str,
+    status: &str,
+    reason: &str,
+    message: &str,
+) -> UpgradeResult<()> {
+    let mut conditions = upgrade
+        .status
+        .as_ref()
+        .map(|s| s.conditions.clone())
+        .unwrap_or_default();
+
+    set_status_condition(
+        &mut conditions,
+        new_condition(
+            condition_types::PREFLIGHT_PASSED,
+            status,
+            reason,
+            message,
+            upgrade.metadata.generation,
+        ),
+    );
+
+    let api: Api<PostgresUpgrade> = Api::namespaced(ctx.client.clone(), ns);
+    let patch = serde_json::json!({
+        "status": { "conditions": conditions }
+    });
+    api.patch_status(
+        &upgrade.name_any(),
+        &PatchParams::default(),
+        &Patch::Merge(&patch),
+    )
+    .await?;
+
+    Ok(())
 }
 
 /// Set the `upgrade-in-progress` annotation on the source `PostgresCluster`.

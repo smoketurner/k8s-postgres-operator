@@ -64,6 +64,55 @@ Before starting an upgrade:
 2. **Sufficient resources**: The upgrade creates a complete replica of your cluster
 3. **WAL level**: `wal_level=logical` is required (enabled by default in this operator)
 4. **Backup recommended**: For automatic cutover mode, a recent backup is required
+5. **Replication-compatibility preflight** (automatic): The operator runs a set of
+   preflight checks against the source before it touches any resources. See
+   [Replication-compatibility preflight](#replication-compatibility-preflight) below
+   for the full list. If any check fails, the upgrade transitions to `Failed`
+   with the failing condition surfaced on the resource — fix the source and
+   create a new `PostgresUpgrade` to retry.
+
+### Replication-compatibility preflight
+
+Logical replication has several well-known sharp edges. The operator refuses to
+start an upgrade if any of the following are true on the source cluster:
+
+| Check | What it looks for | How to fix |
+|-------|-------------------|------------|
+| **Replica identity** | User tables without a primary key and without an explicit non-default replica identity (`relreplident IN ('n', 'd')` plus no PK). Such tables have UPDATE/DELETE silently dropped during logical replication. | Add a `PRIMARY KEY`, or `ALTER TABLE ... REPLICA IDENTITY FULL` (slower, but works). |
+| **Large objects** | Any rows in `pg_largeobject_metadata`. Logical replication does not replicate large objects. | Migrate large object data separately, or remove it before upgrading. |
+| **Unlogged tables** | User-schema tables with `relpersistence = 'u'`. These won't be replicated, and the user usually expects them to migrate. | `ALTER TABLE ... SET LOGGED`, or accept the table will be empty on the new cluster. |
+| **Blocking extensions** | `pg_cron` or `pg_partman` active. These interfere with logical replication (per Wiz's documented Aurora playbook). | `DROP EXTENSION pg_cron CASCADE;` (and similarly for `pg_partman`) on the source before the upgrade, then recreate on the target after cutover. |
+| **Materialized view refresh in progress** | `pg_stat_activity` shows an active `REFRESH MATERIALIZED VIEW`. Concurrent refresh can break the publication mid-stream. | Wait for the refresh to finish, or pause the refresh schedule before retrying. |
+
+When preflight fails, the upgrade resource will have a `PreflightPassed=False`
+condition with the specific failures inline and a `PreflightFailed` event:
+
+```bash
+kubectl describe postgresupgrade my-cluster-upgrade
+```
+
+```
+Conditions:
+  Type:                 PreflightPassed
+  Status:               False
+  Reason:               PreflightFailed
+  Message:              2 preflight checks failed: 3 table(s) lack a primary key
+                        and a non-default replica identity; UPDATE/DELETE will not
+                        replicate. Add PRIMARY KEY or ALTER TABLE ... REPLICA
+                        IDENTITY FULL. Examples: public.orders, public.items,
+                        shop.products; Extension(s) known to interfere with
+                        logical replication are active: pg_cron. Disable them on
+                        the source before upgrading (DROP EXTENSION) and recreate
+                        on the target after cutover.
+
+Events:
+  Type     Reason             Age   From               Message
+  ----     ------             ----  ----               -------
+  Warning  PreflightFailed    1m    upgrade-controller 2 preflight checks failed: ...
+```
+
+After the user resolves the failures, they must delete the failed upgrade
+and create a fresh `PostgresUpgrade` to retry.
 
 ### Supported Versions
 

@@ -12,6 +12,7 @@ pub mod database_reconciler;
 pub mod events;
 pub mod finalizer;
 pub mod upgrade_error;
+pub mod upgrade_preflight;
 pub mod upgrade_reconciler;
 pub mod upgrade_state_machine;
 

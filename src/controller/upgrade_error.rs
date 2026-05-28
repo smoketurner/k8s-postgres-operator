@@ -144,6 +144,25 @@ pub enum UpgradeError {
          See docs/upgrades.md for post-cutover recovery."
     )]
     RollbackNotAllowedInPhase { phase: String },
+
+    // ============================================
+    // Preflight Errors
+    // ============================================
+    /// The source cluster failed one or more replication-compatibility
+    /// preflight checks. The upgrade cannot proceed until the user resolves
+    /// the listed conditions (e.g. add primary keys, disable `pg_cron`,
+    /// drop large objects). This is a permanent error — the upgrade
+    /// transitions to `Failed`; the user must fix the source and create a
+    /// new `PostgresUpgrade` to retry.
+    #[error("Preflight checks failed: {summary}")]
+    PreflightCheckFailed {
+        /// Short human-readable summary suitable for logs and the upgrade
+        /// status `message` field.
+        summary: String,
+        /// One actionable string per failed check, suitable for surfacing
+        /// in conditions and events.
+        failures: Vec<String>,
+    },
 }
 
 impl UpgradeError {
@@ -180,6 +199,7 @@ impl UpgradeError {
                 | UpgradeError::TargetClusterNotFound { .. }
                 | UpgradeError::ImmutableFieldChange { .. }
                 | UpgradeError::ConcurrentUpgrade(_)
+                | UpgradeError::PreflightCheckFailed { .. }
         )
     }
 
@@ -295,6 +315,41 @@ mod tests {
             .is_permanent()
         );
         assert!(UpgradeError::ConcurrentUpgrade("other-upgrade".to_string()).is_permanent());
+        assert!(
+            UpgradeError::PreflightCheckFailed {
+                summary: "1 preflight check failed".to_string(),
+                failures: vec!["pg_cron is active".to_string()],
+            }
+            .is_permanent()
+        );
+    }
+
+    #[test]
+    fn test_preflight_check_failed_not_retryable() {
+        // PreflightCheckFailed is permanent — the source must change, not
+        // the operator's retry behaviour. Explicitly assert it's not in
+        // the retryable set so a future maintainer doesn't accidentally
+        // reclassify it.
+        let err = UpgradeError::PreflightCheckFailed {
+            summary: "2 preflight checks failed".to_string(),
+            failures: vec![
+                "pg_largeobject is non-empty".to_string(),
+                "1 unlogged table(s) found".to_string(),
+            ],
+        };
+        assert!(!err.is_retryable());
+        assert!(err.is_permanent());
+        assert!(!err.blocks_cutover());
+        assert!(!err.is_timeout());
+        assert!(!err.is_rollback_error());
+
+        // Display surfaces the summary (machine-grepable) without
+        // duplicating the full list (that lives in the structured field).
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Preflight checks failed: 2 preflight checks failed"),
+            "got: {msg}"
+        );
     }
 
     #[test]

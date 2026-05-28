@@ -133,7 +133,7 @@ Features:
 #### PostgresUpgrade (`postgres_upgrade.rs`)
 `PostgresUpgrade` custom resource for blue-green major version upgrades using logical replication:
 - **Spec**: `sourceCluster`, `targetVersion`, `targetClusterOverrides`, `strategy`
-- **Status**: `phase`, `observedGeneration`, `startedAt`, `completedAt`, `replication`, `verification`, `sequences`, `rollback`, `conditions`
+- **Status**: `phase`, `observedGeneration`, `startedAt`, `completedAt`, `replication`, `verification`, `sequences`, `conditions`
 
 API version: `postgres-operator.smoketurner.com/v1alpha1`
 
@@ -160,6 +160,7 @@ PostgresCluster-specific modules use a `cluster_` prefix; PostgresUpgrade-specif
 - `database_reconciler.rs`: PostgresDatabase reconciliation - database/role provisioning via SQL execution, secret generation
 - `upgrade_reconciler.rs`: PostgresUpgrade reconciliation - manages blue-green upgrade lifecycle
 - `upgrade_state_machine.rs`: Upgrade FSM with phases (Pending, CreatingTarget, ConfiguringReplication, Replicating, Verifying, SyncingSequences, ReadyForCutover, CuttingOver, HealthChecking, Completed, Failed, RolledBack)
+- `upgrade_preflight.rs`: Replication-compatibility preflight checks (replica identity, large objects, unlogged tables, blocking extensions, in-flight matview refresh) — runs on `Pending → CreatingTarget`
 - `upgrade_error.rs`: Upgrade-specific errors with backoff configuration
 - `context.rs`: Shared context with Kubernetes client and event recorder
 - `cleanup.rs`: Resource cleanup utilities for graceful deletion
