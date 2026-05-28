@@ -50,6 +50,10 @@ fn create_test_cluster() -> PostgresCluster {
             scaling: None,
             network_policy: None,
             sidecars: vec![],
+            node_selector: Default::default(),
+            tolerations: vec![],
+            topology_spread_constraints: vec![],
+            priority_class_name: None,
         },
         status: None,
     }

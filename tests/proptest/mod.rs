@@ -54,6 +54,10 @@ fn minimal_spec() -> PostgresClusterSpec {
         scaling: None,
         network_policy: None,
         sidecars: vec![],
+        node_selector: Default::default(),
+        tolerations: vec![],
+        topology_spread_constraints: vec![],
+        priority_class_name: None,
     }
 }
 
@@ -415,6 +419,10 @@ fn valid_spec() -> impl Strategy<Value = PostgresClusterSpec> {
                         scaling,
                         network_policy: None,
                         sidecars: vec![],
+                        node_selector: Default::default(),
+                        tolerations: vec![],
+                        topology_spread_constraints: vec![],
+                        priority_class_name: None,
                     }
                 },
             )
@@ -471,6 +479,10 @@ fn valid_spec_with_scaling() -> impl Strategy<Value = PostgresClusterSpec> {
                         }),
                         network_policy: None,
                         sidecars: vec![],
+                        node_selector: Default::default(),
+                        tolerations: vec![],
+                        topology_spread_constraints: vec![],
+                        priority_class_name: None,
                     }
                 },
             )
@@ -779,6 +791,10 @@ proptest! {
             }),
             network_policy: None,
             sidecars: vec![],
+            node_selector: Default::default(),
+            tolerations: vec![],
+            topology_spread_constraints: vec![],
+            priority_class_name: None,
         };
         let cluster = cluster_from_spec(spec);
         let obj = scaled_object::generate_trigger_auth(&cluster);
@@ -822,6 +838,10 @@ proptest! {
             }),
             network_policy: None,
             sidecars: vec![],
+            node_selector: Default::default(),
+            tolerations: vec![],
+            topology_spread_constraints: vec![],
+            priority_class_name: None,
         };
         let cluster = cluster_from_spec(spec);
         let obj = scaled_object::generate_trigger_auth(&cluster);
@@ -861,6 +881,10 @@ proptest! {
             }),
             network_policy: None,
             sidecars: vec![],
+            node_selector: Default::default(),
+            tolerations: vec![],
+            topology_spread_constraints: vec![],
+            priority_class_name: None,
         };
         let cluster = cluster_from_spec(spec);
         let is_managing = scaled_object::is_keda_managing_replicas(&cluster);
@@ -947,6 +971,10 @@ mod edge_case_tests {
             scaling: None,
             network_policy: None,
             sidecars: vec![],
+            node_selector: Default::default(),
+            tolerations: vec![],
+            topology_spread_constraints: vec![],
+            priority_class_name: None,
         };
         let cluster = cluster_from_spec(spec);
 
@@ -983,6 +1011,10 @@ mod edge_case_tests {
             scaling: None,
             network_policy: None,
             sidecars: vec![],
+            node_selector: Default::default(),
+            tolerations: vec![],
+            topology_spread_constraints: vec![],
+            priority_class_name: None,
         });
 
         cluster.status = Some(PostgresClusterStatus {
@@ -1122,6 +1154,10 @@ mod network_policy_tests {
             scaling: None,
             network_policy,
             sidecars: vec![],
+            node_selector: Default::default(),
+            tolerations: vec![],
+            topology_spread_constraints: vec![],
+            priority_class_name: None,
         };
         cluster_from_spec(spec)
     }
@@ -1580,6 +1616,10 @@ mod webhook_policy_tests {
                 scaling: None,
                 network_policy: None,
                 sidecars: vec![],
+                node_selector: Default::default(),
+                tolerations: vec![],
+                topology_spread_constraints: vec![],
+                priority_class_name: None,
             };
 
             let cluster = test_cluster_from_spec(spec);
@@ -1627,6 +1667,10 @@ mod webhook_policy_tests {
                 scaling: None,
                 network_policy: None,
                 sidecars: vec![],
+                node_selector: Default::default(),
+                tolerations: vec![],
+                topology_spread_constraints: vec![],
+                priority_class_name: None,
             };
 
             let cluster = test_cluster_from_spec(spec);
@@ -1670,6 +1714,10 @@ mod webhook_policy_tests {
                 scaling: None,
                 network_policy: None,
                 sidecars: vec![],
+                node_selector: Default::default(),
+                tolerations: vec![],
+                topology_spread_constraints: vec![],
+                priority_class_name: None,
             };
 
             let new_spec = PostgresClusterSpec {
@@ -1730,6 +1778,10 @@ mod webhook_policy_tests {
                     allow_from: vec![],
                 }),
                 sidecars: vec![],
+                node_selector: Default::default(),
+                tolerations: vec![],
+                topology_spread_constraints: vec![],
+                priority_class_name: None,
             };
 
             let cluster = test_cluster_from_spec(spec);

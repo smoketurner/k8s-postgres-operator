@@ -1,4 +1,4 @@
-use k8s_openapi::api::core::v1::Container;
+use k8s_openapi::api::core::v1::{Container, Toleration, TopologySpreadConstraint};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::{CustomResource, KubeSchema};
 use schemars::JsonSchema;
@@ -78,6 +78,10 @@ impl PostgresVersion {
     shortname = "pgc",
     namespaced,
     status = "PostgresClusterStatus",
+    category = "databases",
+    category = "postgresql",
+    category = "all",
+    scale = r#"{"specReplicasPath": ".spec.replicas", "statusReplicasPath": ".status.replicas"}"#,
     printcolumn = r#"{"name":"Version", "type":"string", "jsonPath":".spec.version"}"#,
     printcolumn = r#"{"name":"Replicas", "type":"integer", "jsonPath":".spec.replicas"}"#,
     printcolumn = r#"{"name":"Phase", "type":"string", "jsonPath":".status.phase"}"#,
@@ -185,6 +189,28 @@ pub struct PostgresClusterSpec {
     /// the admission webhook.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sidecars: Vec<Container>,
+
+    /// Node selector applied to every Spilo pod. Pods are only scheduled
+    /// onto nodes whose labels match all entries.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub node_selector: BTreeMap<String, String>,
+
+    /// Pod tolerations applied to every Spilo pod. Allows scheduling onto
+    /// tainted nodes (e.g. dedicated database node pools).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tolerations: Vec<Toleration>,
+
+    /// Topology spread constraints applied to every Spilo pod. Use to
+    /// distribute replicas across failure domains (zones, hostnames, etc.)
+    /// independently of the operator-managed anti-affinity rules.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub topology_spread_constraints: Vec<TopologySpreadConstraint>,
+
+    /// Priority class assigned to every Spilo pod. Higher-priority pods are
+    /// scheduled ahead of lower-priority pods and are evicted last under
+    /// node pressure. The referenced PriorityClass must already exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority_class_name: Option<String>,
 }
 
 fn default_replicas() -> i32 {

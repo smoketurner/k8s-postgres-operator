@@ -642,6 +642,10 @@ impl PostgresClusterBuilder {
                 scaling: self.scaling,
                 network_policy: self.network_policy,
                 sidecars: vec![],
+                node_selector: Default::default(),
+                tolerations: vec![],
+                topology_spread_constraints: vec![],
+                priority_class_name: None,
             },
             status: None,
         }
