@@ -1726,7 +1726,17 @@ mod webhook_policy_tests {
                 ..old_spec.clone()
             };
 
-            let old_cluster = test_cluster_from_spec(old_spec);
+            // The immutability webhook intentionally only rejects downgrades
+            // when the old cluster has actually reached Running (i.e.
+            // `status.current_version` is set). That lets users revert a
+            // mistaken spec bump before any data has migrated. To exercise the
+            // rejection path, give the old cluster a status that matches its
+            // declared version.
+            let mut old_cluster = test_cluster_from_spec(old_spec);
+            old_cluster.status = Some(PostgresClusterStatus {
+                current_version: Some(old_major.to_string()),
+                ..Default::default()
+            });
             let new_cluster = test_cluster_from_spec(new_spec);
             let ctx = ValidationContext::new(&new_cluster, Some(&old_cluster), BTreeMap::new());
             let result = validate_immutability(&ctx);
@@ -1734,6 +1744,11 @@ mod webhook_policy_tests {
             let is_downgrade = old_major > new_major;
             if is_downgrade {
                 prop_assert!(!result.allowed, "Version downgrade should be rejected");
+            } else {
+                prop_assert!(
+                    result.allowed,
+                    "Version upgrade or no-op should be allowed"
+                );
             }
         }
 
