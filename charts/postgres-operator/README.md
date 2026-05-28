@@ -186,6 +186,11 @@ Once the operator is installed, you can create PostgresCluster resources. Below 
 | `downloadConcurrency` | WAL-G download concurrency (default: 10) |
 | `enableDeltaBackups` | Enable delta backups |
 | `deltaMaxSteps` | Max delta steps before full backup |
+| `logical.enabled` | Enable scheduled `pg_dumpall` logical backup CronJob |
+| `logical.schedule` | Cron schedule for logical backups (e.g., "0 3 * * *") |
+| `logical.image` | Image override for dump pod (defaults to cluster Spilo image) |
+| `logical.successfulJobsHistoryLimit` | Successful job runs to keep (default: 3) |
+| `logical.failedJobsHistoryLimit` | Failed job runs to keep (default: 3) |
 
 ### Restore Configuration (`spec.restore`)
 
