@@ -40,6 +40,11 @@ status:
 | `scaling` | [ScalingSpec](#scalingspec) | No | - | KEDA auto-scaling configuration |
 | `networkPolicy` | [NetworkPolicySpec](#networkpolicyspec) | No | - | Network policy configuration |
 | `restore` | [RestoreSpec](#restorespec) | No | - | Restore from backup configuration |
+| `sidecars` | []Container | No | - | Additional sidecar containers injected into every Spilo pod |
+| `nodeSelector` | map[string]string | No | - | Node selector constraining which nodes Spilo pods are scheduled onto |
+| `tolerations` | []Toleration | No | - | Pod tolerations for scheduling onto tainted nodes (e.g. dedicated database node pools) |
+| `topologySpreadConstraints` | []TopologySpreadConstraint | No | - | Topology spread constraints for distributing replicas across failure domains |
+| `priorityClassName` | string | No | - | Priority class assigned to every Spilo pod |
 
 ### StorageSpec
 
