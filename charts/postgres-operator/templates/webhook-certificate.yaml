@@ -1,0 +1,30 @@
+{{- if and .Values.webhook.enabled .Values.webhook.certManager.enabled }}
+# cert-manager Certificate that issues the webhook server cert and
+# populates {{ include "postgres-operator.fullname" . }}-webhook-tls.
+# cert-manager auto-renews via the configured Issuer; the operator
+# Deployment mounts the resulting Secret at /etc/webhook/certs.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "postgres-operator.fullname" . }}-webhook
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "postgres-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webhook
+spec:
+  secretName: {{ include "postgres-operator.fullname" . }}-webhook-tls
+  dnsNames:
+    - {{ include "postgres-operator.fullname" . }}-webhook.{{ .Release.Namespace }}.svc
+    - {{ include "postgres-operator.fullname" . }}-webhook.{{ .Release.Namespace }}.svc.cluster.local
+  issuerRef:
+    kind: {{ .Values.webhook.certManager.issuer.kind }}
+    name: {{ required "webhook.certManager.issuer.name is required when webhook.certManager.enabled is true" .Values.webhook.certManager.issuer.name }}
+    {{- with .Values.webhook.certManager.issuer.group }}
+    group: {{ . }}
+    {{- end }}
+  duration: {{ .Values.webhook.certManager.duration | default "8760h" | quote }}
+  renewBefore: {{ .Values.webhook.certManager.renewBefore | default "720h" | quote }}
+  privateKey:
+    algorithm: {{ .Values.webhook.certManager.privateKey.algorithm | default "ECDSA" }}
+    size: {{ .Values.webhook.certManager.privateKey.size | default 256 }}
+{{- end }}

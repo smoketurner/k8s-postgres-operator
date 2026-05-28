@@ -107,6 +107,78 @@ readinessProbe:
   initialDelaySeconds: 5
   periodSeconds: 10
 
+# =============================================================================
+# Validating admission webhook
+# =============================================================================
+# The operator ships a ValidatingWebhookConfiguration that enforces backup
+# encryption, TLS issuer presence, immutability rules, and production-namespace
+# constraints. The webhook server listens on container port 8443; the Service
+# below fronts it at port 443 cluster-internally.
+#
+# By default we let cert-manager issue and renew the webhook TLS cert. If
+# cert-manager is unavailable, set `webhook.certManager.enabled: false` and
+# supply your own pre-created Secret (`webhook.tlsSecretName`) plus the CA
+# bundle (`webhook.caBundle`) that the API server should trust.
+webhook:
+  # Set to false to skip the webhook entirely (not recommended — disables
+  # operator-enforced validation, leaving only CRD schema/CEL checks).
+  enabled: true
+
+  # API-server-visible failure mode if the webhook is unreachable.
+  # `Fail` rejects requests when the webhook is down; `Ignore` allows them.
+  failurePolicy: Fail
+
+  # Webhook call timeout (seconds). Must be 1-30.
+  timeoutSeconds: 10
+
+  # Restrict which namespaces are validated. Leaving this empty validates
+  # every namespace. Example to require an opt-in label:
+  #   namespaceSelector:
+  #     matchLabels:
+  #       postgres-operator.smoketurner.com/validate: "true"
+  namespaceSelector: {}
+
+  # Override the Secret name the operator pod mounts for the webhook TLS cert.
+  # Defaults to `<release>-webhook-tls`.
+  tlsSecretName: ""
+
+  # CA bundle the API server should trust when calling the webhook.
+  # Only used when certManager.enabled is false; otherwise cert-manager
+  # injects the bundle via the cert-manager.io/inject-ca-from annotation.
+  caBundle: ""
+
+  certManager:
+    # Use cert-manager to issue + renew the webhook TLS cert.
+    enabled: true
+
+    # Reference to an existing Issuer / ClusterIssuer. cert-manager must be
+    # installed and the issuer must already exist.
+    issuer:
+      kind: ClusterIssuer
+      name: selfsigned-cluster-issuer
+      group: cert-manager.io
+
+    # Certificate validity + early-renewal window.
+    duration: 8760h    # 1 year
+    renewBefore: 720h  # 30 days
+
+    privateKey:
+      algorithm: ECDSA
+      size: 256
+
+# =============================================================================
+# NetworkPolicy for the operator pod
+# =============================================================================
+# Allows kubelet health probes + (when the webhook is enabled) API-server
+# webhook calls inbound, and DNS + Kubernetes API access outbound. Disable
+# if your cluster doesn't use NetworkPolicies or you manage them externally.
+networkPolicy:
+  enabled: false
+  # Additional egress rules layered on top of the defaults (DNS + apiserver).
+  # Each entry is a NetworkPolicyEgressRule. Useful if the operator needs
+  # to reach external services (e.g. a private registry).
+  extraEgress: []
+
 # Prometheus ServiceMonitor (requires prometheus-operator)
 serviceMonitor:
   enabled: false

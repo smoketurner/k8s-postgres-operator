@@ -1,0 +1,48 @@
+{{- if .Values.webhook.enabled }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "postgres-operator.fullname" . }}-validating-webhook
+  labels:
+    {{- include "postgres-operator.labels" . | nindent 4 }}
+  {{- if .Values.webhook.certManager.enabled }}
+  annotations:
+    # cert-manager injects the CA bundle into the webhook configuration
+    # so the API server trusts our self-issued cert.
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "postgres-operator.fullname" . }}-webhook
+  {{- end }}
+webhooks:
+  - name: validate.postgrescluster.postgres-operator.smoketurner.com
+    clientConfig:
+      service:
+        name: {{ include "postgres-operator.fullname" . }}-webhook
+        namespace: {{ .Release.Namespace }}
+        path: /validate
+        port: 443
+      {{- if not .Values.webhook.certManager.enabled }}
+      caBundle: {{ required "webhook.caBundle is required when webhook.certManager.enabled is false" .Values.webhook.caBundle | quote }}
+      {{- else }}
+      caBundle: ""
+      {{- end }}
+    rules:
+      - apiGroups:
+          - postgres-operator.smoketurner.com
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - postgresclusters
+        scope: Namespaced
+    failurePolicy: {{ .Values.webhook.failurePolicy }}
+    {{- with .Values.webhook.namespaceSelector }}
+    namespaceSelector:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    sideEffects: None
+    admissionReviewVersions:
+      - v1
+    timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+    matchPolicy: Equivalent
+{{- end }}
