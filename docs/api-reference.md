@@ -208,8 +208,19 @@ tls:
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `enabled` | boolean | No | false | Enable Prometheus metrics exporter |
-| `port` | integer | No | 9187 | Metrics exporter port |
+| `enabled` | boolean | No | false | Enable Prometheus metrics. Creates a `<cluster>-metrics` Service targeting the metrics-exporter sidecar |
+| `port` | integer | No | 9187 | Metrics exporter port (must match the sidecar's `containerPort`) |
+| `serviceMonitor` | [ServiceMonitorSpec](#servicemonitorspec) | No | - | Prometheus Operator ServiceMonitor configuration |
+
+### ServiceMonitorSpec
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean | No | false | Generate a Prometheus Operator ServiceMonitor. No-op if the `monitoring.coreos.com` CRDs are not installed |
+| `interval` | string | No | - | Scrape interval (e.g. `"30s"`, `"1m"`). Uses Prometheus global default when unset |
+| `scrapeTimeout` | string | No | - | Scrape timeout. Must be ≤ interval. Uses Prometheus global default when unset |
+| `path` | string | No | `/metrics` | HTTP path on the metrics endpoint |
+| `labels` | map[string]string | No | - | Additional labels on the ServiceMonitor so the Prometheus `serviceMonitorSelector` matches it |
 
 **Example:**
 
@@ -217,6 +228,11 @@ tls:
 metrics:
   enabled: true
   port: 9187
+  serviceMonitor:
+    enabled: true
+    interval: "30s"
+    labels:
+      release: kube-prometheus-stack
 ```
 
 ### BackupSpec

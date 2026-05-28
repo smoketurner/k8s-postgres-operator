@@ -220,6 +220,7 @@ make fmt && make lint && make test
 │   │   ├── backup.rs              # WAL-G backup configuration
 │   │   ├── scaled_object.rs       # KEDA ScaledObject
 │   │   ├── network_policy.rs      # NetworkPolicy
+│   │   ├── service_monitor.rs     # Prometheus Operator ServiceMonitor
 │   │   ├── sql.rs                 # SQL execution via pod exec
 │   │   ├── postgres_client.rs     # PostgreSQL client connections
 │   │   ├── replication.rs         # Logical replication setup
