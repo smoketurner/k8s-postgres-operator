@@ -53,6 +53,11 @@ spec:
           properties:
             spec:
               type: object
+              description: |
+                Desired state of a PostgreSQL cluster managed by the operator.
+                The operator runs Spilo (Patroni + PostgreSQL + WAL-G) as a
+                StatefulSet, reconciling the actual cluster state toward
+                this spec on every change.
               required:
                 - version
                 - storage
@@ -92,20 +97,34 @@ spec:
                   default: 1
                 storage:
                   type: object
+                  description: |
+                    PostgreSQL data volume configuration. Backs a PersistentVolumeClaim
+                    template on the StatefulSet so every replica gets durable storage.
+                    Storage cannot be shrunk after creation (Kubernetes constraint).
                   required:
                     - size
                   properties:
                     storageClass:
                       type: string
-                      description: Storage class name
+                      description: |
+                        Name of the StorageClass used to provision PVCs. When unset
+                        the cluster's default StorageClass is used.
                     size:
                       type: string
-                      description: Size of the persistent volume
+                      description: |
+                        PVC size as a Kubernetes quantity (e.g. `10Gi`, `500Mi`).
+                        Expansion to a larger size is supported if the StorageClass
+                        allows it; shrinking is not.
                 resources:
                   type: object
+                  description: |
+                    CPU and memory requests/limits for the Spilo container. Standard
+                    Kubernetes `ResourceRequirements`. When unset the container runs
+                    without resource constraints (best-effort QoS).
                   properties:
                     limits:
                       type: object
+                      description: Hard ceilings — the kubelet kills the container if it exceeds these.
                       properties:
                         cpu:
                           type: string
@@ -113,6 +132,7 @@ spec:
                           type: string
                     requests:
                       type: object
+                      description: Guaranteed reservation used by the scheduler when placing the pod.
                       properties:
                         cpu:
                           type: string
@@ -316,6 +336,7 @@ spec:
                       properties:
                         limits:
                           type: object
+                          description: Hard ceilings — the kubelet kills the container if it exceeds these.
                           properties:
                             cpu:
                               type: string
@@ -323,6 +344,7 @@ spec:
                               type: string
                         requests:
                           type: object
+                          description: Guaranteed reservation used by the scheduler when placing the pod.
                           properties:
                             cpu:
                               type: string
@@ -540,6 +562,9 @@ spec:
                         Useful for cross-namespace access.
                       items:
                         type: object
+                        description: |
+                          One ingress source. At least one of `namespaceSelector`
+                          or `podSelector` must be set; they combine with AND.
                         properties:
                           namespaceSelector:
                             type: object
@@ -597,6 +622,7 @@ spec:
                     (`postgres`, `init-permissions`) are rejected by the admission webhook.
                   items:
                     type: object
+                    description: A Kubernetes Container spec to inject as a sidecar.
                     x-kubernetes-preserve-unknown-fields: true
                     required:
                       - name
@@ -620,6 +646,7 @@ spec:
                     Accepts the full Kubernetes Toleration shape.
                   items:
                     type: object
+                    description: A single Kubernetes Toleration entry.
                     x-kubernetes-preserve-unknown-fields: true
                 topologySpreadConstraints:
                   type: array
@@ -630,6 +657,9 @@ spec:
                     Accepts the full Kubernetes TopologySpreadConstraint shape.
                   items:
                     type: object
+                    description: |
+                      A single Kubernetes TopologySpreadConstraint. `maxSkew`,
+                      `topologyKey`, and `whenUnsatisfiable` are required.
                     x-kubernetes-preserve-unknown-fields: true
                     required:
                       - maxSkew
@@ -652,9 +682,20 @@ spec:
                     node pressure. The referenced PriorityClass must already exist.
             status:
               type: object
+              description: |
+                Observed state of the cluster, populated by the operator on every
+                reconcile. `phase` is the coarse lifecycle position; `reason` /
+                `message` summarize the current Ready condition; `conditions[]`
+                carries the detailed breakdown.
               properties:
                 phase:
                   type: string
+                  description: |
+                    Coarse lifecycle position. `Running` is the steady state;
+                    `Creating` / `Updating` / `Scaling` indicate work in progress;
+                    `Degraded` / `Failed` indicate a problem that may need
+                    intervention; `Superseded` means a blue-green upgrade has
+                    promoted a target cluster over this one.
                   enum:
                     - Pending
                     - Creating
@@ -668,12 +709,16 @@ spec:
                     - Deleting
                 readyReplicas:
                   type: integer
+                  description: Number of pods that are Ready and joined to the Patroni cluster.
                 replicas:
                   type: integer
+                  description: Total replica count observed in the StatefulSet.
                 primaryPod:
                   type: string
+                  description: Name of the pod currently holding the Patroni leader lease.
                 replicaPods:
                   type: array
+                  description: Names of pods currently running as PostgreSQL replicas.
                   items:
                     type: string
                 backup:
@@ -731,6 +776,11 @@ spec:
                   description: Standard Kubernetes status conditions (metav1.Condition)
                   items:
                     type: object
+                    description: |
+                      A single condition. Same shape as Kubernetes
+                      `metav1.Condition` — `lastTransitionTime` only advances
+                      when `status` changes, and `observedGeneration` carries
+                      the spec generation the condition was set against.
                     required:
                       - type
                       - status
@@ -740,18 +790,30 @@ spec:
                     properties:
                       type:
                         type: string
+                        description: |
+                          Condition type in CamelCase, e.g. `Ready`,
+                          `Progressing`, `Degraded`, `ConfigurationValid`,
+                          `ResourceResizeInProgress`, `PodGenerationSynced`.
                       status:
                         type: string
+                        description: One of `True`, `False`, `Unknown`.
                       reason:
                         type: string
+                        description: Machine-readable CamelCase code for the current status.
                       message:
                         type: string
+                        description: Human-readable explanation of the condition.
                       lastTransitionTime:
                         type: string
                         format: date-time
+                        description: RFC 3339 timestamp of the last status change.
                       observedGeneration:
                         type: integer
                         format: int64
+                        description: |
+                          `metadata.generation` value observed when this
+                          condition was set. Stale conditions have a value
+                          less than the current generation.
                 reason:
                   type: string
                   description: Short CamelCase explanation paired with phase
@@ -790,6 +852,9 @@ spec:
                   description: Replication lag information for each replica pod
                   items:
                     type: object
+                    description: |
+                      Lag report for one replica pod, collected from the
+                      Patroni REST API on each reconcile.
                     properties:
                       podName:
                         type: string

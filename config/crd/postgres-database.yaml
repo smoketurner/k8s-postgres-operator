@@ -50,6 +50,11 @@ spec:
           properties:
             spec:
               type: object
+              description: |
+                Desired state of a database to provision inside a parent
+                PostgresCluster. The operator creates the database, roles,
+                grants, and extensions, and writes per-role credentials to
+                Kubernetes Secrets.
               required:
                 - clusterRef
                 - database
@@ -102,6 +107,11 @@ spec:
                   description: Roles to create with credentials
                   items:
                     type: object
+                    description: |
+                      One PostgreSQL role. The operator creates a Kubernetes
+                      Secret named `secretName` holding the generated
+                      credentials (username, password, host, port, database,
+                      connection-string, jdbc-url).
                     required:
                       - name
                       - secretName
@@ -140,6 +150,9 @@ spec:
                   description: Permission grants to apply
                   items:
                     type: object
+                    description: |
+                      One privilege grant. Applied as a PostgreSQL `GRANT`
+                      statement after the database and roles exist.
                     required:
                       - role
                     properties:
@@ -184,6 +197,11 @@ spec:
                     type: string
             status:
               type: object
+              description: |
+                Observed provisioning state of the database. `phase` is the
+                coarse lifecycle position; `conditions[]` carries the
+                detailed `ClusterReady` / `DatabaseCreated` / `RolesCreated`
+                / `SecretsCreated` / `Ready` breakdown.
               properties:
                 phase:
                   type: string
@@ -200,6 +218,10 @@ spec:
                   description: Standard Kubernetes status conditions (metav1.Condition)
                   items:
                     type: object
+                    description: |
+                      A single condition. Same shape as Kubernetes
+                      `metav1.Condition` — `lastTransitionTime` only advances
+                      when `status` changes.
                     required:
                       - type
                       - status

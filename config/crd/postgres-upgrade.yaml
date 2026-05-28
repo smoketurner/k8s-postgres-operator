@@ -51,6 +51,13 @@ spec:
           properties:
             spec:
               type: object
+              description: |
+                Desired state of a major-version upgrade. The operator
+                performs a blue-green upgrade using logical replication:
+                provisions a target cluster at `targetVersion`, replicates
+                from `sourceCluster`, verifies data, and cuts services over
+                in an atomic step. Source is never auto-deleted, so rollback
+                stays possible until you delete it manually.
               required:
                 - sourceCluster
                 - targetVersion
@@ -103,6 +110,7 @@ spec:
                       properties:
                         requests:
                           type: object
+                          description: Guaranteed reservation used by the scheduler when placing the pod.
                           properties:
                             cpu:
                               type: string
@@ -110,6 +118,7 @@ spec:
                               type: string
                         limits:
                           type: object
+                          description: Hard ceilings — the kubelet kills the container if it exceeds these.
                           properties:
                             cpu:
                               type: string
@@ -221,6 +230,13 @@ spec:
                           default: false
             status:
               type: object
+              description: |
+                Observed state of the upgrade. `phase` walks through:
+                Pending → CreatingTarget → ConfiguringReplication →
+                Replicating → Verifying → SyncingSequences →
+                ReadyForCutover → CuttingOver → HealthChecking → Completed.
+                Failure paths terminate at `Failed`; manual rollback ends
+                at `RolledBack`.
               properties:
                 phase:
                   type: string
@@ -344,6 +360,10 @@ spec:
                       description: Details of tables with row count mismatches
                       items:
                         type: object
+                        description: |
+                          A table whose row counts disagreed between source and target
+                          during verification. Cutover is blocked until counts converge
+                          (or `verify_row_counts` is disabled in the strategy).
                         properties:
                           schema:
                             type: string
@@ -409,6 +429,10 @@ spec:
                   description: Standard Kubernetes status conditions (metav1.Condition)
                   items:
                     type: object
+                    description: |
+                      A single condition. Same shape as Kubernetes
+                      `metav1.Condition` — `lastTransitionTime` only advances
+                      when `status` changes.
                     required:
                       - type
                       - status
