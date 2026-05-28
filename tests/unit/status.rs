@@ -2,7 +2,8 @@
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use postgres_operator::controller::cluster_status::{
-    ConditionBuilder, condition_status, condition_types, get_replica_pod_names, spec_changed,
+    ConditionBuilder, condition_status, condition_types, get_replica_pod_names, ready_summary,
+    spec_changed,
 };
 use postgres_operator::crd::{
     ClusterPhase, Condition, PostgresCluster, PostgresClusterSpec, PostgresClusterStatus,
@@ -189,6 +190,34 @@ mod condition_builder_tests {
         assert_eq!(condition_status::TRUE, "True");
         assert_eq!(condition_status::FALSE, "False");
         assert_eq!(condition_status::UNKNOWN, "Unknown");
+    }
+}
+
+mod ready_summary_tests {
+    use super::*;
+
+    #[test]
+    fn returns_reason_and_message_from_ready_condition() {
+        let conditions = ConditionBuilder::new(Some(1))
+            .progressing(false, "Stable", "All quiet")
+            .ready(true, "ClusterReady", "All pods ready")
+            .degraded(false, "Healthy", "OK")
+            .build();
+
+        let (reason, message) = ready_summary(&conditions);
+        assert_eq!(reason.as_deref(), Some("ClusterReady"));
+        assert_eq!(message.as_deref(), Some("All pods ready"));
+    }
+
+    #[test]
+    fn returns_none_when_no_ready_condition_present() {
+        let conditions = ConditionBuilder::new(Some(1))
+            .progressing(true, "InProgress", "Working")
+            .build();
+
+        let (reason, message) = ready_summary(&conditions);
+        assert!(reason.is_none());
+        assert!(message.is_none());
     }
 }
 

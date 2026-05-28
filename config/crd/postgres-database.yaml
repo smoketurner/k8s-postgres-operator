@@ -35,6 +35,10 @@ spec:
         - name: Phase
           type: string
           jsonPath: .status.phase
+        - name: Reason
+          type: string
+          jsonPath: .status.reason
+          priority: 1
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp
@@ -223,6 +227,12 @@ spec:
                         type: integer
                         format: int64
                         description: Generation observed when the condition was set
+                reason:
+                  type: string
+                  description: Short CamelCase explanation paired with phase
+                message:
+                  type: string
+                  description: Human-readable explanation paired with phase and reason
                 connectionInfo:
                   type: object
                   description: Connection information for the database

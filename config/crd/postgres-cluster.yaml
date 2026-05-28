@@ -32,6 +32,10 @@ spec:
         - name: Phase
           type: string
           jsonPath: .status.phase
+        - name: Reason
+          type: string
+          jsonPath: .status.reason
+          priority: 1
         - name: Ready
           type: integer
           jsonPath: .status.readyReplicas
@@ -645,6 +649,12 @@ spec:
                       observedGeneration:
                         type: integer
                         format: int64
+                reason:
+                  type: string
+                  description: Short CamelCase explanation paired with phase
+                message:
+                  type: string
+                  description: Human-readable explanation paired with phase and reason
                 retryCount:
                   type: integer
                   description: Current retry count for exponential backoff

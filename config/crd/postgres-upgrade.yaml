@@ -33,6 +33,10 @@ spec:
         - name: Phase
           type: string
           jsonPath: .status.phase
+        - name: Reason
+          type: string
+          jsonPath: .status.reason
+          priority: 1
         - name: Lag
           type: string
           jsonPath: .status.replication.lagSeconds
@@ -239,6 +243,9 @@ spec:
                   type: string
                   description: When the current phase started
                   format: date-time
+                reason:
+                  type: string
+                  description: Short CamelCase explanation paired with phase
                 message:
                   type: string
                   description: Human-readable message about current state

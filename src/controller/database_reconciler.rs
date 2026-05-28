@@ -132,12 +132,21 @@ pub async fn reconcile_database(
             );
 
             // Update status to show we're waiting for cluster
+            let cluster_not_found_msg = format!("Cluster {}/{} not found", ns, cluster_name);
             let conditions = merge_condition(
                 existing_conditions(&db),
                 DatabaseConditionType::ClusterReady,
                 cond_status::FALSE,
                 "ClusterNotFound",
-                &format!("Cluster {}/{} not found", ns, cluster_name),
+                &cluster_not_found_msg,
+                db.metadata.generation,
+            );
+            let conditions = merge_condition(
+                conditions,
+                DatabaseConditionType::Ready,
+                cond_status::FALSE,
+                "ClusterNotFound",
+                &cluster_not_found_msg,
                 db.metadata.generation,
             );
             update_status(
@@ -173,15 +182,24 @@ pub async fn reconcile_database(
         );
 
         // Update status to show we're waiting
+        let cluster_not_ready_msg = format!(
+            "Cluster {} is in phase {}",
+            db.spec.cluster_ref.name, cluster_phase
+        );
         let conditions = merge_condition(
             existing_conditions(&db),
             DatabaseConditionType::ClusterReady,
             cond_status::FALSE,
             "ClusterNotReady",
-            &format!(
-                "Cluster {} is in phase {}",
-                db.spec.cluster_ref.name, cluster_phase
-            ),
+            &cluster_not_ready_msg,
+            db.metadata.generation,
+        );
+        let conditions = merge_condition(
+            conditions,
+            DatabaseConditionType::Ready,
+            cond_status::FALSE,
+            "ClusterNotReady",
+            &cluster_not_ready_msg,
             db.metadata.generation,
         );
         update_status(
@@ -695,9 +713,17 @@ async fn update_status(
     let name = db.name_any();
     let databases: Api<PostgresDatabase> = Api::namespaced(ctx.client.clone(), namespace);
 
+    let (reason, message) = conditions
+        .iter()
+        .find(|c| c.type_ == DatabaseConditionType::Ready.as_str())
+        .map(|c| (Some(c.reason.clone()), Some(c.message.clone())))
+        .unwrap_or_default();
+
     let status = PostgresDatabaseStatus {
         phase,
         conditions,
+        reason,
+        message,
         connection_info,
         credential_secrets,
         observed_generation: db.metadata.generation,
