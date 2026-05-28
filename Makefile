@@ -93,6 +93,20 @@ clean: ## Clean build artifacts
 
 clean-all: uninstall clean ## Uninstall from cluster and clean build artifacts
 
+##@ Helm Chart
+
+chart-sync-crds: ## Regenerate the chart's CRD templates from config/crd/
+	@python3 hack/sync-chart-crds.py sync
+
+chart-check: ## Verify the chart's CRD templates are in sync with config/crd/ (CI)
+	@python3 hack/sync-chart-crds.py check
+
+chart-lint: ## Run `helm lint` on the chart
+	@helm lint charts/postgres-operator
+
+chart-template: ## Render the chart with default values
+	@helm template po charts/postgres-operator --namespace postgres-operator-system
+
 ##@ Help
 
 help: ## Display this help

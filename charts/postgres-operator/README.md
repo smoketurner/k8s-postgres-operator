@@ -2,11 +2,19 @@
 
 A Helm chart for deploying the PostgreSQL Operator, which manages PostgreSQL clusters with high availability using Patroni.
 
+## What this chart installs
+
+- The operator `Deployment`, `ServiceAccount`, `ClusterRole`, `ClusterRoleBinding`
+- All three CRDs (`PostgresCluster`, `PostgresDatabase`, `PostgresUpgrade`) synced from `config/crd/`
+- The validating admission webhook: `Service`, `ValidatingWebhookConfiguration`, and (when `webhook.certManager.enabled`) a cert-manager `Certificate` that issues + auto-renews the webhook server cert
+- Optional: `NetworkPolicy` for the operator pod (`networkPolicy.enabled`)
+- Optional: `ServiceMonitor` for Prometheus Operator (`serviceMonitor.enabled`)
+
 ## Prerequisites
 
 - Kubernetes 1.35+
 - Helm 3.8+
-- [cert-manager](https://cert-manager.io/) v1.0+ (required for TLS)
+- [cert-manager](https://cert-manager.io/) v1.0+ — used both by the webhook (issues this operator's cert) and by every `PostgresCluster` (issues PostgreSQL TLS certs). Disable webhook cert-manager via `webhook.certManager.enabled: false` if you need to bring your own cert.
 
 ### Installing cert-manager
 
@@ -447,11 +455,33 @@ kubectl logs -n postgres-operator-system deploy/postgres-operator
 
 ### CRD conflicts
 
-If upgrading and the CRD already exists:
+If upgrading and the CRD already exists, Helm will not overwrite it unless
+`crd.install: true` is set (which it is by default — the existing CRD will
+be updated in place). To install the CRDs out-of-band (e.g. when a cluster
+admin manages CRDs separately from the operator chart):
 
 ```bash
-kubectl apply -f charts/postgres-operator/templates/crd.yaml
+helm install postgres-operator ./charts/postgres-operator \
+  --namespace postgres-operator-system --create-namespace \
+  --set crd.install=false
+kubectl apply -f config/crd/
 ```
+
+The chart's CRD templates are auto-generated from `config/crd/` via
+`make chart-sync-crds`. CI verifies they are in sync via `make chart-check`.
+
+### Webhook certificate issues
+
+The validating webhook needs a TLS cert + matching CA bundle in the
+`ValidatingWebhookConfiguration`. With `webhook.certManager.enabled: true`
+(default), cert-manager handles both. Make sure the referenced
+`webhook.certManager.issuer` (a `ClusterIssuer` by default) exists; the
+sample `selfsigned-cluster-issuer` is for development only.
+
+To bring your own cert: set `webhook.certManager.enabled: false`, supply the
+CA bundle via `webhook.caBundle`, and create a Secret named
+`<release>-webhook-tls` (or override via `webhook.tlsSecretName`) containing
+`tls.crt` and `tls.key`.
 
 ### Leader election issues
 
