@@ -174,6 +174,7 @@ Each module generates Kubernetes resources:
 - `pgbouncer.rs`: PgBouncer Deployment for connection pooling
 - `backup.rs`: WAL-G backup configuration (encryption required)
 - `logical_backup.rs`: CronJob-based `pg_dumpall` logical backup (scheduled full SQL dumps to S3)
+- `ddl_audit.rs`: Server-side DDL audit (event trigger + audit table) installed on source during the upgrade replication window; cutover refused if non-zero count unless `spec.strategy.acknowledgeDDL=true`
 - `certificate.rs`: cert-manager Certificate CR for TLS
 - `common.rs`: Standard labels, owner references, user label merging
 - `scaled_object.rs`: KEDA ScaledObject for auto-scaling (CPU/connection metrics)

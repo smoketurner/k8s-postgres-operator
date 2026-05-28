@@ -115,6 +115,57 @@ Events:
 After the user resolves the failures, they must delete the failed upgrade
 and create a fresh `PostgresUpgrade` to retry.
 
+### DDL audit
+
+Logical replication does not replicate DDL. `CREATE TABLE`, `ALTER TABLE`,
+`CREATE INDEX`, `DROP COLUMN`, etc. that happen on the source during the
+replication window will silently fail to land on the target — the row count
+verification still passes, but the schemas have diverged. Wiz's published
+playbook flags this as one of the most common causes of broken cutovers.
+
+When the operator enters `ConfiguringReplication`, it installs a small
+server-side audit on the source cluster (an event trigger on `ddl_command_end`)
+that logs every DDL command into an audit table. The reconciler polls the
+row count between phases and patches it onto
+`status.replication.ddlCount`. While this is non-zero, the cutover guards in
+the FSM refuse to transition to `CuttingOver`.
+
+**Objects installed on the source** (all under the operator's connecting role,
+typically Spilo's `postgres` superuser):
+
+| Object | SQL identifier |
+|--------|----------------|
+| Audit table | `public.postgres_operator_ddl_audit` |
+| Audit function | `public.postgres_operator_log_ddl` |
+| Event trigger | `postgres_operator_ddl_audit` |
+
+The operator uninstalls all three on terminal phases (`Completed`, `Failed`,
+`RolledBack`) and on deletion of the `PostgresUpgrade`. If the resource is
+force-deleted (`kubectl delete --force --grace-period=0`) and the upgrade
+finalizer is bypassed, you can clean up manually:
+
+```sql
+DROP EVENT TRIGGER IF EXISTS postgres_operator_ddl_audit;
+DROP FUNCTION IF EXISTS public.postgres_operator_log_ddl();
+DROP TABLE IF EXISTS public.postgres_operator_ddl_audit;
+```
+
+#### `spec.strategy.acknowledgeDDL` (escape hatch)
+
+There are legitimate reasons to make schema changes on both source and target
+mid-upgrade — e.g. an emergency index addition, an `ALTER TABLE` that's been
+manually applied to both sides. To proceed with cutover after that:
+
+1. Apply the matching DDL to the target cluster yourself (the operator does
+   not infer this for you — getting it wrong silently is worse than
+   stopping).
+2. Set `spec.strategy.acknowledgeDDL: true` on the `PostgresUpgrade`.
+
+The cutover guard then allows the transition. The Warning Event and
+`DDLObserved=True` condition remain on the resource as an audit record.
+
+The operator never auto-acknowledges. The default is always `false`.
+
 ### Idle-in-transaction purger
 
 The single biggest cause of opaque `ConfiguringReplication` stalls on busy
