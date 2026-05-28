@@ -22,6 +22,9 @@ spec:
       storage: true
       subresources:
         status: {}
+        scale:
+          specReplicasPath: .spec.replicas
+          statusReplicasPath: .status.replicas
       additionalPrinterColumns:
         - name: Version
           type: string
@@ -565,6 +568,51 @@ spec:
                         type: string
                         description: Container name (must be unique within the pod)
                         minLength: 1
+                nodeSelector:
+                  type: object
+                  description: |
+                    Node selector applied to every Spilo pod. Pods are only scheduled
+                    onto nodes whose labels match all entries.
+                  additionalProperties:
+                    type: string
+                tolerations:
+                  type: array
+                  description: |
+                    Pod tolerations applied to every Spilo pod. Allows scheduling onto
+                    tainted nodes (for example, dedicated database node pools).
+                    Accepts the full Kubernetes Toleration shape.
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                topologySpreadConstraints:
+                  type: array
+                  description: |
+                    Topology spread constraints applied to every Spilo pod. Use to
+                    distribute replicas across failure domains (zones, hostnames, etc.)
+                    independently of the operator-managed anti-affinity rules.
+                    Accepts the full Kubernetes TopologySpreadConstraint shape.
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                    required:
+                      - maxSkew
+                      - topologyKey
+                      - whenUnsatisfiable
+                    properties:
+                      maxSkew:
+                        type: integer
+                        minimum: 1
+                      topologyKey:
+                        type: string
+                      whenUnsatisfiable:
+                        type: string
+                        enum: [DoNotSchedule, ScheduleAnyway]
+                priorityClassName:
+                  type: string
+                  description: |
+                    Priority class assigned to every Spilo pod. Higher-priority pods are
+                    scheduled ahead of lower-priority pods and are evicted last under
+                    node pressure. The referenced PriorityClass must already exist.
             status:
               type: object
               properties:

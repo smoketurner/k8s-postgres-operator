@@ -888,6 +888,16 @@ pub fn generate_patroni_statefulset(
                     // Increased to 60s to allow Patroni preStop hook to complete gracefully
                     termination_grace_period_seconds: Some(60),
                     affinity: Some(generate_anti_affinity(&name)),
+                    node_selector: (!cluster.spec.node_selector.is_empty())
+                        .then(|| cluster.spec.node_selector.clone()),
+                    tolerations: (!cluster.spec.tolerations.is_empty())
+                        .then(|| cluster.spec.tolerations.clone()),
+                    topology_spread_constraints: (!cluster
+                        .spec
+                        .topology_spread_constraints
+                        .is_empty())
+                    .then(|| cluster.spec.topology_spread_constraints.clone()),
+                    priority_class_name: cluster.spec.priority_class_name.clone(),
                     security_context: Some(k8s_openapi::api::core::v1::PodSecurityContext {
                         fs_group: Some(103), // postgres group
                         run_as_user: Some(101),

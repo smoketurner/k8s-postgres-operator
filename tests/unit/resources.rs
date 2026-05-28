@@ -150,6 +150,63 @@ mod patroni_statefulset_tests {
         let http = liveness.http_get.as_ref().unwrap();
         assert_eq!(http.path, Some("/liveness".to_string()));
     }
+
+    #[test]
+    fn scheduling_fields_propagate_to_pod_spec() {
+        use k8s_openapi::api::core::v1::{Toleration, TopologySpreadConstraint};
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
+        use std::collections::BTreeMap;
+
+        let mut cluster = create_test_cluster("sched", "default", 3);
+        cluster.spec.node_selector =
+            BTreeMap::from([("workload".to_string(), "database".to_string())]);
+        cluster.spec.tolerations = vec![Toleration {
+            key: Some("dedicated".to_string()),
+            operator: Some("Equal".to_string()),
+            value: Some("postgres".to_string()),
+            effect: Some("NoSchedule".to_string()),
+            ..Default::default()
+        }];
+        cluster.spec.topology_spread_constraints = vec![TopologySpreadConstraint {
+            max_skew: 1,
+            topology_key: "topology.kubernetes.io/zone".to_string(),
+            when_unsatisfiable: "ScheduleAnyway".to_string(),
+            label_selector: Some(LabelSelector::default()),
+            ..Default::default()
+        }];
+        cluster.spec.priority_class_name = Some("high-priority-db".to_string());
+
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
+        let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+
+        let node_selector = pod_spec.node_selector.as_ref().unwrap();
+        assert_eq!(node_selector.get("workload"), Some(&"database".to_string()));
+
+        let tolerations = pod_spec.tolerations.as_ref().unwrap();
+        assert_eq!(tolerations.len(), 1);
+        assert_eq!(tolerations[0].key.as_deref(), Some("dedicated"));
+
+        let tsc = pod_spec.topology_spread_constraints.as_ref().unwrap();
+        assert_eq!(tsc.len(), 1);
+        assert_eq!(tsc[0].topology_key, "topology.kubernetes.io/zone");
+
+        assert_eq!(
+            pod_spec.priority_class_name.as_deref(),
+            Some("high-priority-db")
+        );
+    }
+
+    #[test]
+    fn scheduling_fields_absent_when_unset() {
+        let cluster = create_test_cluster("default-sched", "default", 1);
+        let sts = patroni::generate_patroni_statefulset(&cluster, false, false);
+        let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+
+        assert!(pod_spec.node_selector.is_none());
+        assert!(pod_spec.tolerations.is_none());
+        assert!(pod_spec.topology_spread_constraints.is_none());
+        assert!(pod_spec.priority_class_name.is_none());
+    }
 }
 
 mod patroni_config_tests {

@@ -43,6 +43,10 @@ fn create_test_cluster(network_policy: Option<CrdNetworkPolicySpec>) -> Postgres
             scaling: None,
             network_policy,
             sidecars: vec![],
+            node_selector: Default::default(),
+            tolerations: vec![],
+            topology_spread_constraints: vec![],
+            priority_class_name: None,
         },
         status: None,
     }
