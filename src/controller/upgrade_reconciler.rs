@@ -41,6 +41,7 @@ use crate::crd::{
     ReplicationStatus, SequenceSyncStatus, UpgradeLineageRef, UpgradePhase, VerificationStatus,
     condition_types,
 };
+use crate::resources::ddl_audit;
 use crate::resources::postgres_client::PostgresConnection;
 use crate::resources::replication::{
     self, LagStatus, ReplicationError, RowCountVerification, SequenceSyncResult,
@@ -523,6 +524,7 @@ async fn build_transition_context(
         if let Some(repl) = &status.replication {
             tc.replication_lag_bytes = repl.lag_bytes;
             tc.replication_lag_seconds = repl.lag_seconds;
+            tc.ddl_observed = repl.ddl_count.unwrap_or(0) > 0;
         }
 
         if let Some(verif) = &status.verification {
@@ -537,6 +539,7 @@ async fn build_transition_context(
 
     // Get configuration
     tc.cutover_mode = upgrade.spec.strategy.cutover.mode;
+    tc.ddl_acknowledged = upgrade.spec.strategy.acknowledge_ddl;
 
     tc.required_verification_passes = upgrade.spec.strategy.pre_checks.min_verification_passes;
 
@@ -737,6 +740,7 @@ async fn execute_phase_transition(
         UpgradePhase::Completed | UpgradePhase::Failed | UpgradePhase::RolledBack
     ) {
         clear_source_upgrade_in_progress(upgrade, ctx, ns).await;
+        uninstall_source_ddl_audit(upgrade, ctx, ns).await;
     }
 
     match (from, to) {
@@ -807,6 +811,7 @@ async fn execute_phase_monitoring(
             // Update replication lag status
             let lag_status = get_replication_lag(upgrade, ctx, ns).await?;
             update_replication_status(upgrade, ctx, ns, &lag_status).await?;
+            poll_ddl_audit_status(upgrade, ctx, ns).await?;
         }
 
         UpgradePhase::Verifying => {
@@ -819,6 +824,7 @@ async fn execute_phase_monitoring(
                 "Row count verification result"
             );
             update_verification_status(upgrade, ctx, ns, &verification).await?;
+            poll_ddl_audit_status(upgrade, ctx, ns).await?;
         }
 
         _ => {
@@ -960,6 +966,30 @@ async fn setup_replication(
     // on busy clusters — the most common opaque ConfiguringReplication
     // stall per Wiz's documented Aurora playbook.
     purge_source_idle_transactions(upgrade, ctx, source_ns, source_name, &source_conn).await?;
+
+    // Install the DDL audit event trigger on the source so any DDL run
+    // during the replication window is counted. The reconciler polls
+    // `count_ddl_events` periodically and refuses to cut over if the
+    // count is non-zero (unless `spec.strategy.acknowledgeDDL` is set).
+    if let Err(e) = ddl_audit::install_ddl_audit(&source_conn).await {
+        warn!(
+            "Failed to install DDL audit on source {}/{}: {}; cutover will not be \
+             protected against DDL drift",
+            source_ns, source_name, e
+        );
+    } else {
+        ctx.publish_normal_event(
+            upgrade,
+            "DDLAuditInstalled",
+            "InstallDDLAudit",
+            Some(format!(
+                "Installed DDL audit on source {source_ns}/{source_name}; any DDL during \
+                 the replication window will be counted and surfaced on \
+                 status.replication.ddlCount"
+            )),
+        )
+        .await;
+    }
 
     // Get source cluster service host
     let source_host = format!("{}-primary.{}.svc", source_name, source_ns);
@@ -1490,6 +1520,167 @@ async fn fetch_target_storage_size(
     }
 }
 
+/// Poll the source's DDL audit table for the current event count, patch
+/// the result onto `status.replication.ddlCount` and the `DDLObserved`
+/// condition, and emit a Warning `DDLDetected` Event the first time the
+/// count flips from 0 → non-zero.
+///
+/// Errors at every level are logged but not propagated: the audit is a
+/// safety net, and we don't want a transient failure to read the count
+/// to cascade into reconciliation failures that would themselves block
+/// the upgrade.
+async fn poll_ddl_audit_status(
+    upgrade: &PostgresUpgrade,
+    ctx: &UpgradeContext,
+    ns: &str,
+) -> UpgradeResult<()> {
+    let source_name = &upgrade.spec.source_cluster.name;
+    let source_ns = upgrade
+        .spec
+        .source_cluster
+        .namespace
+        .as_deref()
+        .unwrap_or(ns);
+
+    let source_conn =
+        match PostgresConnection::connect_primary(&ctx.client, source_ns, source_name).await {
+            Ok(c) => c,
+            Err(e) => {
+                debug!(
+                    "DDL audit poll: source {}/{} unreachable, deferring to next reconcile: {}",
+                    source_ns, source_name, e
+                );
+                return Ok(());
+            }
+        };
+
+    let count = match ddl_audit::count_ddl_events(&source_conn).await {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(
+                "DDL audit poll: failed to read count from {}/{}: {}",
+                source_ns, source_name, e
+            );
+            return Ok(());
+        }
+    };
+
+    let previous = upgrade
+        .status
+        .as_ref()
+        .and_then(|s| s.replication.as_ref())
+        .and_then(|r| r.ddl_count)
+        .unwrap_or(0);
+
+    // First detection: emit a Warning Event so it surfaces in the live
+    // event stream as well as the condition message.
+    if previous == 0 && count > 0 {
+        let samples = ddl_audit::recent_ddl_samples(&source_conn, 5)
+            .await
+            .unwrap_or_default();
+        let summary = ddl_audit::render_ddl_sample_message(count, &samples);
+        ctx.publish_warning_event(upgrade, "DDLDetected", "PollDDLAudit", Some(summary))
+            .await;
+    }
+
+    patch_ddl_audit_status(upgrade, ctx, ns, &source_conn, count).await
+}
+
+/// Patch `status.replication.ddlCount` and the `DDLObserved` condition.
+async fn patch_ddl_audit_status(
+    upgrade: &PostgresUpgrade,
+    ctx: &UpgradeContext,
+    ns: &str,
+    source_conn: &PostgresConnection,
+    count: i64,
+) -> UpgradeResult<()> {
+    let samples = if count > 0 {
+        ddl_audit::recent_ddl_samples(source_conn, 5)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let mut conditions = upgrade
+        .status
+        .as_ref()
+        .map(|s| s.conditions.clone())
+        .unwrap_or_default();
+
+    let (status_value, reason) = if count > 0 {
+        (cond_status::TRUE, "DDLObserved")
+    } else {
+        (cond_status::FALSE, "NoDDLObserved")
+    };
+    let message = ddl_audit::render_ddl_sample_message(count, &samples);
+
+    set_status_condition(
+        &mut conditions,
+        new_condition(
+            condition_types::DDL_OBSERVED,
+            status_value,
+            reason,
+            &message,
+            upgrade.metadata.generation,
+        ),
+    );
+
+    let api: Api<PostgresUpgrade> = Api::namespaced(ctx.client.clone(), ns);
+    let patch = serde_json::json!({
+        "status": {
+            "conditions": conditions,
+            "replication": {
+                "ddlCount": count,
+            }
+        }
+    });
+    api.patch_status(
+        &upgrade.name_any(),
+        &PatchParams::default(),
+        &Patch::Merge(&patch),
+    )
+    .await?;
+
+    Ok(())
+}
+
+/// Drop the DDL audit objects from the source. Errors are logged only —
+/// the user can clean up manually if needed (the SQL identifiers are
+/// fixed and documented in `docs/upgrades.md`).
+async fn uninstall_source_ddl_audit(upgrade: &PostgresUpgrade, ctx: &UpgradeContext, ns: &str) {
+    let source_name = &upgrade.spec.source_cluster.name;
+    let source_ns = upgrade
+        .spec
+        .source_cluster
+        .namespace
+        .as_deref()
+        .unwrap_or(ns);
+
+    let source_conn =
+        match PostgresConnection::connect_primary(&ctx.client, source_ns, source_name).await {
+            Ok(c) => c,
+            Err(e) => {
+                debug!(
+                    "uninstall_source_ddl_audit: source {}/{} unreachable: {}",
+                    source_ns, source_name, e
+                );
+                return;
+            }
+        };
+
+    if let Err(e) = ddl_audit::uninstall_ddl_audit(&source_conn).await {
+        warn!(
+            "Failed to uninstall DDL audit from source {}/{}: {}; \
+             you may need to manually `DROP EVENT TRIGGER {} CASCADE`",
+            source_ns,
+            source_name,
+            e,
+            ddl_audit::AUDIT_TRIGGER
+        );
+    }
+}
+
 /// Run replication-compatibility preflight checks against the source
 /// cluster. On failure: patch a `PreflightPassed=False` condition with the
 /// concrete failure messages, emit a Warning Event, and return a permanent
@@ -1954,6 +2145,7 @@ async fn handle_rollback(
     // phase, so the cluster reconciler resumes Service reconciliation as
     // soon as RolledBack is observed.
     clear_source_upgrade_in_progress(upgrade, ctx, ns).await;
+    uninstall_source_ddl_audit(upgrade, ctx, ns).await;
 
     // Update phase to RolledBack
     update_phase(upgrade, ctx, ns, UpgradePhase::RolledBack).await?;
@@ -1988,6 +2180,7 @@ async fn handle_deletion(
     // phase, so the source cluster reconciler isn't left in suspended
     // Service-reconcile mode after the upgrade resource is gone.
     clear_source_upgrade_in_progress(upgrade, ctx, ns).await;
+    uninstall_source_ddl_audit(upgrade, ctx, ns).await;
 
     // Remove finalizer
     if has_finalizer(upgrade) {
@@ -2270,6 +2463,13 @@ async fn update_replication_status(
         last_sync_time: Some(Timestamp::now().to_string()),
         publication_name: None,
         subscription_name: None,
+        // ddl_count is owned by the DDL audit path (`patch_ddl_count_status`);
+        // don't clobber it from the lag-update path.
+        ddl_count: upgrade
+            .status
+            .as_ref()
+            .and_then(|s| s.replication.as_ref())
+            .and_then(|r| r.ddl_count),
     };
 
     let patch = serde_json::json!({

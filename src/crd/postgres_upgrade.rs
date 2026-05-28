@@ -123,6 +123,16 @@ pub struct UpgradeStrategy {
     /// Post-cutover behavior
     #[serde(default)]
     pub post_cutover: PostCutoverConfig,
+
+    /// Explicit acknowledgement that DDL has been observed on the source
+    /// during the replication window, and that the user has applied the
+    /// matching DDL to the target out-of-band. Logical replication does
+    /// not replicate DDL — without this acknowledgement the upgrade
+    /// refuses to cut over if `status.replication.ddlCount > 0`. Default
+    /// is `false`. **Set this only if you have manually reconciled the
+    /// schema.** See `docs/upgrades.md` for the DDL audit details.
+    #[serde(default)]
+    pub acknowledge_ddl: bool,
 }
 
 /// Type of upgrade strategy
@@ -614,6 +624,14 @@ pub struct ReplicationStatus {
     /// Name of the subscription on target
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscription_name: Option<String>,
+
+    /// Number of DDL commands observed on the source during the
+    /// replication window, as recorded by the operator-installed audit
+    /// event trigger. Cutover is refused while this is non-zero unless
+    /// `spec.strategy.acknowledgeDDL` is true. See `docs/upgrades.md` for
+    /// details.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ddl_count: Option<i64>,
 }
 
 /// State of logical replication
@@ -730,6 +748,10 @@ pub mod condition_types {
     /// reason indicates the upgrade was rejected; see the condition message
     /// for the specific failures).
     pub const PREFLIGHT_PASSED: &str = "PreflightPassed";
+    /// DDL has been observed on the source during the replication window.
+    /// True with the count + recent samples in the message means cutover
+    /// will be refused unless `spec.strategy.acknowledgeDDL` is true.
+    pub const DDL_OBSERVED: &str = "DDLObserved";
     /// All pre-checks passed, ready for cutover
     pub const READY_FOR_CUTOVER: &str = "ReadyForCutover";
     /// Post-cutover health check passed

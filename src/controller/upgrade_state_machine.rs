@@ -117,6 +117,14 @@ pub struct UpgradeTransitionContext {
     pub phase_timeout_elapsed: bool,
     /// Row count mismatch count (0 means all match)
     pub row_count_mismatches: i32,
+    /// Whether the DDL audit observed any DDL on the source during the
+    /// replication window. Blocks cutover unless `ddl_acknowledged` is
+    /// also set.
+    pub ddl_observed: bool,
+    /// Whether the user explicitly acknowledged the observed DDL via
+    /// `spec.strategy.acknowledgeDDL`. Only meaningful when
+    /// `ddl_observed` is true.
+    pub ddl_acknowledged: bool,
 }
 
 impl Default for UpgradeTransitionContext {
@@ -138,6 +146,8 @@ impl Default for UpgradeTransitionContext {
             error_message: None,
             phase_timeout_elapsed: false,
             row_count_mismatches: 0,
+            ddl_observed: false,
+            ddl_acknowledged: false,
         }
     }
 }
@@ -593,6 +603,8 @@ impl UpgradeStateMachine {
                     Some("Not within maintenance window".to_string())
                 } else if !ctx.backup_requirement_met {
                     Some("Backup requirement not met".to_string())
+                } else if ctx.ddl_observed && !ctx.ddl_acknowledged {
+                    Some(ddl_guard_message())
                 } else {
                     None
                 }
@@ -619,6 +631,8 @@ impl UpgradeStateMachine {
             ) => {
                 if ctx.rollback_requested {
                     Some("Rollback is requested, cannot proceed with cutover".to_string())
+                } else if ctx.ddl_observed && !ctx.ddl_acknowledged {
+                    Some(ddl_guard_message())
                 } else {
                     None
                 }
@@ -633,6 +647,18 @@ impl UpgradeStateMachine {
             _ => None,
         }
     }
+}
+
+/// Message used by the cutover guards when DDL was observed during the
+/// replication window and the user has not explicitly acknowledged it.
+/// Kept as a helper so both manual and automatic cutover paths share the
+/// exact same wording.
+fn ddl_guard_message() -> String {
+    "DDL was observed on the source during the replication window; logical replication \
+     does not replicate DDL, so the target schema is out of sync. Apply the matching \
+     DDL to the target manually and set spec.strategy.acknowledgeDDL: true to proceed, \
+     or abort and restart the upgrade."
+        .to_string()
 }
 
 /// Determine the appropriate event based on upgrade context
@@ -925,6 +951,100 @@ mod tests {
         let result = sm.transition(
             &UpgradePhase::ReadyForCutover,
             UpgradeEvent::AutoCutoverConditionsMet,
+            &ctx,
+        );
+        assert!(matches!(result, UpgradeTransitionResult::Success { .. }));
+    }
+
+    #[test]
+    fn test_auto_cutover_blocked_by_observed_ddl() {
+        let sm = UpgradeStateMachine::new();
+
+        // Source had DDL during replication; user did not acknowledge.
+        let mut ctx = default_ctx();
+        ctx.cutover_mode = CutoverMode::Automatic;
+        ctx.within_maintenance_window = true;
+        ctx.backup_requirement_met = true;
+        ctx.ddl_observed = true;
+        ctx.ddl_acknowledged = false;
+        let result = sm.transition(
+            &UpgradePhase::ReadyForCutover,
+            UpgradeEvent::AutoCutoverConditionsMet,
+            &ctx,
+        );
+        let UpgradeTransitionResult::GuardFailed { reason, .. } = result else {
+            panic!("expected GuardFailed");
+        };
+        assert!(
+            reason.contains("DDL was observed"),
+            "guard reason should mention DDL; got: {reason}"
+        );
+        assert!(
+            reason.contains("acknowledgeDDL"),
+            "guard reason should mention the escape hatch; got: {reason}"
+        );
+    }
+
+    #[test]
+    fn test_auto_cutover_allowed_when_ddl_acknowledged() {
+        let sm = UpgradeStateMachine::new();
+
+        // DDL observed, but user explicitly acknowledged + applied manually.
+        let mut ctx = default_ctx();
+        ctx.cutover_mode = CutoverMode::Automatic;
+        ctx.within_maintenance_window = true;
+        ctx.backup_requirement_met = true;
+        ctx.ddl_observed = true;
+        ctx.ddl_acknowledged = true;
+        let result = sm.transition(
+            &UpgradePhase::ReadyForCutover,
+            UpgradeEvent::AutoCutoverConditionsMet,
+            &ctx,
+        );
+        assert!(matches!(result, UpgradeTransitionResult::Success { .. }));
+    }
+
+    #[test]
+    fn test_manual_cutover_blocked_by_observed_ddl() {
+        let sm = UpgradeStateMachine::new();
+
+        let mut ctx = default_ctx();
+        ctx.ddl_observed = true;
+        ctx.ddl_acknowledged = false;
+        let result = sm.transition(
+            &UpgradePhase::WaitingForManualCutover,
+            UpgradeEvent::ManualCutoverTriggered,
+            &ctx,
+        );
+        let UpgradeTransitionResult::GuardFailed { reason, .. } = result else {
+            panic!("expected GuardFailed");
+        };
+        assert!(reason.contains("DDL was observed"));
+    }
+
+    #[test]
+    fn test_manual_cutover_allowed_when_ddl_acknowledged() {
+        let sm = UpgradeStateMachine::new();
+
+        let mut ctx = default_ctx();
+        ctx.ddl_observed = true;
+        ctx.ddl_acknowledged = true;
+        let result = sm.transition(
+            &UpgradePhase::WaitingForManualCutover,
+            UpgradeEvent::ManualCutoverTriggered,
+            &ctx,
+        );
+        assert!(matches!(result, UpgradeTransitionResult::Success { .. }));
+    }
+
+    #[test]
+    fn test_cutover_not_blocked_when_no_ddl_observed() {
+        // Default ctx has ddl_observed = false; cutover should not be gated.
+        let sm = UpgradeStateMachine::new();
+        let ctx = default_ctx();
+        let result = sm.transition(
+            &UpgradePhase::WaitingForManualCutover,
+            UpgradeEvent::ManualCutoverTriggered,
             &ctx,
         );
         assert!(matches!(result, UpgradeTransitionResult::Success { .. }));
