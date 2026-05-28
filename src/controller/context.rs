@@ -5,14 +5,12 @@
 
 use std::sync::Arc;
 
-use kube::runtime::events::{Event, EventType, Recorder, Reporter};
-use kube::{Client, Resource};
+use kube::Client;
+use kube::runtime::events::{EventType, Reporter};
 
+use crate::controller::events;
 use crate::crd::PostgresCluster;
 use crate::health::HealthState;
-
-/// Field manager name for the operator
-pub(crate) const FIELD_MANAGER: &str = "postgres-operator";
 
 /// Default operator namespace when `POD_NAMESPACE` is not set.
 pub const DEFAULT_OPERATOR_NAMESPACE: &str = "postgres-operator-system";
@@ -42,10 +40,7 @@ impl Context {
     ) -> Self {
         Self {
             client,
-            reporter: Reporter {
-                controller: FIELD_MANAGER.into(),
-                instance: std::env::var("POD_NAME").ok(),
-            },
+            reporter: events::reporter(),
             health_state,
             operator_namespace,
         }
@@ -76,11 +71,6 @@ impl Context {
         }
     }
 
-    /// Create an event recorder
-    fn recorder(&self) -> Recorder {
-        Recorder::new(self.client.clone(), self.reporter.clone())
-    }
-
     /// Publish a normal event for a cluster
     pub async fn publish_normal_event(
         &self,
@@ -89,23 +79,16 @@ impl Context {
         action: &str,
         note: Option<String>,
     ) {
-        let recorder = self.recorder();
-        let object_ref = cluster.object_ref(&());
-        if let Err(e) = recorder
-            .publish(
-                &Event {
-                    type_: EventType::Normal,
-                    reason: reason.into(),
-                    note,
-                    action: action.into(),
-                    secondary: None,
-                },
-                &object_ref,
-            )
-            .await
-        {
-            tracing::warn!("Failed to publish event: {}", e);
-        }
+        events::publish_event(
+            &self.client,
+            &self.reporter,
+            cluster,
+            EventType::Normal,
+            reason,
+            action,
+            note,
+        )
+        .await;
     }
 
     /// Publish a warning event for a cluster
@@ -116,22 +99,15 @@ impl Context {
         action: &str,
         note: Option<String>,
     ) {
-        let recorder = self.recorder();
-        let object_ref = cluster.object_ref(&());
-        if let Err(e) = recorder
-            .publish(
-                &Event {
-                    type_: EventType::Warning,
-                    reason: reason.into(),
-                    note,
-                    action: action.into(),
-                    secondary: None,
-                },
-                &object_ref,
-            )
-            .await
-        {
-            tracing::warn!("Failed to publish warning event: {}", e);
-        }
+        events::publish_event(
+            &self.client,
+            &self.reporter,
+            cluster,
+            EventType::Warning,
+            reason,
+            action,
+            note,
+        )
+        .await;
     }
 }

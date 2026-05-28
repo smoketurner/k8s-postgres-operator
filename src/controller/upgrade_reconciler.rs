@@ -23,11 +23,13 @@ use std::time::Duration;
 use jiff::{SignedDuration, Timestamp};
 use kube::api::{Api, DeleteParams, Patch, PatchParams};
 use kube::runtime::controller::Action;
+use kube::runtime::events::{EventType, Reporter};
 use kube::{Client, ResourceExt};
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::controller::cleanup::{cleanup_stuck_resource, is_namespace_not_found_error};
 use crate::controller::conditions::{new_condition, set_status_condition, status as cond_status};
+use crate::controller::events;
 use crate::controller::finalizer::remove_operator_finalizer;
 use crate::controller::upgrade_error::{UpgradeBackoffConfig, UpgradeError, UpgradeResult};
 use crate::controller::upgrade_state_machine::{
@@ -66,11 +68,55 @@ const DEFAULT_ROW_COUNT_TOLERANCE: i64 = 0;
 /// Context for the upgrade reconciler
 pub struct UpgradeContext {
     pub client: Client,
+    reporter: Reporter,
 }
 
 impl UpgradeContext {
     pub fn new(client: Client) -> Self {
-        Self { client }
+        Self {
+            client,
+            reporter: events::reporter(),
+        }
+    }
+
+    /// Publish a Normal event attached to the PostgresUpgrade.
+    pub async fn publish_normal_event(
+        &self,
+        upgrade: &PostgresUpgrade,
+        reason: &str,
+        action: &str,
+        note: Option<String>,
+    ) {
+        events::publish_event(
+            &self.client,
+            &self.reporter,
+            upgrade,
+            EventType::Normal,
+            reason,
+            action,
+            note,
+        )
+        .await;
+    }
+
+    /// Publish a Warning event attached to the PostgresUpgrade.
+    pub async fn publish_warning_event(
+        &self,
+        upgrade: &PostgresUpgrade,
+        reason: &str,
+        action: &str,
+        note: Option<String>,
+    ) {
+        events::publish_event(
+            &self.client,
+            &self.reporter,
+            upgrade,
+            EventType::Warning,
+            reason,
+            action,
+            note,
+        )
+        .await;
     }
 }
 
@@ -159,6 +205,14 @@ pub async fn reconcile_upgrade(
                 &Patch::Merge(&patch),
             )
             .await?;
+
+            ctx.publish_warning_event(
+                &upgrade,
+                "SourceClusterMissing",
+                "Upgrade",
+                Some(err_msg.clone()),
+            )
+            .await;
 
             return Ok(Action::await_change());
         } else {
@@ -263,6 +317,19 @@ pub async fn reconcile_upgrade(
 
                 // Update status with new phase
                 update_phase(&upgrade, &ctx, &ns, to).await?;
+
+                // Emit a Kubernetes Event for every phase transition. Use
+                // Warning for terminal-failure phases so it stands out in
+                // `kubectl describe`.
+                let event_type_warn = matches!(to, UpgradePhase::Failed | UpgradePhase::RolledBack);
+                let note = Some(format!("{current_phase} -> {to}: {description}"));
+                if event_type_warn {
+                    ctx.publish_warning_event(&upgrade, "PhaseTransition", "Upgrade", note)
+                        .await;
+                } else {
+                    ctx.publish_normal_event(&upgrade, "PhaseTransition", "Upgrade", note)
+                        .await;
+                }
 
                 // Determine requeue interval based on new phase
                 Ok(Action::requeue(requeue_duration_for_phase(&to)))
