@@ -11,6 +11,7 @@ pub mod replication;
 pub mod scaled_object;
 pub mod secret;
 pub mod service;
+pub mod service_monitor;
 pub mod sql;
 
 pub use common::{

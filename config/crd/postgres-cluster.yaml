@@ -375,11 +375,48 @@ spec:
                       description: Time before expiry to renew certificate (e.g., "360h" for 15 days)
                 metrics:
                   type: object
+                  description: |
+                    Metrics exposure. When `enabled` is true the operator
+                    creates a `<cluster>-metrics` Service targeting `port`
+                    on every Spilo pod; the user must wire a metrics-exporter
+                    sidecar via `spec.sidecars`. When `serviceMonitor.enabled`
+                    is true a Prometheus Operator ServiceMonitor is also
+                    generated, skipped silently if the
+                    `monitoring.coreos.com` CRDs are absent.
+                  required:
+                    - enabled
                   properties:
                     enabled:
                       type: boolean
                     port:
                       type: integer
+                      default: 9187
+                    serviceMonitor:
+                      type: object
+                      description: |
+                        Prometheus Operator ServiceMonitor configuration.
+                        Has no effect if the Prometheus Operator CRDs are
+                        not installed.
+                      properties:
+                        enabled:
+                          type: boolean
+                          default: false
+                        interval:
+                          type: string
+                          description: "Scrape interval (e.g. '30s', '1m')."
+                        scrapeTimeout:
+                          type: string
+                          description: "Scrape timeout. Must be ≤ interval."
+                        path:
+                          type: string
+                          description: "HTTP path on the metrics endpoint (default /metrics)."
+                        labels:
+                          type: object
+                          description: |
+                            Additional labels for the ServiceMonitor so the
+                            cluster's Prometheus selector matches it.
+                          additionalProperties:
+                            type: string
                 service:
                   type: object
                   description: Service configuration for external access

@@ -996,20 +996,66 @@ impl Default for TLSSpec {
     }
 }
 
-/// Metrics configuration (Phase 0.3)
+/// Metrics configuration
+///
+/// When `enabled` is true the operator generates a dedicated metrics Service
+/// (`<cluster>-metrics`) targeting `port` on every Spilo pod. The pod must
+/// actually expose that port via a metrics-exporter sidecar — typically a
+/// `postgres_exporter` container declared in `spec.sidecars`. The operator
+/// does not inject an exporter automatically; that's left to the user so
+/// teams can pick the exporter and version that suits them.
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MetricsSpec {
-    /// Enable Prometheus metrics exporter
+    /// Enable Prometheus metrics. Generates the metrics Service and (if
+    /// `service_monitor` is set) a Prometheus Operator ServiceMonitor.
     pub enabled: bool,
 
-    /// Port for metrics endpoint
+    /// Port for the metrics endpoint. Must match the `containerPort` of the
+    /// metrics-exporter sidecar configured via `spec.sidecars`. Default 9187
+    /// (the standard postgres_exporter port).
     #[serde(default = "default_metrics_port")]
     pub port: i32,
+
+    /// Generate a Prometheus Operator ServiceMonitor for this cluster.
+    /// Skipped silently if the `monitoring.coreos.com` CRDs are not present
+    /// in the cluster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_monitor: Option<ServiceMonitorSpec>,
 }
 
 fn default_metrics_port() -> i32 {
     9187
+}
+
+/// Prometheus Operator ServiceMonitor configuration.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceMonitorSpec {
+    /// Enable ServiceMonitor generation. Has no effect if the Prometheus
+    /// Operator CRDs are not installed.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Scrape interval (Prometheus duration, e.g. `"30s"`, `"1m"`). When
+    /// unset Prometheus uses its global default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<String>,
+
+    /// Scrape timeout (Prometheus duration). Must be ≤ interval. When unset
+    /// Prometheus uses its global default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scrape_timeout: Option<String>,
+
+    /// Additional labels applied to the generated ServiceMonitor so the
+    /// operator's Prometheus selector matches it. Typically
+    /// `{ release: "kube-prometheus-stack" }` or similar.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+
+    /// HTTP path on the metrics endpoint. Default `/metrics`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// Service configuration for external access

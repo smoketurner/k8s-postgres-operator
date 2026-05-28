@@ -438,6 +438,7 @@ impl PostgresClusterBuilder {
         self.metrics = Some(MetricsSpec {
             enabled: true,
             port: 9187,
+            service_monitor: None,
         });
         self
     }
@@ -447,6 +448,7 @@ impl PostgresClusterBuilder {
         self.metrics = Some(MetricsSpec {
             enabled: true,
             port,
+            service_monitor: None,
         });
         self
     }
