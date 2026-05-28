@@ -569,6 +569,50 @@ pub struct BackupSpec {
     /// Default: 3
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delta_max_steps: Option<i32>,
+
+    /// Optional scheduled `pg_dumpall` logical backup. Orthogonal to WAL-G:
+    /// WAL-G handles continuous archiving + PITR; logical backups handle
+    /// schema migrations, cross-major-version restores, and compliance
+    /// snapshots. Dumps land at `s3://<bucket>/<path>/logical/<timestamp>.sql.gz`
+    /// using the same S3 destination + credentials as WAL-G.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical: Option<LogicalBackupSpec>,
+}
+
+/// Logical backup (`pg_dumpall`) configuration.
+///
+/// Runs as a Kubernetes CronJob in the cluster namespace. The job's pod uses
+/// the Spilo image (so `pg_dumpall` and the `aws` CLI are both present),
+/// connects to `<cluster>-primary` as the `postgres` superuser, streams the
+/// dump through `gzip` and uploads it to S3 with `aws s3 cp`. The destination
+/// and credentials are taken from the parent [`BackupSpec`].
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LogicalBackupSpec {
+    /// Enable scheduled logical backups.
+    pub enabled: bool,
+
+    /// Cron schedule (e.g. `"0 3 * * *"` for 03:00 UTC daily). The pod
+    /// runs in the namespace's local timezone if the CronJob's
+    /// `timeZone` is configured by the cluster admin, otherwise UTC.
+    pub schedule: String,
+
+    /// Optional image override. Defaults to the cluster's Spilo image so
+    /// the `pg_dumpall` major-version matches the source cluster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+
+    /// Optional CPU/memory requests and limits for the dump pod.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ResourceRequirements>,
+
+    /// Number of successful job runs to keep. Default: 3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub successful_jobs_history_limit: Option<i32>,
+
+    /// Number of failed job runs to keep. Default: 3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_jobs_history_limit: Option<i32>,
 }
 
 impl BackupSpec {

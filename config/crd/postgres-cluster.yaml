@@ -282,6 +282,59 @@ spec:
                       minimum: 1
                       maximum: 10
                       default: 3
+                    logical:
+                      type: object
+                      description: |
+                        Scheduled `pg_dumpall` logical backup running as a CronJob.
+                        Orthogonal to WAL-G (continuous archiving + PITR); logical
+                        backups handle schema migrations, cross-major-version restores,
+                        and compliance snapshots. Uses the same S3 destination and
+                        credentials as WAL-G.
+                      required:
+                        - enabled
+                        - schedule
+                      properties:
+                        enabled:
+                          type: boolean
+                          description: Enable scheduled logical backups.
+                        schedule:
+                          type: string
+                          description: |
+                            Cron schedule (e.g. `"0 3 * * *"` for 03:00 UTC daily).
+                        image:
+                          type: string
+                          description: |
+                            Optional image override. Defaults to the cluster's Spilo
+                            image so `pg_dumpall` matches the source PostgreSQL major
+                            version.
+                        resources:
+                          type: object
+                          description: Optional CPU/memory requests and limits for the dump pod.
+                          properties:
+                            requests:
+                              type: object
+                              description: Guaranteed reservation used by the scheduler.
+                              properties:
+                                cpu:
+                                  type: string
+                                memory:
+                                  type: string
+                            limits:
+                              type: object
+                              description: Hard ceilings; the kubelet kills the container if exceeded.
+                              properties:
+                                cpu:
+                                  type: string
+                                memory:
+                                  type: string
+                        successfulJobsHistoryLimit:
+                          type: integer
+                          description: Number of successful job runs to keep (default 3).
+                          minimum: 0
+                        failedJobsHistoryLimit:
+                          type: integer
+                          description: Number of failed job runs to keep (default 3).
+                          minimum: 0
                 pgbouncer:
                   type: object
                   description: PgBouncer connection pooler configuration (deployed as separate Deployment)

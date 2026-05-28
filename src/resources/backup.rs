@@ -627,6 +627,7 @@ mod tests {
             download_concurrency: None,
             enable_delta_backups: false,
             delta_max_steps: None,
+            logical: None,
         };
 
         let cluster = create_test_cluster(Some(backup));
@@ -677,6 +678,7 @@ mod tests {
             download_concurrency: None,
             enable_delta_backups: false,
             delta_max_steps: None,
+            logical: None,
         };
 
         let cluster = create_test_cluster(Some(backup));
@@ -764,6 +766,7 @@ mod tests {
             download_concurrency: None,
             enable_delta_backups: false,
             delta_max_steps: None,
+            logical: None,
         };
         let cluster_with_backup = create_test_cluster(Some(backup));
         assert!(is_backup_enabled(&cluster_with_backup));
@@ -816,6 +819,7 @@ mod tests {
             download_concurrency: None,
             enable_delta_backups: false,
             delta_max_steps: None,
+            logical: None,
         };
 
         let cluster = create_test_cluster(Some(backup));
