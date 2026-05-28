@@ -701,6 +701,10 @@ pub mod condition_types {
     pub const BACKUP_VERIFIED: &str = "BackupVerified";
     /// Active connections have been drained
     pub const CONNECTIONS_DRAINED: &str = "ConnectionsDrained";
+    /// Replication-compatibility preflight checks all passed (False with a
+    /// reason indicates the upgrade was rejected; see the condition message
+    /// for the specific failures).
+    pub const PREFLIGHT_PASSED: &str = "PreflightPassed";
     /// All pre-checks passed, ready for cutover
     pub const READY_FOR_CUTOVER: &str = "ReadyForCutover";
     /// Post-cutover health check passed
