@@ -238,37 +238,57 @@ spec:
 
 ## Rollback
 
-If issues are detected, you can rollback to the source cluster.
+**Rollback is supported only before the `CuttingOver` phase begins.** Once
+service selectors flip to the target, the new primary may have accepted
+writes that the source does not have. Automatic rollback at that point would
+silently drop data. This operator deliberately refuses post-cutover rollback
+to make that guarantee enforceable.
 
-### Trigger Rollback
+This matches the published stance of other production blue/green tooling
+(AWS RDS Blue/Green Deployments, Wiz's Aurora playbook, `pg_easy_replicate`).
+
+### Trigger Rollback (pre-cutover only)
 
 ```bash
 kubectl annotate postgresupgrade my-cluster-upgrade \
   postgres-operator.smoketurner.com/rollback=now
 ```
 
-### Rollback Behavior
+Valid source phases: `CreatingTarget`, `ConfiguringReplication`,
+`Replicating`, `Verifying`, `SyncingSequences`, `ReadyForCutover`, and
+`Failed` (when the failure happened pre-cutover).
+
+The annotation is rejected with `RollbackNotAllowedInPhase` if the upgrade
+is in `CuttingOver`, `HealthChecking`, or `Completed`. The error message
+points users to the post-cutover recovery procedure below.
+
+### Rollback Behavior (pre-cutover)
 
 1. The operator stops replication
-2. Sets source cluster back to read-write
-3. Switches services back to source cluster
-4. Marks upgrade as `RolledBack`
+2. Sets source cluster back to read-write (if it was made read-only)
+3. Drops the publication on source and subscription on target
+4. Marks the upgrade as `RolledBack`
+5. The target cluster is left in place for manual inspection; delete it
+   with `kubectl delete postgrescluster <target-name>` once you're done
 
-### Check Rollback Feasibility
+### Post-cutover recovery (manual)
 
-```bash
-kubectl get postgresupgrade my-cluster-upgrade \
-  -o jsonpath='{.status.rollback}'
-```
+If a problem with the target is discovered after cutover, recovery is a
+manual operation, not an automated one:
 
-```yaml
-rollback:
-  feasible: true
-  dataLossRisk: false
-  reason: "Source cluster running, no writes to target since cutover"
-```
+1. Stop application traffic to the cluster (scale your apps to zero, or
+   point them at a read-only/maintenance page).
+2. Identify a WAL-G backup taken **before** the cutover started. The
+   `status.startedAt` timestamp on the `PostgresUpgrade` resource is the
+   correct boundary.
+3. Restore the source cluster from that backup using PITR. See
+   `docs/backup-restore.md` for the restore procedure.
+4. Cut traffic back to the restored cluster.
+5. Decide whether to retry the upgrade with the issue addressed, or
+   defer.
 
-> **Warning**: If `dataLossRisk: true`, writes have occurred to the target cluster after cutover. Rollback will lose those writes.
+This is intentionally a deliberate operation. The blue/green design gives
+you a long replication window to find problems before cutover; use it.
 
 ## Fleet Upgrades
 
@@ -364,7 +384,7 @@ For detailed troubleshooting procedures, see:
 
 ## Cleanup
 
-After a successful upgrade, the source cluster is NOT automatically deleted. This allows for rollback if issues are discovered later.
+After a successful upgrade, the source cluster is NOT automatically deleted. This allows for manual recovery via PITR if issues are discovered later (see [Rollback](#rollback) for the post-cutover recovery procedure).
 
 To clean up the source cluster manually:
 
@@ -386,7 +406,7 @@ After a successful upgrade completes, you have two PostgresCluster resources:
 
 | Cluster | Phase | Purpose |
 |---------|-------|---------|
-| Original (e.g., `my-cluster`) | `Superseded` | Kept for rollback safety, no longer receives traffic |
+| Original (e.g., `my-cluster`) | `Superseded` | Kept for PITR recovery, no longer receives traffic |
 | Target (e.g., `my-cluster-upgrade-target`) | `Running` | Active cluster, receives all traffic |
 
 ### Which Cluster to Manage

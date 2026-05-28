@@ -136,13 +136,14 @@ pub enum UpgradeError {
     // ============================================
     // Rollback Errors
     // ============================================
-    /// Rollback not feasible
-    #[error("Rollback not feasible: {reason}")]
-    RollbackNotFeasible { reason: String },
-
-    /// Rollback would cause data loss
-    #[error("Rollback would cause data loss: writes occurred to target after cutover")]
-    RollbackDataLossRisk,
+    /// Rollback requested from a phase that does not support it (cutover or
+    /// post-cutover). Recovery from a bad target after cutover requires PITR
+    /// from a pre-upgrade backup; see `docs/upgrades.md`.
+    #[error(
+        "Rollback is not supported in phase {phase}: cutover has begun or completed. \
+         See docs/upgrades.md for post-cutover recovery."
+    )]
+    RollbackNotAllowedInPhase { phase: String },
 }
 
 impl UpgradeError {
@@ -206,10 +207,7 @@ impl UpgradeError {
 
     /// Returns true if this error is related to rollback
     pub fn is_rollback_error(&self) -> bool {
-        matches!(
-            self,
-            UpgradeError::RollbackNotFeasible { .. } | UpgradeError::RollbackDataLossRisk
-        )
+        matches!(self, UpgradeError::RollbackNotAllowedInPhase { .. })
     }
 }
 
