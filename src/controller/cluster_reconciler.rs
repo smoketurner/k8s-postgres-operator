@@ -35,7 +35,7 @@ use crate::controller::cluster_state_machine::{
 use crate::controller::cluster_status::{RunningProgress, StatusManager, spec_changed};
 use crate::controller::context::Context;
 use crate::controller::finalizer::remove_operator_finalizer;
-use crate::crd::{ClusterPhase, PostgresCluster};
+use crate::crd::{ClusterPhase, PostgresCluster, annotations as upgrade_annotations};
 use crate::resources::{
     backup, certificate, logical_backup, network_policy, patroni, pdb, pgbouncer, scaled_object,
     secret, service, service_monitor,
@@ -883,43 +883,77 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
     let sts = patroni::generate_patroni_statefulset(cluster, keda_managed, restart_on_resize);
     apply_resource(ctx, ns, &sts).await?;
 
-    // Ensure Patroni Services exist
-    let primary_svc = service::generate_primary_service(cluster);
-    apply_resource(ctx, ns, &primary_svc).await?;
+    // Ensure Patroni Services exist — UNLESS an upgrade is in progress on
+    // this cluster. The PostgresUpgrade reconciler patches the primary and
+    // replicas Service selectors to flip traffic from source to target
+    // during cutover; if we re-apply our generated Services here, we revert
+    // that flip and create a normal-operation race against the cutover.
+    // The cluster reconciler runs on its own schedule independent of HA
+    // edge cases, so this gate is required even in single-replica operator
+    // deployments.
+    //
+    // While the annotation is set, PVCs, ConfigMaps, the StatefulSet, and
+    // every other resource above continue to reconcile normally so Patroni
+    // on the source remains healthy.
+    let upgrade_in_progress = cluster
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(upgrade_annotations::UPGRADE_IN_PROGRESS));
 
-    // Only create replicas service if replicas > 1 (production mode)
-    // With replicas=1 (development mode), there are no read replicas
-    if cluster.spec.replicas > 1 {
-        let replicas_svc = service::generate_replicas_service(cluster);
-        apply_resource(ctx, ns, &replicas_svc).await?;
+    if let Some(upgrade_name) = upgrade_in_progress {
+        info!(
+            "Skipping Service reconciliation for cluster {}: upgrade '{}' is in progress",
+            name, upgrade_name
+        );
+        ctx.publish_normal_event(
+            cluster,
+            "ServiceReconciliationSuspended",
+            "UpgradeInProgress",
+            Some(format!(
+                "Service reconciliation suspended while upgrade '{upgrade_name}' is in progress; \
+                 the upgrade controller manages Service selectors during cutover"
+            )),
+        )
+        .await;
     } else {
-        // Clean up replicas service if it exists (cluster scaled down to 1 replica)
-        let replicas_svc_name = format!("{}-repl", name);
-        let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
-        match svc_api
-            .delete(&replicas_svc_name, &DeleteParams::default())
-            .await
-        {
-            Ok(_) => {
-                info!(
-                    "Deleted replicas service {} (cluster scaled to single replica)",
-                    replicas_svc_name
-                );
-            }
-            Err(kube::Error::Api(err)) if err.code == 404 => {
-                // Service doesn't exist, that's fine
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to delete replicas service {}: {}",
-                    replicas_svc_name, e
-                );
+        let primary_svc = service::generate_primary_service(cluster);
+        apply_resource(ctx, ns, &primary_svc).await?;
+
+        // Only create replicas service if replicas > 1 (production mode)
+        // With replicas=1 (development mode), there are no read replicas
+        if cluster.spec.replicas > 1 {
+            let replicas_svc = service::generate_replicas_service(cluster);
+            apply_resource(ctx, ns, &replicas_svc).await?;
+        } else {
+            // Clean up replicas service if it exists (cluster scaled down to 1 replica)
+            let replicas_svc_name = format!("{}-repl", name);
+            let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
+            match svc_api
+                .delete(&replicas_svc_name, &DeleteParams::default())
+                .await
+            {
+                Ok(_) => {
+                    info!(
+                        "Deleted replicas service {} (cluster scaled to single replica)",
+                        replicas_svc_name
+                    );
+                }
+                Err(kube::Error::Api(err)) if err.code == 404 => {
+                    // Service doesn't exist, that's fine
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to delete replicas service {}: {}",
+                        replicas_svc_name, e
+                    );
+                }
             }
         }
-    }
 
-    let headless_svc = service::generate_headless_service(cluster);
-    apply_resource(ctx, ns, &headless_svc).await?;
+        let headless_svc = service::generate_headless_service(cluster);
+        apply_resource(ctx, ns, &headless_svc).await?;
+    }
 
     // Apply PgBouncer resources if enabled
     if pgbouncer::is_pgbouncer_enabled(cluster) {

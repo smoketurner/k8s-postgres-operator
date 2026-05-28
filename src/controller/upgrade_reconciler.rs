@@ -38,6 +38,7 @@ use crate::controller::upgrade_state_machine::{
 use crate::crd::{
     ClusterPhase, Condition, CutoverMode, PostgresCluster, PostgresClusterSpec, PostgresUpgrade,
     ReplicationStatus, SequenceSyncStatus, UpgradeLineageRef, UpgradePhase, VerificationStatus,
+    condition_types,
 };
 use crate::resources::postgres_client::PostgresConnection;
 use crate::resources::replication::{
@@ -469,6 +470,27 @@ async fn build_transition_context(
                     source_version, target_version
                 ));
             }
+
+            // Backup safety gate: auto-cutover requires a recent successful
+            // backup on the source cluster. Manual cutover is permitted to
+            // bypass this check (the user takes responsibility). The
+            // requirement window is configured via
+            // `spec.strategy.preChecks.requireBackupWithin` (default "1h").
+            let last_backup_time = cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.backup.as_ref())
+                .and_then(|b| b.last_backup_time.as_deref());
+            let max_age = &upgrade.spec.strategy.pre_checks.require_backup_within;
+            tc.backup_requirement_met =
+                is_backup_recent_enough(last_backup_time, max_age, Timestamp::now());
+            if !tc.backup_requirement_met {
+                debug!(
+                    "Source cluster {}/{} backup is stale or missing (last_backup_time={:?}, max_age={}); \
+                     auto-cutover will be blocked",
+                    source_ns, source_name, last_backup_time, max_age
+                );
+            }
         }
         Ok(None) => {
             tc.source_cluster_ready = false;
@@ -510,15 +532,6 @@ async fn build_transition_context(
         if let Some(seq) = &status.sequences {
             tc.sequences_synced = seq.synced;
         }
-
-        // Check rollback status
-        if let Some(rollback) = &status.rollback {
-            tc.rollback_feasible = rollback.feasible;
-            tc.target_has_writes = rollback.data_loss_risk;
-        }
-
-        // For backup requirement, check if there's a recent backup in replication status
-        tc.backup_requirement_met = true; // TODO: Implement proper backup check
     }
 
     // Get configuration
@@ -714,8 +727,20 @@ async fn execute_phase_transition(
     to: &UpgradePhase,
     _tc: &UpgradeTransitionContext,
 ) -> UpgradeResult<()> {
+    // Whenever we enter a terminal phase, release the in-progress lock on
+    // the source cluster so the cluster reconciler resumes managing its
+    // Services. We do this before the per-transition work so cleanup runs
+    // even if the source happens to be inaccessible.
+    if matches!(
+        to,
+        UpgradePhase::Completed | UpgradePhase::Failed | UpgradePhase::RolledBack
+    ) {
+        clear_source_upgrade_in_progress(upgrade, ctx, ns).await;
+    }
+
     match (from, to) {
         (UpgradePhase::Pending, UpgradePhase::CreatingTarget) => {
+            mark_source_upgrade_in_progress(upgrade, ctx, ns).await?;
             create_target_cluster(upgrade, ctx, ns).await?;
         }
 
@@ -1050,6 +1075,124 @@ async fn sync_sequences(
     Ok(())
 }
 
+/// Drain active connections from the source primary before flipping
+/// service selectors. The source is expected to already be read-only at
+/// this point (set during the SyncingSequences → ReadyForCutover
+/// transition), so this blocks until in-flight read transactions complete
+/// or the configured `drain_connections_timeout` elapses.
+///
+/// On timeout, the source is restored to read-write and the cutover is
+/// failed; otherwise a `ConnectionsDrained` condition and Normal Event are
+/// recorded for operator visibility.
+async fn drain_source_connections(
+    upgrade: &PostgresUpgrade,
+    ctx: &UpgradeContext,
+    ns: &str,
+) -> UpgradeResult<()> {
+    let source_name = &upgrade.spec.source_cluster.name;
+    let source_ns = upgrade
+        .spec
+        .source_cluster
+        .namespace
+        .as_deref()
+        .unwrap_or(ns);
+
+    let timeout_secs = parse_duration(&upgrade.spec.strategy.pre_checks.drain_connections_timeout)
+        .map(|d| d.as_secs().max(0).try_into().unwrap_or(u64::MAX))
+        .unwrap_or(300u64);
+
+    let source_conn =
+        PostgresConnection::connect_primary(&ctx.client, source_ns, source_name).await?;
+
+    info!(
+        "Draining active connections on source {}/{} (timeout {}s)",
+        source_ns, source_name, timeout_secs
+    );
+
+    let drained = replication::wait_for_connections_drain(&source_conn, timeout_secs, 2).await?;
+
+    if !drained {
+        warn!(
+            "Connection drain timed out on source {}/{} after {}s; restoring source to read-write",
+            source_ns, source_name, timeout_secs
+        );
+
+        if let Err(e) = replication::set_source_readwrite(&source_conn).await {
+            // Log only — the cutover is going to fail regardless, and the
+            // ConnectionDrainTimeout error carries the primary signal.
+            error!(
+                "Failed to restore source {}/{} to read-write after drain timeout: {}",
+                source_ns, source_name, e
+            );
+        }
+
+        ctx.publish_warning_event(
+            upgrade,
+            "ConnectionDrainTimeout",
+            "DrainConnections",
+            Some(format!(
+                "Active connections remained on source {source_ns}/{source_name} after {timeout_secs}s; cutover aborted"
+            )),
+        )
+        .await;
+
+        return Err(UpgradeError::ConnectionDrainTimeout(format!(
+            "{source_ns}/{source_name}: timed out after {timeout_secs}s"
+        )));
+    }
+
+    record_connections_drained(upgrade, ctx, ns).await?;
+
+    ctx.publish_normal_event(
+        upgrade,
+        "ConnectionsDrained",
+        "DrainConnections",
+        Some(format!(
+            "All active connections drained from source {source_ns}/{source_name}; proceeding with service switch"
+        )),
+    )
+    .await;
+
+    Ok(())
+}
+
+/// Patch a `ConnectionsDrained=True` condition onto the upgrade status.
+async fn record_connections_drained(
+    upgrade: &PostgresUpgrade,
+    ctx: &UpgradeContext,
+    ns: &str,
+) -> UpgradeResult<()> {
+    let mut conditions = upgrade
+        .status
+        .as_ref()
+        .map(|s| s.conditions.clone())
+        .unwrap_or_default();
+
+    set_status_condition(
+        &mut conditions,
+        new_condition(
+            condition_types::CONNECTIONS_DRAINED,
+            cond_status::TRUE,
+            "ConnectionsDrained",
+            "Active connections drained from source before service switch",
+            upgrade.metadata.generation,
+        ),
+    );
+
+    let api: Api<PostgresUpgrade> = Api::namespaced(ctx.client.clone(), ns);
+    let patch = serde_json::json!({
+        "status": { "conditions": conditions }
+    });
+    api.patch_status(
+        &upgrade.name_any(),
+        &PatchParams::default(),
+        &Patch::Merge(&patch),
+    )
+    .await?;
+
+    Ok(())
+}
+
 /// Execute the cutover by switching services from the source to the target cluster.
 ///
 /// This atomically updates the primary and replica `Service` selectors to route
@@ -1088,6 +1231,14 @@ async fn execute_cutover(
         }
         other => UpgradeError::KubeError(other),
     })?;
+
+    // Drain active connections on the source before flipping service
+    // selectors. The source has already been set read-only on the
+    // SyncingSequences → ReadyForCutover transition, so this only blocks
+    // until in-flight read transactions complete. On timeout we restore the
+    // source to read-write and fail the cutover; the FSM will retry or move
+    // the upgrade to Failed.
+    drain_source_connections(upgrade, ctx, ns).await?;
 
     // Perform the actual service switch.
     let switch_result = service::switch_services_to_target(
@@ -1157,6 +1308,115 @@ fn map_service_switch_error(err: ServiceSwitchError) -> UpgradeError {
             UpgradeError::ServiceSwitchFailed(format!("invalid service configuration: {msg}"))
         }
     }
+}
+
+/// Set the `upgrade-in-progress` annotation on the source `PostgresCluster`.
+///
+/// The cluster reconciler observes this annotation and skips Service
+/// reconciliation while it's present, preventing it from reverting the
+/// service-selector flip performed by `execute_cutover`. Called on the
+/// `Pending → CreatingTarget` transition.
+async fn mark_source_upgrade_in_progress(
+    upgrade: &PostgresUpgrade,
+    ctx: &UpgradeContext,
+    ns: &str,
+) -> UpgradeResult<()> {
+    let source_name = &upgrade.spec.source_cluster.name;
+    let source_ns = upgrade
+        .spec
+        .source_cluster
+        .namespace
+        .as_deref()
+        .unwrap_or(ns);
+
+    let clusters: Api<PostgresCluster> = Api::namespaced(ctx.client.clone(), source_ns);
+    let patch = serde_json::json!({
+        "metadata": {
+            "annotations": {
+                condition_annotation_key(): upgrade.name_any(),
+            }
+        }
+    });
+
+    match clusters
+        .patch(source_name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+    {
+        Ok(_) => {
+            info!(
+                "Annotated source cluster {}/{} with upgrade-in-progress={}",
+                source_ns,
+                source_name,
+                upgrade.name_any()
+            );
+            Ok(())
+        }
+        Err(kube::Error::Api(ref api_err)) if api_err.code == 404 => {
+            // Source cluster missing — the upgrade will fail elsewhere with
+            // a clearer error. Don't block on the annotation.
+            warn!(
+                "Source cluster {}/{} not found while annotating upgrade-in-progress",
+                source_ns, source_name
+            );
+            Ok(())
+        }
+        Err(e) => Err(UpgradeError::KubeError(e)),
+    }
+}
+
+/// Remove the `upgrade-in-progress` annotation from the source
+/// `PostgresCluster`. Called when the upgrade reaches a terminal phase
+/// (`Completed`, `Failed`, `RolledBack`) or is being deleted, so the
+/// cluster reconciler resumes managing Services normally.
+async fn clear_source_upgrade_in_progress(
+    upgrade: &PostgresUpgrade,
+    ctx: &UpgradeContext,
+    ns: &str,
+) {
+    let source_name = &upgrade.spec.source_cluster.name;
+    let source_ns = upgrade
+        .spec
+        .source_cluster
+        .namespace
+        .as_deref()
+        .unwrap_or(ns);
+
+    let clusters: Api<PostgresCluster> = Api::namespaced(ctx.client.clone(), source_ns);
+    let patch = serde_json::json!({
+        "metadata": {
+            "annotations": {
+                condition_annotation_key(): serde_json::Value::Null,
+            }
+        }
+    });
+
+    match clusters
+        .patch(source_name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+    {
+        Ok(_) => {
+            debug!(
+                "Cleared upgrade-in-progress annotation on source cluster {}/{}",
+                source_ns, source_name
+            );
+        }
+        Err(kube::Error::Api(ref api_err)) if api_err.code == 404 => {
+            // Source already gone — nothing to clean up.
+        }
+        Err(e) => {
+            warn!(
+                "Failed to clear upgrade-in-progress annotation on source {}/{}: {}",
+                source_ns, source_name, e
+            );
+        }
+    }
+}
+
+/// The annotation key for marking an in-progress upgrade on the source
+/// `PostgresCluster`. Wrapped in a function to keep the static borrow
+/// inside the JSON literals above.
+fn condition_annotation_key() -> &'static str {
+    crate::crd::annotations::UPGRADE_IN_PROGRESS
 }
 
 /// Clean up replication after successful upgrade
@@ -1301,28 +1561,21 @@ async fn handle_rollback(
         current_phase
     );
 
-    // Check if rollback is feasible
-    let rollback_status = upgrade.status.as_ref().and_then(|s| s.rollback.as_ref());
-
-    if let Some(status) = rollback_status {
-        if !status.feasible {
-            warn!(
-                "Rollback not feasible for upgrade {}: {}",
-                upgrade.name_any(),
-                status.reason.as_deref().unwrap_or("unknown reason")
-            );
-            return Err(UpgradeError::RollbackNotFeasible {
-                reason: status.reason.clone().unwrap_or_default(),
-            });
-        }
-
-        if status.data_loss_risk {
-            warn!(
-                "Rollback would cause data loss for upgrade {}",
-                upgrade.name_any()
-            );
-            return Err(UpgradeError::RollbackDataLossRisk);
-        }
+    // Refuse rollback from cutover or post-cutover phases. Once the service
+    // selectors have flipped to the target, the new primary may have
+    // accepted writes that the source does not have. Rolling back at that
+    // point would silently drop data; recovery requires PITR from a
+    // pre-upgrade backup.
+    if !current_phase.can_rollback() {
+        warn!(
+            "Rollback refused for upgrade {} in phase {:?}: rollback is not supported \
+             after CuttingOver begins. See docs/upgrades.md for post-cutover recovery.",
+            upgrade.name_any(),
+            current_phase
+        );
+        return Err(UpgradeError::RollbackNotAllowedInPhase {
+            phase: format!("{current_phase:?}"),
+        });
     }
 
     // Execute rollback
@@ -1346,6 +1599,11 @@ async fn handle_rollback(
     if let Err(e) = cleanup_replication(upgrade, ctx, ns).await {
         warn!("Failed to clean up replication during rollback: {}", e);
     }
+
+    // Release the in-progress lock on the source cluster before updating
+    // phase, so the cluster reconciler resumes Service reconciliation as
+    // soon as RolledBack is observed.
+    clear_source_upgrade_in_progress(upgrade, ctx, ns).await;
 
     // Update phase to RolledBack
     update_phase(upgrade, ctx, ns, UpgradePhase::RolledBack).await?;
@@ -1375,6 +1633,11 @@ async fn handle_deletion(
             warn!("Failed to clean up replication during deletion: {}", e);
         }
     }
+
+    // Always clear the in-progress annotation on deletion, regardless of
+    // phase, so the source cluster reconciler isn't left in suspended
+    // Service-reconcile mode after the upgrade resource is gone.
+    clear_source_upgrade_in_progress(upgrade, ctx, ns).await;
 
     // Remove finalizer
     if has_finalizer(upgrade) {
@@ -1832,19 +2095,85 @@ async fn get_postgres_password(
     Ok(password)
 }
 
-/// Check if within maintenance window
+/// Check if the current wall-clock time falls inside the configured
+/// maintenance window.
+///
+/// Handles overnight windows where `end < start` (e.g. 23:00–03:00) by
+/// matching either side of midnight. Compares times in the window's
+/// declared timezone, not the operator's local timezone. Any parse failure
+/// (invalid time format or unknown timezone) returns `false` — we refuse
+/// to cutover rather than risk doing so at an unintended time.
 fn is_within_maintenance_window(upgrade: &PostgresUpgrade) -> bool {
-    let window = match upgrade.spec.strategy.cutover.allowed_window.as_ref() {
-        Some(w) => w,
-        None => return true, // No window specified means always allowed
+    let Some(window) = upgrade.spec.strategy.cutover.allowed_window.as_ref() else {
+        // No window specified means always allowed.
+        return true;
     };
 
-    // Parse current time and window times
-    let now = jiff::Zoned::now();
-    let current_time = now.strftime("%H:%M").to_string();
+    let tz = match jiff::tz::TimeZone::get(&window.timezone) {
+        Ok(tz) => tz,
+        Err(e) => {
+            warn!(
+                "maintenance window has invalid timezone {:?}: {}; refusing cutover",
+                window.timezone, e
+            );
+            return false;
+        }
+    };
 
-    // Simple time comparison (assumes same-day window)
-    current_time >= window.start_time && current_time <= window.end_time
+    let now_time = Timestamp::now().to_zoned(tz).time();
+    is_time_within_window(&window.start_time, &window.end_time, now_time)
+}
+
+/// Pure-function core of [`is_within_maintenance_window`] for unit testing.
+///
+/// Returns `false` on any malformed time string. Treats `end < start` as
+/// an overnight window that wraps midnight.
+fn is_time_within_window(start_str: &str, end_str: &str, now: jiff::civil::Time) -> bool {
+    let (Some(start), Some(end)) = (parse_window_time(start_str), parse_window_time(end_str))
+    else {
+        return false;
+    };
+
+    if start <= end {
+        // Daytime window: [start, end] on the same calendar day.
+        now >= start && now <= end
+    } else {
+        // Overnight window: matches either side of midnight.
+        // [start, 23:59:59.999...] ∪ [00:00, end]
+        now >= start || now <= end
+    }
+}
+
+/// Parse an `HH:MM` window time, returning `None` on malformed input.
+fn parse_window_time(s: &str) -> Option<jiff::civil::Time> {
+    jiff::civil::Time::strptime("%H:%M", s.trim()).ok()
+}
+
+/// Decide whether the source cluster's most recent backup is recent enough
+/// to allow auto-cutover.
+///
+/// Returns `true` only when:
+/// - `last_backup_time` is present and parses as RFC 3339, AND
+/// - `max_age` parses as a duration (e.g. `"1h"`, `"24h"`), AND
+/// - `now - last_backup_time <= max_age`.
+///
+/// On any failure (missing backup, malformed timestamp, malformed duration)
+/// returns `false`. This is the safe default: we never let auto-cutover
+/// proceed without explicit confirmation that a recent backup exists, since
+/// the upgrade is a one-way trip past the `CuttingOver` phase.
+fn is_backup_recent_enough(last_backup_time: Option<&str>, max_age: &str, now: Timestamp) -> bool {
+    let Some(last) = last_backup_time else {
+        return false;
+    };
+    let Some(max_age) = parse_duration(max_age) else {
+        return false;
+    };
+    let Ok(last_ts) = last.parse::<Timestamp>() else {
+        return false;
+    };
+
+    let elapsed = now.as_second().saturating_sub(last_ts.as_second());
+    elapsed >= 0 && elapsed <= max_age.as_secs()
 }
 
 /// Check if phase timeout has elapsed
@@ -1963,6 +2292,172 @@ mod tests {
         assert_eq!(parse_duration("24h"), Some(SignedDuration::from_hours(24)));
         assert_eq!(parse_duration("60s"), Some(SignedDuration::from_secs(60)));
         assert_eq!(parse_duration("invalid"), None);
+    }
+
+    fn t(h: i8, m: i8) -> jiff::civil::Time {
+        jiff::civil::Time::new(h, m, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn test_parse_window_time_valid() {
+        assert_eq!(parse_window_time("00:00"), Some(t(0, 0)));
+        assert_eq!(parse_window_time("23:59"), Some(t(23, 59)));
+        assert_eq!(parse_window_time("02:30"), Some(t(2, 30)));
+        // Leading/trailing whitespace tolerated.
+        assert_eq!(parse_window_time("  02:30  "), Some(t(2, 30)));
+    }
+
+    #[test]
+    fn test_parse_window_time_invalid() {
+        assert_eq!(parse_window_time(""), None);
+        assert_eq!(parse_window_time("not a time"), None);
+        assert_eq!(parse_window_time("25:00"), None);
+        assert_eq!(parse_window_time("12:60"), None);
+        // No seconds permitted by the contract — keep the schema strict.
+        assert_eq!(parse_window_time("02:30:00"), None);
+    }
+
+    #[test]
+    fn test_window_daytime_inside() {
+        // 02:00–04:00, current time 03:00.
+        assert!(is_time_within_window("02:00", "04:00", t(3, 0)));
+    }
+
+    #[test]
+    fn test_window_daytime_at_boundaries() {
+        // Boundaries are inclusive on both ends.
+        assert!(is_time_within_window("02:00", "04:00", t(2, 0)));
+        assert!(is_time_within_window("02:00", "04:00", t(4, 0)));
+    }
+
+    #[test]
+    fn test_window_daytime_outside() {
+        assert!(!is_time_within_window("02:00", "04:00", t(1, 59)));
+        assert!(!is_time_within_window("02:00", "04:00", t(4, 1)));
+        assert!(!is_time_within_window("02:00", "04:00", t(12, 0)));
+    }
+
+    #[test]
+    fn test_window_overnight_late_evening() {
+        // 23:00–03:00 overnight. 23:30 is inside.
+        assert!(is_time_within_window("23:00", "03:00", t(23, 30)));
+    }
+
+    #[test]
+    fn test_window_overnight_early_morning() {
+        // 23:00–03:00 overnight. 02:00 is inside.
+        assert!(is_time_within_window("23:00", "03:00", t(2, 0)));
+    }
+
+    #[test]
+    fn test_window_overnight_midnight() {
+        // Midnight itself is on the "early morning" side of the wraparound.
+        assert!(is_time_within_window("23:00", "03:00", t(0, 0)));
+    }
+
+    #[test]
+    fn test_window_overnight_outside_midday() {
+        // Outside the overnight window — well outside both halves.
+        assert!(!is_time_within_window("23:00", "03:00", t(12, 0)));
+        assert!(!is_time_within_window("23:00", "03:00", t(15, 30)));
+        // Just before and after the boundaries.
+        assert!(!is_time_within_window("23:00", "03:00", t(22, 59)));
+        assert!(!is_time_within_window("23:00", "03:00", t(3, 1)));
+    }
+
+    #[test]
+    fn test_window_zero_width() {
+        // start == end: matches only at that exact minute.
+        assert!(is_time_within_window("12:00", "12:00", t(12, 0)));
+        assert!(!is_time_within_window("12:00", "12:00", t(11, 59)));
+        assert!(!is_time_within_window("12:00", "12:00", t(12, 1)));
+    }
+
+    #[test]
+    fn test_window_full_day() {
+        // 00:00–23:59 matches essentially everything.
+        assert!(is_time_within_window("00:00", "23:59", t(0, 0)));
+        assert!(is_time_within_window("00:00", "23:59", t(12, 0)));
+        assert!(is_time_within_window("00:00", "23:59", t(23, 59)));
+    }
+
+    #[test]
+    fn test_window_invalid_input_refuses_cutover() {
+        // Safe default: parse failure means "not in window" → cutover refused.
+        assert!(!is_time_within_window("bogus", "04:00", t(3, 0)));
+        assert!(!is_time_within_window("02:00", "bogus", t(3, 0)));
+        assert!(!is_time_within_window("", "", t(12, 0)));
+    }
+
+    fn ts(s: &str) -> Timestamp {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn test_backup_recent_within_max_age() {
+        // Backup taken 30m ago, max age 1h → recent enough.
+        let now = ts("2026-05-28T12:00:00Z");
+        let last = "2026-05-28T11:30:00Z";
+        assert!(is_backup_recent_enough(Some(last), "1h", now));
+    }
+
+    #[test]
+    fn test_backup_exactly_at_max_age_boundary() {
+        // Backup taken exactly 1h ago, max age 1h → still recent enough (≤).
+        let now = ts("2026-05-28T12:00:00Z");
+        let last = "2026-05-28T11:00:00Z";
+        assert!(is_backup_recent_enough(Some(last), "1h", now));
+    }
+
+    #[test]
+    fn test_backup_older_than_max_age() {
+        // Backup taken 2h ago, max age 1h → too old.
+        let now = ts("2026-05-28T12:00:00Z");
+        let last = "2026-05-28T10:00:00Z";
+        assert!(!is_backup_recent_enough(Some(last), "1h", now));
+    }
+
+    #[test]
+    fn test_backup_missing_blocks_cutover() {
+        // No backup recorded → block cutover.
+        let now = ts("2026-05-28T12:00:00Z");
+        assert!(!is_backup_recent_enough(None, "1h", now));
+    }
+
+    #[test]
+    fn test_backup_unparseable_timestamp_blocks_cutover() {
+        let now = ts("2026-05-28T12:00:00Z");
+        assert!(!is_backup_recent_enough(Some("not a timestamp"), "1h", now));
+        assert!(!is_backup_recent_enough(Some(""), "1h", now));
+    }
+
+    #[test]
+    fn test_backup_unparseable_max_age_blocks_cutover() {
+        // If the configured duration is malformed, default to "block" so we
+        // surface the misconfiguration rather than silently allowing cutover.
+        let now = ts("2026-05-28T12:00:00Z");
+        let last = "2026-05-28T11:30:00Z";
+        assert!(!is_backup_recent_enough(Some(last), "bogus", now));
+        assert!(!is_backup_recent_enough(Some(last), "", now));
+    }
+
+    #[test]
+    fn test_backup_future_timestamp_blocks_cutover() {
+        // If the recorded backup time is in the future (clock skew, bad
+        // status write), refuse to treat it as a valid backup.
+        let now = ts("2026-05-28T12:00:00Z");
+        let last = "2026-05-28T13:00:00Z";
+        assert!(!is_backup_recent_enough(Some(last), "24h", now));
+    }
+
+    #[test]
+    fn test_backup_long_max_age_window() {
+        // 24h windows are common; verify nothing overflows or off-by-ones.
+        let now = ts("2026-05-28T12:00:00Z");
+        let last_23h_ago = "2026-05-27T13:00:00Z";
+        assert!(is_backup_recent_enough(Some(last_23h_ago), "24h", now));
+        let last_25h_ago = "2026-05-27T11:00:00Z";
+        assert!(!is_backup_recent_enough(Some(last_25h_ago), "24h", now));
     }
 
     #[test]

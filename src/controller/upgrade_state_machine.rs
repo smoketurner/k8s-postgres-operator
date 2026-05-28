@@ -111,10 +111,6 @@ pub struct UpgradeTransitionContext {
     pub within_maintenance_window: bool,
     /// Whether rollback annotation is present
     pub rollback_requested: bool,
-    /// Whether rollback is feasible
-    pub rollback_feasible: bool,
-    /// Whether target has received writes (blocks rollback)
-    pub target_has_writes: bool,
     /// Error message if any
     pub error_message: Option<String>,
     /// Current phase timeout elapsed
@@ -139,8 +135,6 @@ impl Default for UpgradeTransitionContext {
             cutover_mode: CutoverMode::Manual,
             within_maintenance_window: false,
             rollback_requested: false,
-            rollback_feasible: true,
-            target_has_writes: false,
             error_message: None,
             phase_timeout_elapsed: false,
             row_count_mismatches: 0,
@@ -165,11 +159,6 @@ impl UpgradeTransitionContext {
         self.cutover_mode == CutoverMode::Automatic
             && self.within_maintenance_window
             && self.backup_requirement_met
-    }
-
-    /// Check if rollback is safe (no data loss risk)
-    pub fn can_rollback_safely(&self) -> bool {
-        self.rollback_feasible && !self.target_has_writes
     }
 }
 
@@ -483,22 +472,10 @@ impl UpgradeStateMachine {
                     UpgradeEvent::TimeoutOccurred,
                     "Health check timed out",
                 ),
-                UpgradeTransition::new(
-                    UpgradePhase::HealthChecking,
-                    UpgradePhase::RolledBack,
-                    UpgradeEvent::RollbackCompleted,
-                    "Rollback completed after health check failure",
-                ),
-                // === Completed state transitions ===
-                // Completed can still rollback if needed (within rollback window)
-                UpgradeTransition::new(
-                    UpgradePhase::Completed,
-                    UpgradePhase::RolledBack,
-                    UpgradeEvent::RollbackCompleted,
-                    "Rollback completed from completed state",
-                ),
                 // === Failed state transitions ===
-                // Failed can rollback to clean up
+                // Failed can rollback to clean up resources from pre-cutover phases.
+                // Failures during or after CuttingOver cannot be rolled back —
+                // recovery there requires PITR from a pre-upgrade backup.
                 UpgradeTransition::new(
                     UpgradePhase::Failed,
                     UpgradePhase::RolledBack,
@@ -647,17 +624,6 @@ impl UpgradeStateMachine {
                 }
             }
 
-            // Guard: RollbackCompleted requires rollback to be feasible
-            (_, UpgradePhase::RolledBack, UpgradeEvent::RollbackCompleted) => {
-                if !ctx.rollback_feasible {
-                    Some("Rollback is not feasible".to_string())
-                } else if ctx.target_has_writes {
-                    Some("Target has received writes, rollback would cause data loss".to_string())
-                } else {
-                    None
-                }
-            }
-
             // Guard: RollbackRequested during CuttingOver is not allowed
             (UpgradePhase::CuttingOver, _, UpgradeEvent::RollbackRequested) => {
                 Some("Cannot rollback during cutover - operation must complete".to_string())
@@ -674,8 +640,11 @@ pub fn determine_upgrade_event(
     current_phase: &UpgradePhase,
     ctx: &UpgradeTransitionContext,
 ) -> Option<UpgradeEvent> {
-    // Check for rollback request first (high priority)
-    if ctx.rollback_requested && ctx.can_rollback_safely() {
+    // Check for rollback request first (high priority).
+    // The FSM transition guard and `can_rollback()` on the source phase
+    // enforce that rollback is only valid pre-cutover; this just routes the
+    // event.
+    if ctx.rollback_requested {
         return Some(UpgradeEvent::RollbackRequested);
     }
 
@@ -775,9 +744,17 @@ pub fn determine_upgrade_event(
             None
         }
 
-        UpgradePhase::Completed | UpgradePhase::Failed => {
-            // Terminal states - only rollback event is relevant
-            if ctx.rollback_requested && ctx.can_rollback_safely() {
+        UpgradePhase::Completed => {
+            // Terminal state - no events. Rollback is not supported after
+            // cutover completes; recovery requires PITR from a pre-upgrade
+            // backup.
+            None
+        }
+
+        UpgradePhase::Failed => {
+            // Terminal state - only rollback event is relevant, to clean up
+            // resources left behind by a pre-cutover failure.
+            if ctx.rollback_requested {
                 Some(UpgradeEvent::RollbackRequested)
             } else {
                 None
@@ -954,13 +931,11 @@ mod tests {
     }
 
     #[test]
-    fn test_rollback_guard() {
+    fn test_no_rollback_after_cutover() {
         let sm = UpgradeStateMachine::new();
+        let ctx = default_ctx();
 
-        // Should fail when target has writes
-        let mut ctx = default_ctx();
-        ctx.rollback_feasible = true;
-        ctx.target_has_writes = true;
+        // Completed → RolledBack is no longer a valid transition.
         let result = sm.transition(
             &UpgradePhase::Completed,
             UpgradeEvent::RollbackCompleted,
@@ -968,32 +943,28 @@ mod tests {
         );
         assert!(matches!(
             result,
-            UpgradeTransitionResult::GuardFailed { .. }
+            UpgradeTransitionResult::InvalidTransition { .. }
         ));
 
-        // Should fail when rollback not feasible
-        let mut ctx = default_ctx();
-        ctx.rollback_feasible = false;
-        ctx.target_has_writes = false;
+        // HealthChecking → RolledBack is no longer a valid transition either.
         let result = sm.transition(
-            &UpgradePhase::Completed,
+            &UpgradePhase::HealthChecking,
             UpgradeEvent::RollbackCompleted,
             &ctx,
         );
         assert!(matches!(
             result,
-            UpgradeTransitionResult::GuardFailed { .. }
+            UpgradeTransitionResult::InvalidTransition { .. }
         ));
+    }
 
-        // Should succeed when rollback is safe
-        let mut ctx = default_ctx();
-        ctx.rollback_feasible = true;
-        ctx.target_has_writes = false;
-        let result = sm.transition(
-            &UpgradePhase::Completed,
-            UpgradeEvent::RollbackCompleted,
-            &ctx,
-        );
+    #[test]
+    fn test_rollback_from_failed_succeeds() {
+        let sm = UpgradeStateMachine::new();
+        let ctx = default_ctx();
+
+        // Failed → RolledBack is still valid (cleanup of pre-cutover failures).
+        let result = sm.transition(&UpgradePhase::Failed, UpgradeEvent::RollbackCompleted, &ctx);
         assert!(matches!(result, UpgradeTransitionResult::Success { .. }));
     }
 
@@ -1045,8 +1016,6 @@ mod tests {
         let mut ctx = default_ctx();
         ctx.source_cluster_ready = true;
         ctx.rollback_requested = true;
-        ctx.rollback_feasible = true;
-        ctx.target_has_writes = false;
 
         // Rollback should take priority
         let event = determine_upgrade_event(&UpgradePhase::Replicating, &ctx);

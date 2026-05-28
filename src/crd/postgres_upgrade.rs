@@ -417,10 +417,6 @@ pub struct PostgresUpgradeStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequences: Option<SequenceSyncStatus>,
 
-    /// Rollback feasibility status
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rollback: Option<RollbackStatus>,
-
     /// Kubernetes-style conditions
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
@@ -499,9 +495,22 @@ impl UpgradePhase {
         )
     }
 
-    /// Returns true if rollback is possible from this phase
+    /// Returns true if rollback is possible from this phase.
+    ///
+    /// Rollback is supported only before the `CuttingOver` phase. Once cutover
+    /// completes, the new primary may have accepted writes that the source
+    /// does not have, so rolling back would silently drop data. Recovery from
+    /// a bad target post-cutover is a manual PITR operation from a backup
+    /// taken prior to the upgrade.
     pub fn can_rollback(&self) -> bool {
-        !matches!(self, UpgradePhase::Pending | UpgradePhase::RolledBack)
+        !matches!(
+            self,
+            UpgradePhase::Pending
+                | UpgradePhase::CuttingOver
+                | UpgradePhase::HealthChecking
+                | UpgradePhase::Completed
+                | UpgradePhase::RolledBack
+        )
     }
 }
 
@@ -674,33 +683,6 @@ pub struct SequenceSyncStatus {
     pub synced_at: Option<String>,
 }
 
-/// Rollback feasibility status
-#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct RollbackStatus {
-    /// Whether rollback is currently feasible
-    #[serde(default)]
-    pub feasible: bool,
-
-    /// Reason for rollback feasibility/infeasibility
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-
-    /// Whether rollback would result in data loss
-    /// True if writes have occurred to target since cutover
-    #[serde(default)]
-    pub data_loss_risk: bool,
-
-    /// Last write timestamp on source (RFC3339 format)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_source_write: Option<String>,
-
-    /// First write timestamp on target after cutover (RFC3339 format)
-    /// If set, indicates writes occurred to target
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub first_target_write: Option<String>,
-}
-
 /// Condition types for PostgresUpgrade
 pub mod condition_types {
     /// Source cluster is ready and valid
@@ -763,11 +745,21 @@ mod tests {
 
     #[test]
     fn test_upgrade_phase_can_rollback() {
-        assert!(!UpgradePhase::Pending.can_rollback());
-        assert!(!UpgradePhase::RolledBack.can_rollback());
+        // Pre-cutover phases support rollback
         assert!(UpgradePhase::CreatingTarget.can_rollback());
+        assert!(UpgradePhase::ConfiguringReplication.can_rollback());
         assert!(UpgradePhase::Replicating.can_rollback());
-        assert!(UpgradePhase::Completed.can_rollback());
+        assert!(UpgradePhase::Verifying.can_rollback());
+        assert!(UpgradePhase::SyncingSequences.can_rollback());
+        assert!(UpgradePhase::ReadyForCutover.can_rollback());
+        assert!(UpgradePhase::Failed.can_rollback());
+
+        // Cutover and post-cutover phases do not support rollback
+        assert!(!UpgradePhase::Pending.can_rollback());
+        assert!(!UpgradePhase::CuttingOver.can_rollback());
+        assert!(!UpgradePhase::HealthChecking.can_rollback());
+        assert!(!UpgradePhase::Completed.can_rollback());
+        assert!(!UpgradePhase::RolledBack.can_rollback());
     }
 
     #[test]
