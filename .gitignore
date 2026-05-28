@@ -14,6 +14,9 @@
 .env
 .env.local
 
+# Local-only working files (plans, notes, scratch)
+.local/
+
 # Kubernetes
 kubeconfig
 *.kubeconfig
