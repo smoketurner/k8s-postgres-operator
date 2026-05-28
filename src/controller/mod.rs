@@ -9,6 +9,7 @@ pub mod cluster_validation;
 pub mod conditions;
 pub mod context;
 pub mod database_reconciler;
+pub mod events;
 pub mod finalizer;
 pub mod upgrade_error;
 pub mod upgrade_reconciler;

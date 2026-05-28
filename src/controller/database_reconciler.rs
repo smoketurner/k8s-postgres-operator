@@ -10,11 +10,13 @@ use k8s_openapi::api::core::v1::Secret;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::api::{Api, Patch, PatchParams};
 use kube::runtime::controller::Action;
+use kube::runtime::events::{EventType, Reporter};
 use kube::{Client, Resource, ResourceExt};
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::controller::cleanup::{cleanup_stuck_resource, is_namespace_not_found_error};
 use crate::controller::conditions::{new_condition, set_status_condition, status as cond_status};
+use crate::controller::events;
 use crate::controller::finalizer::remove_operator_finalizer;
 use crate::crd::{
     ClusterPhase, Condition, DatabaseConditionType, DatabaseConnectionInfo, DatabasePhase,
@@ -29,11 +31,55 @@ use crate::resources::sql::{
 /// Context for the database reconciler
 pub struct DatabaseContext {
     pub client: Client,
+    reporter: Reporter,
 }
 
 impl DatabaseContext {
     pub fn new(client: Client) -> Self {
-        Self { client }
+        Self {
+            client,
+            reporter: events::reporter(),
+        }
+    }
+
+    /// Publish a Normal event attached to the PostgresDatabase.
+    pub async fn publish_normal_event(
+        &self,
+        db: &PostgresDatabase,
+        reason: &str,
+        action: &str,
+        note: Option<String>,
+    ) {
+        events::publish_event(
+            &self.client,
+            &self.reporter,
+            db,
+            EventType::Normal,
+            reason,
+            action,
+            note,
+        )
+        .await;
+    }
+
+    /// Publish a Warning event attached to the PostgresDatabase.
+    pub async fn publish_warning_event(
+        &self,
+        db: &PostgresDatabase,
+        reason: &str,
+        action: &str,
+        note: Option<String>,
+    ) {
+        events::publish_event(
+            &self.client,
+            &self.reporter,
+            db,
+            EventType::Warning,
+            reason,
+            action,
+            note,
+        )
+        .await;
     }
 }
 
@@ -200,6 +246,14 @@ pub async fn reconcile_database(
     }
 
     // Provision the database
+    let was_ready = db
+        .status
+        .as_ref()
+        .is_some_and(|s| s.phase == DatabasePhase::Ready);
+    let was_failed = db
+        .status
+        .as_ref()
+        .is_some_and(|s| s.phase == DatabasePhase::Failed);
     let result = provision_database(&db, &ctx, &cluster, &namespace).await;
 
     match result {
@@ -263,6 +317,19 @@ pub async fn reconcile_database(
             )
             .await?;
 
+            if !was_ready {
+                ctx.publish_normal_event(
+                    &db,
+                    "Provisioned",
+                    "ProvisionDatabase",
+                    Some(format!(
+                        "Database {} is ready on cluster {}",
+                        db.spec.database.name, db.spec.cluster_ref.name
+                    )),
+                )
+                .await;
+            }
+
             let duration_secs = start_time.elapsed().as_secs_f64();
             info!(
                 name = %name,
@@ -301,6 +368,16 @@ pub async fn reconcile_database(
                 vec![],
             )
             .await?;
+
+            if !was_failed {
+                ctx.publish_warning_event(
+                    &db,
+                    "ProvisioningFailed",
+                    "ProvisionDatabase",
+                    Some(e.to_string()),
+                )
+                .await;
+            }
 
             // Requeue with backoff
             Ok(Action::requeue(Duration::from_secs(30)))
