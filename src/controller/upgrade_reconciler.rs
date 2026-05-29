@@ -1136,9 +1136,9 @@ async fn sync_sequences(
 
 /// Drain active connections from the source primary before flipping
 /// service selectors. The source is expected to already be read-only at
-/// this point (set during the SyncingSequences → ReadyForCutover
-/// transition), so this blocks until in-flight read transactions complete
-/// or the configured `drain_connections_timeout` elapses.
+/// this point (set during the `Verifying` phase once row counts converged
+/// and LSN lag hit zero), so this blocks until in-flight read transactions
+/// complete or the configured `drain_connections_timeout` elapses.
 ///
 /// On timeout, the source is restored to read-write and the cutover is
 /// failed; otherwise a `ConnectionsDrained` condition and Normal Event are
@@ -1292,11 +1292,11 @@ async fn execute_cutover(
     })?;
 
     // Drain active connections on the source before flipping service
-    // selectors. The source has already been set read-only on the
-    // SyncingSequences → ReadyForCutover transition, so this only blocks
-    // until in-flight read transactions complete. On timeout we restore the
-    // source to read-write and fail the cutover; the FSM will retry or move
-    // the upgrade to Failed.
+    // selectors. The source was already set read-only during the Verifying
+    // phase (once row counts converged and LSN lag hit zero), so this only
+    // blocks until in-flight read transactions complete. On timeout we
+    // restore the source to read-write and fail the cutover; the FSM will
+    // retry or move the upgrade to Failed.
     drain_source_connections(upgrade, ctx, ns).await?;
 
     // Perform the actual service switch.

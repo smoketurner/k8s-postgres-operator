@@ -47,7 +47,7 @@ The operator provides near-zero downtime major version upgrades using **logical 
 | `ConfiguringReplication` | Setting up logical replication from source to target |
 | `Replicating` | Data is being replicated; monitoring replication lag |
 | `Verifying` | Verifying row counts match between source and target |
-| `SyncingSequences` | Synchronizing sequences after setting source to read-only |
+| `SyncingSequences` | Synchronizing sequences; source is already read-only (set during `Verifying`) |
 | `ReadyForCutover` | All checks passed; ready for traffic cutover |
 | `WaitingForManualCutover` | Manual mode only: waiting for cutover annotation |
 | `CuttingOver` | Switching services to point to the new cluster |
@@ -656,6 +656,6 @@ This makes it clearer in GitOps which version each manifest manages.
 |------------|---------|
 | DDL changes | Schema changes are not replicated; apply DDL to both clusters during upgrade |
 | Large objects | LOBs have limited logical replication support |
-| Sequences | Synced during `SyncingSequences` phase after source goes read-only |
+| Sequences | Synced during `SyncingSequences` phase; source goes read-only during `Verifying` before this phase |
 | Concurrent upgrades | Only one upgrade per source cluster allowed |
 | Resource usage | Requires double resources during upgrade period |
