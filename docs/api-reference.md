@@ -1010,6 +1010,7 @@ For detailed upgrade procedures, see the [Upgrades Guide](upgrades.md).
 | `replication` | [ReplicationStatus](#replicationstatus) | Replication status |
 | `verification` | [VerificationStatus](#verificationstatus) | Row count verification status |
 | `sequences` | [SequenceSyncStatus](#sequencesyncstatus) | Sequence synchronization status |
+| `sourceReadOnlyAt` | string (RFC3339) | When the source was put into read-only mode (set during `Verifying` once row counts pass and lag is zero; cleared on rollback) |
 | `rollback` | [RollbackStatus](#rollbackstatus) | Rollback feasibility status |
 | `conditions` | []Condition | Kubernetes-style conditions |
 
