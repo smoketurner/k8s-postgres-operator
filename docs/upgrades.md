@@ -201,9 +201,9 @@ kubectl get postgresupgrade my-cluster-upgrade -o jsonpath='{.status}' | jq '
                  targetLsn: .replication.targetLsn}}'
 ```
 
-The source returns to read-write only on rollback. Once `sourceReadOnlyAt`
-is set, the timestamp persists on the status as an audit record even after
-the upgrade completes.
+On rollback, the source returns to read-write and `sourceReadOnlyAt` is
+cleared. On successful completion, the timestamp persists on the status as
+an audit record.
 
 ### Idle-in-transaction purger
 
