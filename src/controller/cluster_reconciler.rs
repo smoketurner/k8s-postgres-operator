@@ -884,15 +884,21 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
     apply_resource(ctx, ns, &sts).await?;
 
     // Ensure Patroni Services exist — UNLESS an upgrade is in progress on
-    // this cluster. The PostgresUpgrade reconciler patches the primary and
-    // replicas Service selectors to flip traffic from source to target
-    // during cutover; if we re-apply our generated Services here, we revert
-    // that flip and create a normal-operation race against the cutover.
-    // The cluster reconciler runs on its own schedule independent of HA
-    // edge cases, so this gate is required even in single-replica operator
-    // deployments.
+    // this cluster, OR the cluster has been marked Superseded after cutover.
     //
-    // While the annotation is set, PVCs, ConfigMaps, the StatefulSet, and
+    // The PostgresUpgrade reconciler patches the primary and replicas Service
+    // selectors to flip traffic from source to target during cutover; if we
+    // re-apply our generated Services here, we revert that flip and create a
+    // normal-operation race against the cutover.
+    //
+    // Two gates protect the post-cutover state:
+    //   1. UPGRADE_IN_PROGRESS annotation — set for the active upgrade window.
+    //   2. ClusterPhase::Superseded — set permanently after the annotation is
+    //      cleared on upgrade completion. Without this second gate the cluster
+    //      reconciler's next cycle would re-apply source-selector Services,
+    //      reverting the cutover flip (see GitHub issue #95).
+    //
+    // While either gate is active, PVCs, ConfigMaps, the StatefulSet, and
     // every other resource above continue to reconcile normally so Patroni
     // on the source remains healthy.
     let upgrade_in_progress = cluster
@@ -916,6 +922,16 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
             )),
         )
         .await;
+    } else if current_phase == ClusterPhase::Superseded {
+        // Services for this cluster were permanently redirected to the target
+        // cluster during cutover. Do not regenerate them — doing so would
+        // overwrite the selector flip with source-cluster selectors and route
+        // traffic back to the now-read-only source (see GitHub issue #95).
+        debug!(
+            "Skipping Service reconciliation for Superseded cluster {}: \
+             services are managed by the successor cluster",
+            name
+        );
     } else {
         let primary_svc = service::generate_primary_service(cluster);
         apply_resource(ctx, ns, &primary_svc).await?;
