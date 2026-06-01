@@ -15,6 +15,8 @@ pub enum PostgresVersion {
     V16,
     #[serde(rename = "17")]
     V17,
+    #[serde(rename = "18")]
+    V18,
 }
 
 impl fmt::Display for PostgresVersion {
@@ -23,6 +25,7 @@ impl fmt::Display for PostgresVersion {
             PostgresVersion::V15 => write!(f, "15"),
             PostgresVersion::V16 => write!(f, "16"),
             PostgresVersion::V17 => write!(f, "17"),
+            PostgresVersion::V18 => write!(f, "18"),
         }
     }
 }
@@ -34,6 +37,7 @@ impl PostgresVersion {
             PostgresVersion::V15 => "15",
             PostgresVersion::V16 => "16",
             PostgresVersion::V17 => "17",
+            PostgresVersion::V18 => "18",
         }
     }
 
@@ -43,6 +47,7 @@ impl PostgresVersion {
             PostgresVersion::V15 => 15,
             PostgresVersion::V16 => 16,
             PostgresVersion::V17 => 17,
+            PostgresVersion::V18 => 18,
         }
     }
 
@@ -50,9 +55,10 @@ impl PostgresVersion {
     /// Updated tags available at: https://github.com/zalando/spilo/pkgs/container/
     pub fn spilo_tag(&self) -> &'static str {
         match self {
-            PostgresVersion::V15 => "3.2-p2", // spilo-15 latest
+            PostgresVersion::V15 => "3.2-p1", // spilo-15 latest
             PostgresVersion::V16 => "3.3-p3", // spilo-16 latest
             PostgresVersion::V17 => "4.0-p3", // spilo-17 latest
+            PostgresVersion::V18 => "4.1-p2", // spilo-18 latest
         }
     }
 

@@ -912,6 +912,96 @@ async fn create_target_cluster(
         upgrade.name_any()
     );
 
+    ensure_replication_bridge_netpol(upgrade, ctx, ns, source_name, &target_name).await?;
+
+    Ok(())
+}
+
+/// Open egress from the target cluster pods to the source cluster pods on
+/// the PostgreSQL port so the subscription's COPY+streaming connection
+/// works. The per-cluster NetworkPolicy only allows intra-cluster egress,
+/// so without this bridge the subscription times out connecting to the
+/// publisher (issue: cutover blocks on `services "<src>-repl" not found`
+/// once cutover begins, but replication never advances in the first
+/// place). Bound to the PostgresUpgrade lifetime via owner reference.
+async fn ensure_replication_bridge_netpol(
+    upgrade: &PostgresUpgrade,
+    ctx: &UpgradeContext,
+    ns: &str,
+    source_name: &str,
+    target_name: &str,
+) -> UpgradeResult<()> {
+    use k8s_openapi::api::networking::v1::{
+        NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicyPeer, NetworkPolicyPort,
+        NetworkPolicySpec,
+    };
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
+    use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+    use kube::api::ObjectMeta;
+    use std::collections::BTreeMap;
+
+    let name = format!("{}-replication-bridge", upgrade.name_any());
+    let api: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), ns);
+
+    let owner = kube::api::ObjectMeta {
+        owner_references: Some(vec![
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
+                api_version: "postgres-operator.smoketurner.com/v1alpha1".to_string(),
+                kind: "PostgresUpgrade".to_string(),
+                name: upgrade.name_any(),
+                uid: upgrade.metadata.uid.clone().unwrap_or_default(),
+                controller: Some(true),
+                block_owner_deletion: Some(true),
+            },
+        ]),
+        ..Default::default()
+    };
+
+    let np = NetworkPolicy {
+        metadata: ObjectMeta {
+            name: Some(name.clone()),
+            namespace: Some(ns.to_string()),
+            owner_references: owner.owner_references,
+            ..Default::default()
+        },
+        spec: Some(NetworkPolicySpec {
+            pod_selector: Some(LabelSelector {
+                match_labels: Some(BTreeMap::from([(
+                    "postgres-operator.smoketurner.com/cluster".to_string(),
+                    target_name.to_string(),
+                )])),
+                ..Default::default()
+            }),
+            policy_types: Some(vec!["Egress".to_string()]),
+            egress: Some(vec![NetworkPolicyEgressRule {
+                to: Some(vec![NetworkPolicyPeer {
+                    pod_selector: Some(LabelSelector {
+                        match_labels: Some(BTreeMap::from([(
+                            "postgres-operator.smoketurner.com/cluster".to_string(),
+                            source_name.to_string(),
+                        )])),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ports: Some(vec![NetworkPolicyPort {
+                    port: Some(IntOrString::Int(5432)),
+                    protocol: Some("TCP".to_string()),
+                    ..Default::default()
+                }]),
+            }]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    api.patch(
+        &name,
+        &PatchParams::apply("postgres-operator").force(),
+        &Patch::Apply(&np),
+    )
+    .await?;
+
     Ok(())
 }
 

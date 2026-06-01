@@ -403,21 +403,35 @@ pub async fn switch_services_to_target(
         }
     });
 
-    services
+    // Single-replica clusters skip the `-repl` service entirely
+    // (cluster_reconciler only creates it when replicas > 1). Treat a
+    // missing service as "nothing to switch" so cutover doesn't deadlock
+    // on a 404 for clusters that never had a replicas service.
+    let replica_present = match services
         .patch(
             &replica_svc_name,
             &PatchParams::apply("postgres-operator"),
             &Patch::Merge(&replica_patch),
         )
         .await
-        .map_err(|e| ServiceSwitchError::PatchFailed {
-            name: replica_svc_name.clone(),
-            source: e,
-        })?;
+    {
+        Ok(_) => true,
+        Err(kube::Error::Api(api_err)) if api_err.code == 404 => false,
+        Err(e) => {
+            return Err(ServiceSwitchError::PatchFailed {
+                name: replica_svc_name.clone(),
+                source: e,
+            });
+        }
+    };
 
     Ok(ServiceSwitchResult {
         primary_service: primary_svc_name,
-        replica_service: replica_svc_name,
+        replica_service: if replica_present {
+            replica_svc_name
+        } else {
+            String::new()
+        },
         switched_at: jiff::Timestamp::now(),
         previous_cluster: source_name.to_string(),
         new_cluster: target_name.to_string(),
@@ -500,21 +514,31 @@ pub async fn revert_services_to_source(
         }
     });
 
-    services
+    let replica_present = match services
         .patch(
             &replica_svc_name,
             &PatchParams::apply("postgres-operator"),
             &Patch::Merge(&replica_patch),
         )
         .await
-        .map_err(|e| ServiceSwitchError::PatchFailed {
-            name: replica_svc_name.clone(),
-            source: e,
-        })?;
+    {
+        Ok(_) => true,
+        Err(kube::Error::Api(api_err)) if api_err.code == 404 => false,
+        Err(e) => {
+            return Err(ServiceSwitchError::PatchFailed {
+                name: replica_svc_name.clone(),
+                source: e,
+            });
+        }
+    };
 
     Ok(ServiceSwitchResult {
         primary_service: primary_svc_name,
-        replica_service: replica_svc_name,
+        replica_service: if replica_present {
+            replica_svc_name
+        } else {
+            String::new()
+        },
         switched_at: jiff::Timestamp::now(),
         previous_cluster: target_name.to_string(),
         new_cluster: source_name.to_string(),

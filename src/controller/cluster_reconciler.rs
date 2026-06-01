@@ -503,24 +503,35 @@ async fn check_and_update_status(
         );
     }
 
-    // Check if cluster has become degraded while running
-    if current_phase == ClusterPhase::Running && transition_ctx.is_degraded() {
-        let event = ClusterEvent::ReplicasDegraded;
+    // Check if cluster has become degraded or completely unready while
+    // running. Without this, a Running cluster whose pods all go NotReady
+    // sticks at the last good `readyReplicas` count because the FSM
+    // transition is decided downstream and no status patch fires from this
+    // path. Cover both partial- and zero-ready cases so the status patch
+    // always reflects the current count.
+    if current_phase == ClusterPhase::Running && !transition_ctx.all_replicas_ready() {
+        let event = if transition_ctx.is_degraded() {
+            ClusterEvent::ReplicasDegraded
+        } else {
+            ClusterEvent::ReconcileError
+        };
         if let TransitionResult::Success {
             to, description, ..
         } = state_machine.transition(&current_phase, event, &transition_ctx)
         {
             info!("Cluster {} transitioned to {:?}: {}", name, to, description);
-            // Update to degraded state
-            status_manager
-                .set_updating(
-                    ready_replicas,
-                    cluster.spec.replicas,
-                    primary_pod,
-                    replica_pods,
-                )
-                .await?;
         }
+        // Always patch the status so readyReplicas reflects current state,
+        // whether the FSM transitioned or not (a guarded transition can
+        // fail; we still want the observed counts to match reality).
+        status_manager
+            .set_updating(
+                ready_replicas,
+                cluster.spec.replicas,
+                primary_pod,
+                replica_pods,
+            )
+            .await?;
     } else if ready_replicas >= cluster.spec.replicas {
         // Consolidated status update: backup status + replication lag in a single call
         // This avoids race conditions from multiple separate status updates.
@@ -1109,6 +1120,73 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
         return Ok(Action::requeue(Duration::from_secs(60)));
     }
 
+    // Patroni DCS deadlock detection. Symptoms: pods Running, none Ready,
+    // DCS Endpoints has no `leader` annotation, and the state has persisted
+    // past the TTL grace. This state never resolves on its own.
+    //
+    // Recovery is gated by whether the cluster has ever bootstrapped:
+    //
+    // - **Fresh bootstrap** (no `primaryPod` ever recorded): no PGDATA on
+    //   any PVC, so deleting pod-0 lets Patroni initdb cleanly. Safe to
+    //   auto-recover.
+    //
+    // - **Established cluster** (`primaryPod` was set at some point): each
+    //   PVC may hold WAL the others don't. The safe recovery requires
+    //   comparing LSNs across PVCs to pick the right new leader; doing
+    //   that automatically risks promoting an out-of-date replica and
+    //   orphaning un-replicated writes. We emit a warning + event and
+    //   leave the cluster for a human to triage.
+    if ready_replicas == 0
+        && let Some(pod_to_restart) = detect_patroni_deadlock(ctx, ns, &name).await
+    {
+        let ever_bootstrapped = cluster
+            .status
+            .as_ref()
+            .is_some_and(|s| s.primary_pod.is_some());
+        if ever_bootstrapped {
+            warn!(
+                "Cluster {} stuck in Patroni DCS deadlock with prior leader history. \
+                 Refusing automatic recovery (possible data divergence). Operator \
+                 must inspect PVC LSNs and reinit manually.",
+                name
+            );
+            ctx.publish_warning_event(
+                cluster,
+                "PatroniDeadlock",
+                "ManualRecoveryRequired",
+                Some(format!(
+                    "DCS has no leader and pods aren't Ready. This cluster has \
+                     bootstrapped before, so automatic restart could orphan \
+                     un-replicated WAL. Compare PVC LSNs (`pg_controldata`) and \
+                     reinit the highest-LSN member manually."
+                )),
+            )
+            .await;
+            return Ok(Action::requeue(Duration::from_secs(60)));
+        }
+        warn!(
+            "Cluster {} stuck in Patroni DCS deadlock during fresh bootstrap \
+             (no prior leader): deleting {} to force reinit.",
+            name, pod_to_restart
+        );
+        let pods_api: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
+        let _ = pods_api
+            .delete(&pod_to_restart, &kube::api::DeleteParams::default())
+            .await;
+        ctx.publish_warning_event(
+            cluster,
+            "PatroniDeadlockRecovery",
+            "DeletingBootstrapPod",
+            Some(format!(
+                "DCS has no leader on a never-bootstrapped cluster; deleted {} \
+                 to break the deadlock",
+                pod_to_restart
+            )),
+        )
+        .await;
+        return Ok(Action::requeue(Duration::from_secs(30)));
+    }
+
     // Build transition context
     let mut transition_ctx = TransitionContext::new(ready_replicas, cluster.spec.replicas);
     transition_ctx.spec_changed = is_spec_changed;
@@ -1416,6 +1494,88 @@ async fn apply_role_binding(
 }
 
 /// Get StatefulSet status information
+/// Minimum age a pod must have before we consider it a deadlock candidate.
+/// Patroni's default DCS TTL is 30s; we wait ~3x that so a normal pod
+/// restart (during which DCS briefly has no leader) isn't misclassified.
+const PATRONI_DEADLOCK_GRACE: Duration = Duration::from_secs(90);
+
+/// Detect the Patroni DCS deadlock that happens after losing every member
+/// at once (e.g. someone runs `kubectl delete pod -l ...`). The signature is:
+///
+/// - the cluster's DCS Endpoints object exists but has no `leader`
+///   annotation (Patroni writes it once a member acquires the lock), AND
+/// - at least one pod for the StatefulSet has been Running for
+///   `PATRONI_DEADLOCK_GRACE` without becoming Ready.
+///
+/// This state never resolves on its own: every running member sees
+/// "Lock owner: ; I am <pod>" and refuses to bootstrap because Patroni
+/// can't tell whether the DCS is genuinely empty or just unreachable.
+/// Returns the name of the pod to delete to break the deadlock (always
+/// `<cluster>-0`, the bootstrap member).
+async fn detect_patroni_deadlock(
+    ctx: &Context,
+    ns: &str,
+    cluster_name: &str,
+) -> Option<String> {
+    let endpoints_api: Api<Endpoints> = Api::namespaced(ctx.client.clone(), ns);
+    let dcs = endpoints_api.get_opt(cluster_name).await.ok().flatten()?;
+    let has_leader = dcs
+        .metadata
+        .annotations
+        .as_ref()
+        .is_some_and(|a| a.contains_key("leader"));
+    if has_leader {
+        return None;
+    }
+
+    let pods_api: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
+    let label = format!("postgres-operator.smoketurner.com/cluster={cluster_name}");
+    let pods = pods_api
+        .list(&kube::api::ListParams::default().labels(&label))
+        .await
+        .ok()?;
+
+    let now = jiff::Timestamp::now();
+    let mut saw_stuck = false;
+    for pod in pods.items {
+        let phase_running = pod
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.as_deref())
+            .is_some_and(|p| p == "Running");
+        if !phase_running {
+            continue;
+        }
+        let ready = pod
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.as_ref())
+            .into_iter()
+            .flatten()
+            .any(|c| c.type_ == "Ready" && c.status == "True");
+        if ready {
+            // If any pod is Ready, Patroni will recover on its own — not a
+            // deadlock, just a transient restart.
+            return None;
+        }
+        let age = pod
+            .status
+            .as_ref()
+            .and_then(|s| s.start_time.as_ref())
+            .map(|t| (now.as_second() - t.0.as_second()).max(0) as u64)
+            .unwrap_or(0);
+        if age >= PATRONI_DEADLOCK_GRACE.as_secs() {
+            saw_stuck = true;
+        }
+    }
+
+    if saw_stuck {
+        Some(format!("{cluster_name}-0"))
+    } else {
+        None
+    }
+}
+
 async fn get_statefulset_status(api: &Api<StatefulSet>, name: &str) -> (i32, i32, Option<String>) {
     match api.get(name).await {
         Ok(sts) => {

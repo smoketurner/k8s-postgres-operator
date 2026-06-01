@@ -395,6 +395,10 @@ pub(crate) async fn create_role(
     }
 
     for privilege in privileges {
+        let upper = privilege.to_ascii_uppercase();
+        if upper == "LOGIN" || upper == "NOLOGIN" {
+            continue;
+        }
         sql.push_str(&format!(" {}", privilege));
     }
 

@@ -55,6 +55,34 @@ pub enum PostgresClientError {
 /// Result type for PostgreSQL client operations
 pub type PostgresClientResult<T> = Result<T, PostgresClientError>;
 
+/// Render a tokio_postgres error with its database-level detail.
+///
+/// `tokio_postgres::Error::to_string()` collapses to the generic "db error" for
+/// server-side failures. The actionable text (SQLSTATE, message, hint, position)
+/// lives in `as_db_error()`. This helper formats both into a single string so
+/// CRD status and operator logs surface what actually went wrong.
+fn format_pg_error(e: &tokio_postgres::Error) -> String {
+    if let Some(db) = e.as_db_error() {
+        let mut s = format!("[{}] {}", db.code().code(), db.message());
+        if let Some(d) = db.detail() {
+            s.push_str(" — ");
+            s.push_str(d);
+        }
+        if let Some(h) = db.hint() {
+            s.push_str(" (hint: ");
+            s.push_str(h);
+            s.push(')');
+        }
+        if let Some(p) = db.position() {
+            use std::fmt::Write;
+            let _ = write!(s, " @ {p:?}");
+        }
+        s
+    } else {
+        e.to_string()
+    }
+}
+
 /// TLS mode for PostgreSQL connections
 #[derive(Debug, Clone)]
 pub enum TlsMode {
@@ -350,7 +378,7 @@ impl PostgresConnection {
         self.client
             .query(sql, params)
             .await
-            .map_err(|e| PostgresClientError::Query(e.to_string()))
+            .map_err(|e| PostgresClientError::Query(format_pg_error(&e)))
     }
 
     /// Execute a query returning an optional single row
@@ -362,7 +390,7 @@ impl PostgresConnection {
         self.client
             .query_opt(sql, params)
             .await
-            .map_err(|e| PostgresClientError::Query(e.to_string()))
+            .map_err(|e| PostgresClientError::Query(format_pg_error(&e)))
     }
 
     /// Execute a query returning exactly one row
@@ -374,7 +402,7 @@ impl PostgresConnection {
         self.client
             .query_one(sql, params)
             .await
-            .map_err(|e| PostgresClientError::Query(e.to_string()))
+            .map_err(|e| PostgresClientError::Query(format_pg_error(&e)))
     }
 
     /// Execute a statement returning the number of affected rows
@@ -386,7 +414,7 @@ impl PostgresConnection {
         self.client
             .execute(sql, params)
             .await
-            .map_err(|e| PostgresClientError::Query(e.to_string()))
+            .map_err(|e| PostgresClientError::Query(format_pg_error(&e)))
     }
 
     /// Execute multiple statements in a batch (no params support)
@@ -396,7 +424,7 @@ impl PostgresConnection {
         self.client
             .batch_execute(sql)
             .await
-            .map_err(|e| PostgresClientError::Query(e.to_string()))
+            .map_err(|e| PostgresClientError::Query(format_pg_error(&e)))
     }
 
     /// Get the local port being used for the connection
