@@ -2224,9 +2224,47 @@ async fn handle_rollback(
             upgrade.name_any(),
             current_phase
         );
-        return Err(UpgradeError::RollbackNotAllowedInPhase {
-            phase: format!("{current_phase:?}"),
+
+        ctx.publish_warning_event(
+            upgrade,
+            "RollbackNotAllowed",
+            "Rollback",
+            Some(format!(
+                "Rollback is not supported in phase {current_phase:?}: cutover has begun. \
+                 See docs/upgrades.md for post-cutover recovery."
+            )),
+        )
+        .await;
+
+        // Clear the rollback annotation so subsequent reconciles do not
+        // re-enter this branch and emit duplicate events forever. Without
+        // this clear, the rollback request would loop indefinitely because
+        // returning an error never advances the FSM and the annotation
+        // persists across reconciles.
+        let api: Api<PostgresUpgrade> = Api::namespaced(ctx.client.clone(), ns);
+        let patch = serde_json::json!({
+            "metadata": {
+                "annotations": {
+                    ROLLBACK_ANNOTATION: Option::<String>::None,
+                }
+            }
         });
+        if let Err(e) = api
+            .patch(
+                &upgrade.name_any(),
+                &PatchParams::default(),
+                &Patch::Merge(&patch),
+            )
+            .await
+        {
+            warn!(
+                "Failed to clear rollback annotation on upgrade {}: {}",
+                upgrade.name_any(),
+                e
+            );
+        }
+
+        return Ok(Action::requeue(Duration::from_secs(60)));
     }
 
     // Execute rollback
