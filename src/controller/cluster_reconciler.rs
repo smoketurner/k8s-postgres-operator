@@ -505,33 +505,51 @@ async fn check_and_update_status(
 
     // Check if cluster has become degraded or completely unready while
     // running. Without this, a Running cluster whose pods all go NotReady
-    // sticks at the last good `readyReplicas` count because the FSM
-    // transition is decided downstream and no status patch fires from this
-    // path. Cover both partial- and zero-ready cases so the status patch
-    // always reflects the current count.
+    // sticks at the last good `readyReplicas` count because no status
+    // patch fires from this path. Route based on the FSM's decision:
+    //
+    // - Transition succeeds → use the matching phase setter so phase,
+    //   conditions, and counts stay in sync with the FSM target.
+    // - Transition refused (guard / invalid) → only patch the observed
+    //   counts. We must not lie about a phase change the FSM rejected,
+    //   but the readyReplicas count must still reflect reality.
     if current_phase == ClusterPhase::Running && !transition_ctx.all_replicas_ready() {
         let event = if transition_ctx.is_degraded() {
             ClusterEvent::ReplicasDegraded
         } else {
             ClusterEvent::ReconcileError
         };
-        if let TransitionResult::Success {
-            to, description, ..
-        } = state_machine.transition(&current_phase, event, &transition_ctx)
-        {
-            info!("Cluster {} transitioned to {:?}: {}", name, to, description);
+        match state_machine.transition(&current_phase, event, &transition_ctx) {
+            TransitionResult::Success {
+                to, description, ..
+            } => {
+                info!("Cluster {} transitioned to {:?}: {}", name, to, description);
+                match to {
+                    ClusterPhase::Failed => {
+                        let msg = format!(
+                            "All replicas lost: {}/{} ready",
+                            ready_replicas, cluster.spec.replicas
+                        );
+                        status_manager.set_failed("ReplicasLost", &msg).await?;
+                    }
+                    _ => {
+                        status_manager
+                            .set_updating(
+                                ready_replicas,
+                                cluster.spec.replicas,
+                                primary_pod,
+                                replica_pods,
+                            )
+                            .await?;
+                    }
+                }
+            }
+            _ => {
+                status_manager
+                    .patch_observed_counts(ready_replicas, primary_pod, replica_pods)
+                    .await?;
+            }
         }
-        // Always patch the status so readyReplicas reflects current state,
-        // whether the FSM transitioned or not (a guarded transition can
-        // fail; we still want the observed counts to match reality).
-        status_manager
-            .set_updating(
-                ready_replicas,
-                cluster.spec.replicas,
-                primary_pod,
-                replica_pods,
-            )
-            .await?;
     } else if ready_replicas >= cluster.spec.replicas {
         // Consolidated status update: backup status + replication lag in a single call
         // This avoids race conditions from multiple separate status updates.
