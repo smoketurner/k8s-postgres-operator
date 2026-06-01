@@ -602,11 +602,18 @@ impl UpgradeStateMachine {
                 UpgradeEvent::VerificationPassed,
             ) => {
                 if !ctx.verification_complete() {
+                    let lag = match ctx.replication_lag_bytes {
+                        Some(bytes) => format!("{bytes}"),
+                        None => "unknown".to_string(),
+                    };
                     Some(format!(
-                        "Verification incomplete: {}/{} passes, {} mismatches",
+                        "Verification incomplete: {}/{} passes, {} mismatches, \
+                         replication lag: {} bytes, source read-only: {}",
                         ctx.verification_passes,
                         ctx.required_verification_passes,
-                        ctx.row_count_mismatches
+                        ctx.row_count_mismatches,
+                        lag,
+                        ctx.source_read_only,
                     ))
                 } else {
                     None

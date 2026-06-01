@@ -651,8 +651,14 @@ async fn determine_event_for_phase(
         }
 
         UpgradePhase::Verifying => {
-            let required = tc.required_verification_passes;
-            if tc.verification_passes >= required && tc.row_count_mismatches == 0 {
+            // Mirror the FSM `verification_complete()` guard exactly. Emitting
+            // `VerificationPassed` based only on row counts caused a deadlock:
+            // the event short-circuited phase monitoring, but the FSM guard
+            // additionally requires zero replication lag and source read-only,
+            // so the transition would `GuardFailed` and the reconciler would
+            // requeue without ever running the monitoring that advances those
+            // signals (see GitHub issue #91).
+            if tc.verification_complete() {
                 Ok(Some(UpgradeEvent::VerificationPassed))
             } else if tc.row_count_mismatches > 0 {
                 Ok(Some(UpgradeEvent::VerificationFailed))
