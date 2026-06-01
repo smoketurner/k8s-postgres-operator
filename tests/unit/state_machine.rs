@@ -374,6 +374,45 @@ mod degraded_transitions {
     }
 
     #[test]
+    fn test_degraded_to_running_fully_recovered_blocked_during_resize() {
+        let sm = ClusterStateMachine::new();
+
+        // Replicas fully ready but an in-place resize is still active: must stay blocked.
+        let mut ctx = TransitionContext::new(3, 3);
+        ctx.total_pods = 3;
+        ctx.synced_pods = 3;
+        ctx.resize_in_progress = true;
+
+        let result = sm.transition(&ClusterPhase::Degraded, ClusterEvent::FullyRecovered, &ctx);
+        match result {
+            TransitionResult::GuardFailed { reason, .. } => {
+                assert!(
+                    reason.contains("resize"),
+                    "guard reason should mention resize state: {reason}"
+                );
+            }
+            other => panic!("Expected GuardFailed during resize, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_degraded_to_running_fully_recovered_blocked_until_pods_synced() {
+        let sm = ClusterStateMachine::new();
+
+        // Replicas ready but kubelet has not observed latest spec on all pods.
+        let mut ctx = TransitionContext::new(3, 3);
+        ctx.total_pods = 3;
+        ctx.synced_pods = 1;
+        ctx.resize_in_progress = false;
+
+        let result = sm.transition(&ClusterPhase::Degraded, ClusterEvent::FullyRecovered, &ctx);
+        assert!(
+            matches!(result, TransitionResult::GuardFailed { .. }),
+            "Expected GuardFailed when pods not synced"
+        );
+    }
+
+    #[test]
     fn test_degraded_to_updating() {
         let sm = ClusterStateMachine::new();
         let ctx = TransitionContext::new(2, 3);
@@ -458,6 +497,53 @@ mod recovery_transitions {
             }
             _ => panic!("Expected successful transition"),
         }
+    }
+
+    #[test]
+    fn test_recovering_to_running_completed_blocked_during_resize() {
+        let sm = ClusterStateMachine::new();
+
+        // Replicas fully ready but an in-place resize is still active: must stay blocked.
+        let mut ctx = TransitionContext::new(3, 3);
+        ctx.total_pods = 3;
+        ctx.synced_pods = 3;
+        ctx.resize_in_progress = true;
+
+        let result = sm.transition(
+            &ClusterPhase::Recovering,
+            ClusterEvent::RecoveryCompleted,
+            &ctx,
+        );
+        match result {
+            TransitionResult::GuardFailed { reason, .. } => {
+                assert!(
+                    reason.contains("resize"),
+                    "guard reason should mention resize state: {reason}"
+                );
+            }
+            other => panic!("Expected GuardFailed during resize, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_recovering_to_running_completed_blocked_until_pods_synced() {
+        let sm = ClusterStateMachine::new();
+
+        // Replicas ready but kubelet has not observed latest spec on all pods.
+        let mut ctx = TransitionContext::new(3, 3);
+        ctx.total_pods = 3;
+        ctx.synced_pods = 1;
+        ctx.resize_in_progress = false;
+
+        let result = sm.transition(
+            &ClusterPhase::Recovering,
+            ClusterEvent::RecoveryCompleted,
+            &ctx,
+        );
+        assert!(
+            matches!(result, TransitionResult::GuardFailed { .. }),
+            "Expected GuardFailed when pods not synced"
+        );
     }
 
     #[test]
