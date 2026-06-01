@@ -1001,9 +1001,20 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
             pgbouncer::generate_pgbouncer_deployment(cluster, pgbouncer_restart_on_resize);
         apply_resource(ctx, ns, &pgbouncer_deployment).await?;
 
-        // Apply PgBouncer Service
-        let pgbouncer_svc = pgbouncer::generate_pgbouncer_service(cluster);
-        apply_resource(ctx, ns, &pgbouncer_svc).await?;
+        // Apply PgBouncer Service — same Superseded guard as Patroni
+        // Services. After cutover the pooler service selector may be
+        // flipped to route traffic to the target cluster's pooler, and
+        // regenerating the source-named Service would revert the flip.
+        if current_phase == ClusterPhase::Superseded {
+            debug!(
+                "Skipping PgBouncer Service reconciliation for Superseded cluster {}: \
+                 services are managed by the successor cluster",
+                name
+            );
+        } else {
+            let pgbouncer_svc = pgbouncer::generate_pgbouncer_service(cluster);
+            apply_resource(ctx, ns, &pgbouncer_svc).await?;
+        }
 
         // Apply replica pooler if enabled
         if pgbouncer::is_replica_pooler_enabled(cluster) {
@@ -1027,8 +1038,16 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
             );
             apply_resource(ctx, ns, &pgbouncer_replica_deployment).await?;
 
-            let pgbouncer_replica_svc = pgbouncer::generate_pgbouncer_replica_service(cluster);
-            apply_resource(ctx, ns, &pgbouncer_replica_svc).await?;
+            if current_phase == ClusterPhase::Superseded {
+                debug!(
+                    "Skipping PgBouncer replica Service reconciliation for Superseded cluster {}: \
+                     services are managed by the successor cluster",
+                    name
+                );
+            } else {
+                let pgbouncer_replica_svc = pgbouncer::generate_pgbouncer_replica_service(cluster);
+                apply_resource(ctx, ns, &pgbouncer_replica_svc).await?;
+            }
         }
     }
 
