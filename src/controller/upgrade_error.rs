@@ -200,6 +200,7 @@ impl UpgradeError {
                 | UpgradeError::ImmutableFieldChange { .. }
                 | UpgradeError::ConcurrentUpgrade(_)
                 | UpgradeError::PreflightCheckFailed { .. }
+                | UpgradeError::RollbackNotAllowedInPhase { .. }
         )
     }
 

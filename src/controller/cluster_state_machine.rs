@@ -447,13 +447,16 @@ impl ClusterStateMachine {
     /// Check guard conditions for a transition
     fn check_guard(&self, transition: &Transition, ctx: &TransitionContext) -> Option<String> {
         match (&transition.from, &transition.to, &transition.event) {
-            // Guard: AllReplicasReady requires the cluster to be fully ready for
-            // the Running phase. Beyond replica readiness, this also requires that
-            // every pod has acknowledged the latest spec (KEP-5067) and that no
-            // in-place resource resize is currently active (KEP-1287). Reporting
-            // Running while a resize is still in flight would contradict the
-            // resizeStatus and allPodsSynced status fields.
-            (_, ClusterPhase::Running, ClusterEvent::AllReplicasReady) => {
+            // Guard: all transitions to Running enforce ready_for_running(). This
+            // ensures Running is only set when replicas are ready, every pod has
+            // acknowledged the latest spec (KEP-5067), and no in-place resource
+            // resize is active (KEP-1287). Applying the same gate to
+            // AllReplicasReady, FullyRecovered, and RecoveryCompleted prevents
+            // contradictory status where phase=Running while ResizeInProgress=true
+            // or allPodsSynced=false.
+            (_, ClusterPhase::Running, ClusterEvent::AllReplicasReady)
+            | (_, ClusterPhase::Running, ClusterEvent::FullyRecovered)
+            | (_, ClusterPhase::Running, ClusterEvent::RecoveryCompleted) => {
                 if !ctx.ready_for_running() {
                     Some(format!(
                         "Not ready for Running: replicas {}/{}, pods synced {}/{}, resize in progress: {}",
@@ -472,17 +475,6 @@ impl ClusterStateMachine {
                 if !ctx.is_degraded() {
                     Some(format!(
                         "Cluster is not degraded: {}/{} replicas ready",
-                        ctx.ready_replicas, ctx.desired_replicas
-                    ))
-                } else {
-                    None
-                }
-            }
-            // Guard: FullyRecovered requires all replicas ready
-            (ClusterPhase::Degraded, ClusterPhase::Running, ClusterEvent::FullyRecovered) => {
-                if !ctx.all_replicas_ready() {
-                    Some(format!(
-                        "Cannot mark as recovered, not all replicas ready: {}/{}",
                         ctx.ready_replicas, ctx.desired_replicas
                     ))
                 } else {

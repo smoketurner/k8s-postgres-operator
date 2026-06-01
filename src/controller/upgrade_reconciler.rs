@@ -2230,9 +2230,47 @@ async fn handle_rollback(
             upgrade.name_any(),
             current_phase
         );
-        return Err(UpgradeError::RollbackNotAllowedInPhase {
-            phase: format!("{current_phase:?}"),
+
+        ctx.publish_warning_event(
+            upgrade,
+            "RollbackNotAllowed",
+            "Rollback",
+            Some(format!(
+                "Rollback is not supported in phase {current_phase:?}: cutover has begun. \
+                 See docs/upgrades.md for post-cutover recovery."
+            )),
+        )
+        .await;
+
+        // Clear the rollback annotation so subsequent reconciles do not
+        // re-enter this branch and emit duplicate events forever. Without
+        // this clear, the rollback request would loop indefinitely because
+        // returning an error never advances the FSM and the annotation
+        // persists across reconciles.
+        let api: Api<PostgresUpgrade> = Api::namespaced(ctx.client.clone(), ns);
+        let patch = serde_json::json!({
+            "metadata": {
+                "annotations": {
+                    ROLLBACK_ANNOTATION: Option::<String>::None,
+                }
+            }
         });
+        if let Err(e) = api
+            .patch(
+                &upgrade.name_any(),
+                &PatchParams::default(),
+                &Patch::Merge(&patch),
+            )
+            .await
+        {
+            warn!(
+                "Failed to clear rollback annotation on upgrade {}: {}",
+                upgrade.name_any(),
+                e
+            );
+        }
+
+        return Ok(Action::requeue(Duration::from_secs(60)));
     }
 
     // Execute rollback
@@ -2262,6 +2300,31 @@ async fn handle_rollback(
     // soon as RolledBack is observed.
     clear_source_upgrade_in_progress(upgrade, ctx, ns).await;
     uninstall_source_ddl_audit(upgrade, ctx, ns).await;
+
+    // Clear sourceReadOnlyAt so status reflects that the source is back to
+    // read-write. The field is documented as a current-state signal: its
+    // presence means the source is no longer accepting writes. Leaving it
+    // set after rollback would lie to FSM guards and external consumers.
+    {
+        let api: Api<PostgresUpgrade> = Api::namespaced(ctx.client.clone(), ns);
+        let patch = serde_json::json!({
+            "status": { "sourceReadOnlyAt": Option::<String>::None }
+        });
+        if let Err(e) = api
+            .patch_status(
+                &upgrade.name_any(),
+                &PatchParams::default(),
+                &Patch::Merge(&patch),
+            )
+            .await
+        {
+            warn!(
+                "Failed to clear sourceReadOnlyAt for upgrade {}: {}",
+                upgrade.name_any(),
+                e
+            );
+        }
+    }
 
     // Update phase to RolledBack
     update_phase(upgrade, ctx, ns, UpgradePhase::RolledBack).await?;
