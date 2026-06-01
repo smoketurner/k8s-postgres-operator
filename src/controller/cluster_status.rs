@@ -285,6 +285,35 @@ impl<'a> StatusManager<'a> {
         Ok(())
     }
 
+    /// Patch only the observed-replica fields without touching `phase` or
+    /// `conditions`. Used when the reconciler sees the live counts have
+    /// changed but the state machine has not (or has refused to) transition
+    /// — the status must still tell the truth about how many pods are
+    /// Ready instead of leaving a stale snapshot.
+    pub async fn patch_observed_counts(
+        &self,
+        ready_replicas: i32,
+        primary_pod: Option<String>,
+        replica_pods: Vec<String>,
+    ) -> Result<()> {
+        let api: Api<PostgresCluster> = Api::namespaced(self.ctx.client.clone(), self.ns);
+        let name = self.cluster.name_any();
+        let patch = serde_json::json!({
+            "status": {
+                "readyReplicas": ready_replicas,
+                "primaryPod": primary_pod,
+                "replicaPods": replica_pods,
+            }
+        });
+        api.patch_status(
+            &name,
+            &PatchParams::apply("postgres-operator"),
+            &Patch::Merge(&patch),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Update status for a running cluster with all optional status fields
     ///
     /// This is the consolidated method that updates backup status and replication lag

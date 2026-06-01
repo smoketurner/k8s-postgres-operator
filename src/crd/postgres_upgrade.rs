@@ -160,7 +160,7 @@ pub struct CutoverConfig {
 impl Default for CutoverConfig {
     fn default() -> Self {
         Self {
-            mode: CutoverMode::Manual,
+            mode: CutoverMode::Automatic,
             allowed_window: None,
         }
     }
@@ -170,9 +170,9 @@ impl Default for CutoverConfig {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, Default, PartialEq, Eq)]
 pub enum CutoverMode {
     /// Manual cutover requires `cutover: now` annotation
-    #[default]
     Manual,
     /// Automatic cutover proceeds when all pre-checks pass
+    #[default]
     Automatic,
 }
 
@@ -834,7 +834,7 @@ mod tests {
     #[test]
     fn test_default_cutover_mode() {
         let config = CutoverConfig::default();
-        assert_eq!(config.mode, CutoverMode::Manual);
+        assert_eq!(config.mode, CutoverMode::Automatic);
     }
 
     #[test]
