@@ -164,7 +164,10 @@ kubectl describe postgresupgrade <upgrade-name>
 
 ### Stuck in `Verifying`
 
-**Cause**: Row count verification failing
+**Cause**: One or more of the following conditions not met:
+- Row counts have not converged (mismatches or insufficient passes)
+- Replication lag is non-zero
+- Source cluster is not yet read-only
 
 **Steps**:
 1. Check verification status:
@@ -177,7 +180,17 @@ kubectl describe postgresupgrade <upgrade-name>
    kubectl get postgresupgrade <upgrade-name> -o jsonpath='{.status.verification.mismatchedTables}'
    ```
 
-3. Compare row counts manually:
+3. Check replication lag:
+   ```bash
+   kubectl get postgresupgrade <upgrade-name> -o jsonpath='{.status.replication.lagBytes}'
+   ```
+
+4. Check if source is read-only:
+   ```bash
+   kubectl get postgresupgrade <upgrade-name> -o jsonpath='{.status.sourceReadOnlyAt}'
+   ```
+
+5. Compare row counts manually:
    ```bash
    # On source
    kubectl exec -it <source-cluster-primary> -- \
@@ -188,7 +201,10 @@ kubectl describe postgresupgrade <upgrade-name>
      psql -c "SELECT schemaname, relname, n_live_tup FROM pg_stat_user_tables ORDER BY schemaname, relname;"
    ```
 
-**Resolution**: See [upgrade-verification-failed.md](upgrade-verification-failed.md)
+**Resolution**:
+- For row count mismatches: See [upgrade-verification-failed.md](upgrade-verification-failed.md)
+- For non-zero lag: Wait for replication to catch up, or check for long-running transactions on source
+- For non-read-only source: This is set automatically once row counts pass and lag is zero; wait for the operator to progress
 
 ---
 
