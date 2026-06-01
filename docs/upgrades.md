@@ -201,9 +201,9 @@ kubectl get postgresupgrade my-cluster-upgrade -o jsonpath='{.status}' | jq '
                  targetLsn: .replication.targetLsn}}'
 ```
 
-The source returns to read-write only on rollback. Once `sourceReadOnlyAt`
-is set, the timestamp persists on the status as an audit record even after
-the upgrade completes.
+On rollback, the source returns to read-write and `sourceReadOnlyAt` is
+cleared. On successful completion, the timestamp persists on the status as
+an audit record.
 
 ### Idle-in-transaction purger
 
@@ -429,9 +429,10 @@ Valid source phases: `CreatingTarget`, `ConfiguringReplication`,
 `Replicating`, `Verifying`, `SyncingSequences`, `ReadyForCutover`, and
 `Failed` (when the failure happened pre-cutover).
 
-The annotation is rejected with `RollbackNotAllowedInPhase` if the upgrade
-is in `CuttingOver`, `HealthChecking`, or `Completed`. The error message
-points users to the post-cutover recovery procedure below.
+The annotation is rejected with a `RollbackNotAllowed` warning event if the
+upgrade is in `CuttingOver`, `HealthChecking`, or `Completed`. The rollback
+annotation is cleared and the upgrade remains in its current phase. The event
+message points users to the post-cutover recovery procedure below.
 
 ### Rollback Behavior (pre-cutover)
 
