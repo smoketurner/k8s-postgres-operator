@@ -992,7 +992,6 @@ async fn ensure_replication_bridge_netpol(
             }]),
             ..Default::default()
         }),
-        ..Default::default()
     };
 
     api.patch(

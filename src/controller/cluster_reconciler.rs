@@ -1154,12 +1154,13 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
                 cluster,
                 "PatroniDeadlock",
                 "ManualRecoveryRequired",
-                Some(format!(
+                Some(
                     "DCS has no leader and pods aren't Ready. This cluster has \
                      bootstrapped before, so automatic restart could orphan \
                      un-replicated WAL. Compare PVC LSNs (`pg_controldata`) and \
                      reinit the highest-LSN member manually."
-                )),
+                        .to_string(),
+                ),
             )
             .await;
             return Ok(Action::requeue(Duration::from_secs(60)));
@@ -1512,11 +1513,7 @@ const PATRONI_DEADLOCK_GRACE: Duration = Duration::from_secs(90);
 /// can't tell whether the DCS is genuinely empty or just unreachable.
 /// Returns the name of the pod to delete to break the deadlock (always
 /// `<cluster>-0`, the bootstrap member).
-async fn detect_patroni_deadlock(
-    ctx: &Context,
-    ns: &str,
-    cluster_name: &str,
-) -> Option<String> {
+async fn detect_patroni_deadlock(ctx: &Context, ns: &str, cluster_name: &str) -> Option<String> {
     let endpoints_api: Api<Endpoints> = Api::namespaced(ctx.client.clone(), ns);
     let dcs = endpoints_api.get_opt(cluster_name).await.ok().flatten()?;
     let has_leader = dcs
