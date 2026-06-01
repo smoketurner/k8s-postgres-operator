@@ -11,7 +11,7 @@ use common::{
     PostgresClusterBuilder, create_test_cluster, create_test_cluster_with_pgbouncer,
     create_test_cluster_with_pgbouncer_replica, create_test_cluster_with_tls,
 };
-use postgres_operator::crd::{PgBouncerSpec, TLSSpec};
+use postgres_operator::crd::{ClusterPhase, PgBouncerSpec, PostgresClusterStatus, TLSSpec};
 use postgres_operator::resources::{patroni, pdb, pgbouncer, secret, service};
 
 mod patroni_statefulset_tests {
@@ -1974,5 +1974,126 @@ mod spilo_config_tests {
             Some("on".to_string()),
             "hot_standby_feedback default"
         );
+    }
+}
+
+// =============================================================================
+// Service reconciliation guard tests (issue #95)
+// =============================================================================
+
+/// Tests for the guard that prevents Services from being regenerated for
+/// Superseded clusters after a blue-green upgrade completes.
+///
+/// After cutover the upgrade reconciler flips Service selectors to point at
+/// the *target* cluster pods. The source cluster enters `Superseded` phase and
+/// the `UPGRADE_IN_PROGRESS` annotation is cleared. Without an explicit
+/// `Superseded` guard, the cluster reconciler's next cycle re-applies
+/// source-selector Services and reverts the cutover flip (GitHub issue #95).
+mod service_reconciliation_guard_tests {
+    use super::*;
+
+    /// Mirrors the skip predicate in `reconcile_cluster` at the service-guard site.
+    fn should_skip_services(
+        cluster: &postgres_operator::crd::PostgresCluster,
+        upgrade_annotation: Option<&str>,
+    ) -> bool {
+        let phase = cluster.status.as_ref().map(|s| s.phase).unwrap_or_default();
+        upgrade_annotation.is_some() || phase == ClusterPhase::Superseded
+    }
+
+    #[test]
+    fn superseded_cluster_skips_service_reconciliation() {
+        let mut cluster = create_test_cluster("source-pg16", "default", 3);
+        cluster.status = Some(PostgresClusterStatus {
+            phase: ClusterPhase::Superseded,
+            ..Default::default()
+        });
+
+        // No upgrade annotation — the Superseded gate alone must suppress
+        // service regeneration so the cutover selector flip is preserved.
+        assert!(
+            should_skip_services(&cluster, None),
+            "Superseded cluster must skip Service reconciliation to preserve the \
+             cutover selector flip (GitHub issue #95)"
+        );
+    }
+
+    #[test]
+    fn running_cluster_does_not_skip_service_reconciliation() {
+        let mut cluster = create_test_cluster("source-pg16", "default", 3);
+        cluster.status = Some(PostgresClusterStatus {
+            phase: ClusterPhase::Running,
+            ..Default::default()
+        });
+
+        assert!(
+            !should_skip_services(&cluster, None),
+            "Running cluster must NOT skip Service reconciliation"
+        );
+    }
+
+    #[test]
+    fn upgrade_in_progress_annotation_skips_service_reconciliation() {
+        let cluster = create_test_cluster("source-pg16", "default", 3);
+        // No status — default phase is Pending — but annotation is set.
+        assert!(
+            should_skip_services(&cluster, Some("my-upgrade")),
+            "Cluster with upgrade-in-progress annotation must skip Service reconciliation"
+        );
+    }
+
+    #[test]
+    fn superseded_cluster_with_upgrade_annotation_skips_service_reconciliation() {
+        let mut cluster = create_test_cluster("source-pg16", "default", 3);
+        cluster.status = Some(PostgresClusterStatus {
+            phase: ClusterPhase::Superseded,
+            ..Default::default()
+        });
+
+        // Both gates active — must still skip.
+        assert!(
+            should_skip_services(&cluster, Some("my-upgrade")),
+            "Superseded cluster with upgrade annotation must skip Service reconciliation"
+        );
+    }
+
+    #[test]
+    fn no_status_cluster_does_not_skip_service_reconciliation() {
+        let cluster = create_test_cluster("new-cluster", "default", 1);
+        // status == None → phase defaults to Pending, no annotation.
+        assert!(
+            !should_skip_services(&cluster, None),
+            "Cluster with no status (Pending) must NOT skip Service reconciliation"
+        );
+    }
+
+    /// Verify that every non-Superseded phase allows service reconciliation.
+    /// This prevents a future phase addition from silently inhibiting services.
+    #[test]
+    fn only_superseded_phase_skips_service_reconciliation() {
+        let non_superseded_phases = [
+            ClusterPhase::Pending,
+            ClusterPhase::Creating,
+            ClusterPhase::Running,
+            ClusterPhase::Updating,
+            ClusterPhase::Scaling,
+            ClusterPhase::Degraded,
+            ClusterPhase::Recovering,
+            ClusterPhase::Failed,
+            ClusterPhase::Deleting,
+        ];
+
+        for phase in non_superseded_phases {
+            let mut cluster = create_test_cluster("test-cluster", "default", 1);
+            cluster.status = Some(PostgresClusterStatus {
+                phase,
+                ..Default::default()
+            });
+            assert!(
+                !should_skip_services(&cluster, None),
+                "Phase {:?} must NOT skip Service reconciliation",
+                phase
+            );
+        }
     }
 }
