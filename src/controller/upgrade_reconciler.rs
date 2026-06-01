@@ -2295,6 +2295,31 @@ async fn handle_rollback(
     clear_source_upgrade_in_progress(upgrade, ctx, ns).await;
     uninstall_source_ddl_audit(upgrade, ctx, ns).await;
 
+    // Clear sourceReadOnlyAt so status reflects that the source is back to
+    // read-write. The field is documented as a current-state signal: its
+    // presence means the source is no longer accepting writes. Leaving it
+    // set after rollback would lie to FSM guards and external consumers.
+    {
+        let api: Api<PostgresUpgrade> = Api::namespaced(ctx.client.clone(), ns);
+        let patch = serde_json::json!({
+            "status": { "sourceReadOnlyAt": Option::<String>::None }
+        });
+        if let Err(e) = api
+            .patch_status(
+                &upgrade.name_any(),
+                &PatchParams::default(),
+                &Patch::Merge(&patch),
+            )
+            .await
+        {
+            warn!(
+                "Failed to clear sourceReadOnlyAt for upgrade {}: {}",
+                upgrade.name_any(),
+                e
+            );
+        }
+    }
+
     // Update phase to RolledBack
     update_phase(upgrade, ctx, ns, UpgradePhase::RolledBack).await?;
 
