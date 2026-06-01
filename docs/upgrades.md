@@ -429,9 +429,10 @@ Valid source phases: `CreatingTarget`, `ConfiguringReplication`,
 `Replicating`, `Verifying`, `SyncingSequences`, `ReadyForCutover`, and
 `Failed` (when the failure happened pre-cutover).
 
-The annotation is rejected with `RollbackNotAllowedInPhase` if the upgrade
-is in `CuttingOver`, `HealthChecking`, or `Completed`. The error message
-points users to the post-cutover recovery procedure below.
+The annotation is rejected with a `RollbackNotAllowed` warning event if the
+upgrade is in `CuttingOver`, `HealthChecking`, or `Completed`. The rollback
+annotation is cleared and the upgrade remains in its current phase. The event
+message points users to the post-cutover recovery procedure below.
 
 ### Rollback Behavior (pre-cutover)
 

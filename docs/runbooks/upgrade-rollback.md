@@ -5,44 +5,25 @@ This runbook covers how to safely rollback a PostgresUpgrade to the original sou
 ## When to Rollback
 
 Consider rolling back when:
-- Application issues discovered after cutover
-- Performance degradation on new version
-- Compatibility issues with new PostgreSQL version
+- Performance degradation on new version discovered during replication
+- Compatibility issues with new PostgreSQL version found during testing
 - Verification failures that cannot be resolved
-- Unexpected behavior in the target cluster
+- Unexpected behavior in the target cluster during replication
+
+**Note**: Rollback must be triggered before the `CuttingOver` phase begins.
 
 ## Prerequisites
 
 Before rolling back, understand:
 
-1. **Rollback Feasibility**: Check if rollback is still possible
-2. **Data Loss Risk**: Understand if writes occurred to target after cutover
-3. **Current Phase**: Rollback behavior differs by upgrade phase
+1. **Current Phase**: Rollback is only supported before `CuttingOver` begins
+2. **Post-cutover**: Recovery requires manual PITR from a pre-upgrade backup
 
-## Check Rollback Status
+## Check Current Phase
 
 ```bash
-kubectl get postgresupgrade <upgrade-name> -o jsonpath='{.status.rollback}' | jq
+kubectl get postgresupgrade <upgrade-name> -o jsonpath='{.status.phase}'
 ```
-
-Example output:
-```json
-{
-  "feasible": true,
-  "dataLossRisk": false,
-  "reason": "Source cluster running, no writes to target since cutover",
-  "lastSourceWrite": "2025-01-11T10:00:00Z"
-}
-```
-
-### Understanding Rollback Fields
-
-| Field | Description |
-|-------|-------------|
-| `feasible` | Whether rollback is technically possible |
-| `dataLossRisk` | Whether writes to target will be lost |
-| `reason` | Human-readable explanation |
-| `lastSourceWrite` | Last write timestamp on source (for rollback window) |
 
 ## Rollback by Phase
 
@@ -66,50 +47,19 @@ kubectl annotate postgresupgrade <upgrade-name> \
 
 ### After Cutover (Phases: CuttingOver, HealthChecking, Completed)
 
-**Critical Decision**: Have writes occurred to the target cluster?
+**Automated rollback is not supported after `CuttingOver` begins.** If you
+add the rollback annotation during these phases:
 
-#### Scenario A: No Writes to Target Yet
+1. A `RollbackNotAllowed` warning event is emitted
+2. The rollback annotation is cleared
+3. The upgrade remains in its current phase
 
-If `dataLossRisk: false`:
+This is intentional: once service selectors flip to the target, the new
+primary may have accepted writes that the source does not have. Rolling back
+would silently drop data.
 
-```bash
-kubectl annotate postgresupgrade <upgrade-name> \
-  postgres-operator.smoketurner.com/rollback=now
-```
-
-**What happens**:
-1. Services are switched back to source cluster
-2. Source is set back to read-write
-3. Target cluster subscription is cleaned up
-4. Upgrade status changes to `RolledBack`
-
-#### Scenario B: Writes Have Occurred to Target
-
-If `dataLossRisk: true`:
-
-> **Warning**: Writes made to the target cluster after cutover WILL BE LOST
-
-1. Assess the impact:
-   ```bash
-   # Check write activity on target
-   kubectl exec -it <target-cluster-primary> -- psql -c "
-   SELECT xact_commit, xact_rollback, tup_inserted, tup_updated, tup_deleted
-   FROM pg_stat_database
-   WHERE datname = 'postgres';
-   "
-   ```
-
-2. Consider alternatives:
-   - Fix the issue on the target instead of rolling back
-   - Export critical data from target before rollback
-   - Accept data loss if impact is acceptable
-
-3. If proceeding with data loss:
-   ```bash
-   kubectl annotate postgresupgrade <upgrade-name> \
-     postgres-operator.smoketurner.com/rollback=now \
-     postgres-operator.smoketurner.com/accept-data-loss=true
-   ```
+**Recovery requires manual PITR** from a pre-upgrade backup. See
+`docs/upgrades.md` for the post-cutover recovery procedure.
 
 ## Manual Rollback Procedure
 
@@ -262,20 +212,15 @@ Before retrying the upgrade:
 
 ## Rollback Failures
 
-### "Rollback Not Feasible"
+### Rollback Not Allowed
 
-If `feasible: false`:
+If rollback is requested during `CuttingOver`, `HealthChecking`, or `Completed`:
 
-```bash
-kubectl get postgresupgrade <upgrade-name> -o jsonpath='{.status.rollback.reason}'
-```
+- A `RollbackNotAllowed` event is emitted
+- The annotation is cleared automatically
+- No state change occurs
 
-Common reasons:
-- Source cluster was deleted
-- Source cluster is unhealthy
-- Upgrade is in an incompatible phase
-
-**Resolution**: Follow the manual rollback procedure above
+**Resolution**: Follow the manual PITR recovery procedure in `docs/upgrades.md`
 
 ### Services Won't Switch
 
@@ -321,8 +266,8 @@ kubectl delete pod <source-cluster-primary>
 
 For urgent situations:
 
-- [ ] Check rollback feasibility: `kubectl get postgresupgrade <name> -o jsonpath='{.status.rollback}'`
-- [ ] Assess data loss risk
+- [ ] Check current phase: `kubectl get postgresupgrade <name> -o jsonpath='{.status.phase}'`
+- [ ] Verify phase is before `CuttingOver` (rollback not supported after cutover begins)
 - [ ] Stop application traffic if possible
 - [ ] Trigger rollback: `kubectl annotate postgresupgrade <name> postgres-operator.smoketurner.com/rollback=now`
 - [ ] Monitor rollback progress: `kubectl get postgresupgrade <name> -w`
