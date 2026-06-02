@@ -26,7 +26,7 @@ status:
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `version` | string | Yes | - | PostgreSQL major version ("15", "16", or "17") |
+| `version` | string | Yes | - | PostgreSQL major version ("15", "16", "17", or "18") |
 | `replicas` | integer | No | 1 | Number of cluster members (1-100) |
 | `storage` | [StorageSpec](#storagespec) | Yes | - | Storage configuration |
 | `resources` | [ResourceRequirements](#resourcerequirements) | No | - | CPU/memory resources |
@@ -727,7 +727,7 @@ spec:
 
 The CRD includes CEL validation rules:
 
-1. **Version**: Must be one of "15", "16", or "17"
+1. **Version**: Must be one of "15", "16", "17", or "18"
 2. **Storage size**: Must be valid Kubernetes quantity
 3. **Replicas**: Must be between 1 and 100
 4. **Backup schedule**: Required if destination is configured
@@ -921,7 +921,7 @@ For detailed upgrade procedures, see the [Upgrades Guide](upgrades.md).
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `sourceCluster` | [ClusterReference](#clusterreference) | Yes | Reference to the source cluster to upgrade |
-| `targetVersion` | string | Yes | Target PostgreSQL version ("15", "16", or "17") |
+| `targetVersion` | string | Yes | Target PostgreSQL version ("15", "16", "17", or "18") |
 | `targetClusterOverrides` | [TargetClusterOverrides](#targetclusteroverrides) | No | Override settings for the target cluster |
 | `strategy` | [UpgradeStrategy](#upgradestrategy) | No | Upgrade strategy configuration |
 
@@ -954,7 +954,7 @@ For detailed upgrade procedures, see the [Upgrades Guide](upgrades.md).
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `mode` | string | No | Manual | "Manual" requires annotation, "Automatic" proceeds when checks pass |
+| `mode` | string | No | Automatic | "Manual" requires annotation, "Automatic" proceeds when checks pass |
 | `allowedWindow` | [MaintenanceWindow](#maintenancewindow) | No | - | Time window for automatic cutover |
 
 ### MaintenanceWindow

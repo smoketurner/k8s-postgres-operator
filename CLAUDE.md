@@ -15,7 +15,7 @@ A Kubernetes operator written in Rust that manages PostgreSQL clusters using Pat
 | kube-rs | 3.x | With k8s-openapi v1_35 (Kubernetes 1.35 native types) |
 | cert-manager | 1.0+ | Required for TLS certificate management |
 | Patroni | 3.0+ | Used via Spilo image |
-| PostgreSQL | 15, 16, 17 | Supported versions in Spilo |
+| PostgreSQL | 15, 16, 17, 18 | Supported versions in Spilo |
 
 ## Coding Standards
 

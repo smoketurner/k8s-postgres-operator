@@ -57,7 +57,7 @@ pub struct PostgresUpgradeSpec {
     /// The source cluster must be in Running phase.
     pub source_cluster: ClusterReference,
 
-    /// Target PostgreSQL version (must be higher than source, Spilo-supported: 15, 16, 17).
+    /// Target PostgreSQL version (must be higher than source, Spilo-supported: 15, 16, 17, 18).
     /// Downgrades are rejected during validation.
     pub target_version: PostgresVersion,
 
