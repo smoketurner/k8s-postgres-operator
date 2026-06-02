@@ -235,13 +235,16 @@ by this operator already has this.
 
 ### Supported Versions
 
-The operator supports upgrades between PostgreSQL versions 15, 16, and 17 (Spilo-supported versions).
+The operator supports upgrades between PostgreSQL versions 15, 16, 17, and 18 (Spilo-supported versions).
 
 | Source Version | Target Version | Supported |
 |---------------|----------------|-----------|
 | 15 | 16 | Yes |
 | 15 | 17 | Yes |
+| 15 | 18 | Yes |
 | 16 | 17 | Yes |
+| 16 | 18 | Yes |
+| 17 | 18 | Yes |
 | 17 | 16 | No (downgrades not allowed) |
 
 ## Creating an Upgrade
