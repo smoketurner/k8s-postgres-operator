@@ -31,6 +31,26 @@ use crate::crd::PostgresCluster;
 use crate::resources::backup;
 use crate::resources::common::{owner_reference, patroni_cluster_labels, patroni_labels};
 
+/// Startup probe sizing for the Spilo container. Exposed so other modules
+/// (notably the Patroni DCS deadlock recovery in `cluster_reconciler.rs`)
+/// can coordinate their own timeouts against the kubelet's startup window.
+pub(crate) const STARTUP_PROBE_INITIAL_DELAY_SECS: i32 = 10;
+pub(crate) const STARTUP_PROBE_PERIOD_SECS: i32 = 10;
+pub(crate) const STARTUP_PROBE_FAILURE_THRESHOLD: i32 = 30;
+
+/// Maximum time the kubelet will wait for the Spilo container to become
+/// Ready before marking the pod failed: `initial_delay + period * failures`.
+/// Any logic that decides "this pod has been stuck too long" must respect
+/// this window or it risks killing a legitimately slow bootstrap.
+///
+/// Currently consumed by the invariant test that ties `PATRONI_DEADLOCK_GRACE`
+/// to this window — see `cluster_reconciler.rs`.
+#[cfg(test)]
+pub(crate) const fn startup_probe_window_secs() -> u64 {
+    (STARTUP_PROBE_INITIAL_DELAY_SECS + STARTUP_PROBE_PERIOD_SECS * STARTUP_PROBE_FAILURE_THRESHOLD)
+        as u64
+}
+
 /// Default PostgreSQL parameters for HA operation
 ///
 /// Note: wal_level=logical is set by default to support major version upgrades
@@ -660,10 +680,10 @@ pub fn generate_patroni_statefulset(
             scheme: Some("HTTP".to_string()),
             ..Default::default()
         }),
-        initial_delay_seconds: Some(10),
-        period_seconds: Some(10),
+        initial_delay_seconds: Some(STARTUP_PROBE_INITIAL_DELAY_SECS),
+        period_seconds: Some(STARTUP_PROBE_PERIOD_SECS),
         timeout_seconds: Some(5),
-        failure_threshold: Some(30), // 5 minutes to start
+        failure_threshold: Some(STARTUP_PROBE_FAILURE_THRESHOLD),
         ..Default::default()
     };
 
