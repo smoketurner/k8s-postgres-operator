@@ -89,8 +89,9 @@ spec:
                             type: string
                         type: object
                       mode:
-                        default: Manual
-                        description: Cutover mode (Manual requires annotation to trigger)
+                        default: Automatic
+                        description: Cutover mode (Automatic cuts over once pre-checks
+                          pass; Manual requires the cutover annotation)
                         enum:
                         - Manual
                         - Automatic
@@ -407,6 +408,15 @@ spec:
                     description: Total number of sequences
                     type: integer
                 type: object
+              sourceReadOnlyAt:
+                description: |
+                  Timestamp when the operator put the source cluster into
+                  read-only mode. Set during the Verifying phase once row
+                  counts pass and the LSN-distance gate is met; presence
+                  of this field is the signal that the source is no longer
+                  accepting writes. Cleared on RolledBack.
+                format: date-time
+                type: string
               sourceVersion:
                 description: PostgreSQL version of source cluster
                 type: string
