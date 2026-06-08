@@ -1367,10 +1367,18 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
                 from, to, reason
             );
 
-            // Update status with current info
+            // The FSM refused the transition, but the live cluster has still
+            // moved on (e.g. all replicas became Ready while an in-place
+            // resize is still in progress). Status must reflect that: patch
+            // the observed counts without touching `phase` or `conditions`,
+            // matching the pattern used in `check_and_update_status` above.
             if current_phase == ClusterPhase::Creating {
                 status_manager
                     .set_creating(ready_replicas, cluster.spec.replicas, primary_pod)
+                    .await?;
+            } else {
+                status_manager
+                    .patch_observed_counts(ready_replicas, primary_pod, replica_pods)
                     .await?;
             }
         }
