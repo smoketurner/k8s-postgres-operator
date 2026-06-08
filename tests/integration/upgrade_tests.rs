@@ -1848,6 +1848,20 @@ async fn test_upgrade_rollback_during_replication() {
         final_phase
     );
 
+    // The rollback annotation must be cleared after a successful rollback,
+    // otherwise subsequent reconciles re-enter handle_rollback and emit a
+    // spurious RollbackNotAllowed warning (regression guard for #108).
+    let rollback_annotation = final_upgrade
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("postgres-operator.smoketurner.com/rollback"));
+    assert!(
+        rollback_annotation.is_none(),
+        "Rollback annotation should be cleared after RolledBack, got {:?}",
+        rollback_annotation
+    );
+
     // Verify source cluster is still operational
     tracing::info!("Verifying source cluster is still operational...");
     wait_for_cluster(

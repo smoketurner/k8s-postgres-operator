@@ -2418,6 +2418,37 @@ async fn handle_rollback(
     // Update phase to RolledBack
     update_phase(upgrade, ctx, ns, UpgradePhase::RolledBack).await?;
 
+    // Clear the rollback annotation so subsequent reconciles do not re-enter
+    // this branch and emit a spurious warning. The annotation is evaluated
+    // at the top of reconcile (before phase-specific guards), so leaving it
+    // set on a terminal RolledBack upgrade causes the next reconcile to call
+    // can_rollback() and emit RollbackNotAllowed. Matches the cleanup
+    // performed on the error path above.
+    {
+        let api: Api<PostgresUpgrade> = Api::namespaced(ctx.client.clone(), ns);
+        let patch = serde_json::json!({
+            "metadata": {
+                "annotations": {
+                    ROLLBACK_ANNOTATION: Option::<String>::None,
+                }
+            }
+        });
+        if let Err(e) = api
+            .patch(
+                &upgrade.name_any(),
+                &PatchParams::default(),
+                &Patch::Merge(&patch),
+            )
+            .await
+        {
+            warn!(
+                "Failed to clear rollback annotation on upgrade {}: {}",
+                upgrade.name_any(),
+                e
+            );
+        }
+    }
+
     info!("Rollback completed for upgrade {}", upgrade.name_any());
 
     Ok(Action::await_change())

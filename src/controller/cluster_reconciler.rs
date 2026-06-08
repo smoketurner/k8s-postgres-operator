@@ -1367,10 +1367,18 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
                 from, to, reason
             );
 
-            // Update status with current info
+            // The FSM refused the transition, but the live cluster has still
+            // moved on (e.g. all replicas became Ready while an in-place
+            // resize is still in progress). Status must reflect that: patch
+            // the observed counts without touching `phase` or `conditions`,
+            // matching the pattern used in `check_and_update_status` above.
             if current_phase == ClusterPhase::Creating {
                 status_manager
                     .set_creating(ready_replicas, cluster.spec.replicas, primary_pod)
+                    .await?;
+            } else {
+                status_manager
+                    .patch_observed_counts(ready_replicas, primary_pod, replica_pods)
                     .await?;
             }
         }
@@ -1514,9 +1522,18 @@ async fn apply_role_binding(
 
 /// Get StatefulSet status information
 /// Minimum age a pod must have before we consider it a deadlock candidate.
-/// Patroni's default DCS TTL is 30s; we wait ~3x that so a normal pod
-/// restart (during which DCS briefly has no leader) isn't misclassified.
-const PATRONI_DEADLOCK_GRACE: Duration = Duration::from_secs(90);
+///
+/// Must be ≥ the Spilo container's startup probe window so a legitimately
+/// slow bootstrap (WAL-G restore, slow `initdb`, constrained storage/CPU)
+/// is never killed while the kubelet is still giving it a chance. The
+/// startup probe is sized at `initial_delay_seconds + period_seconds *
+/// failure_threshold = 10 + 10 * 30 = 310s` in
+/// `src/resources/patroni.rs`; we add a 20s buffer.
+///
+/// The two thresholds must stay in sync — see the invariant test in
+/// `src/resources/patroni.rs` that asserts this constant is ≥ the startup
+/// probe window.
+pub(crate) const PATRONI_DEADLOCK_GRACE: Duration = Duration::from_secs(330);
 
 /// Detect the Patroni DCS deadlock that happens after losing every member
 /// at once (e.g. someone runs `kubectl delete pod -l ...`). The signature is:
@@ -2832,4 +2849,28 @@ pub fn any_resize_in_progress(resize_statuses: &[crate::crd::PodResourceResizeSt
             crate::crd::PodResizeStatus::InProgress | crate::crd::PodResizeStatus::Proposed
         )
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+mod tests {
+    use super::PATRONI_DEADLOCK_GRACE;
+    use crate::resources::patroni::startup_probe_window_secs;
+
+    /// Patroni DCS deadlock recovery may delete `<cluster>-0` once a pod has
+    /// been stuck for `PATRONI_DEADLOCK_GRACE`. If that grace is shorter
+    /// than the Spilo startup probe window, the kubelet is still giving
+    /// the pod a chance to come up while we kill it — exactly the bug
+    /// reported in #109. Lock the two together so a future change to
+    /// either side fails CI until both are updated in sync.
+    #[test]
+    fn patroni_deadlock_grace_respects_startup_probe_window() {
+        let grace = PATRONI_DEADLOCK_GRACE.as_secs();
+        let probe = startup_probe_window_secs();
+        assert!(
+            grace >= probe,
+            "PATRONI_DEADLOCK_GRACE ({grace}s) must be >= startup probe window ({probe}s) \
+             to avoid killing legitimately slow bootstraps. See issue #109."
+        );
+    }
 }
