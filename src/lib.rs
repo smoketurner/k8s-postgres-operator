@@ -22,13 +22,28 @@ use futures::{Stream, StreamExt};
 use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::{ConfigMap, Secret, Service};
 use k8s_openapi::api::policy::v1::PodDisruptionBudget;
+use kube::core::PartialObjectMeta;
 use kube::runtime::watcher::Config as WatcherConfig;
-use kube::runtime::{Controller, WatchStreamExt, metadata_watcher, predicates, reflector, watcher};
+use kube::runtime::{Controller, WatchStreamExt, predicates, reflector, watcher};
 use kube::{Api, Client, Resource};
 use serde::de::DeserializeOwned;
 
 /// Helper to create a namespaced or cluster-wide API based on scope.
 fn scoped_api<T>(client: Client, namespace: Option<&str>) -> Api<T>
+where
+    T: Resource<Scope = k8s_openapi::NamespaceResourceScope>,
+    <T as Resource>::DynamicType: Default,
+    T: Clone + DeserializeOwned + std::fmt::Debug,
+{
+    match namespace {
+        Some(ns) => Api::namespaced(client, ns),
+        None => Api::all(client),
+    }
+}
+
+/// Namespaced-or-cluster metadata-only API (sets metadata-only Accept headers
+/// for get/list/watch/patch). Replaces the deprecated `metadata_watcher`.
+fn scoped_metadata_api<T>(client: Client, namespace: Option<&str>) -> Api<PartialObjectMeta<T>>
 where
     T: Resource<Scope = k8s_openapi::NamespaceResourceScope>,
     <T as Resource>::DynamicType: Default,
@@ -127,10 +142,10 @@ pub async fn run_controller_scoped(
     // Set up APIs for the controller (namespaced or cluster-wide)
     let clusters: Api<PostgresCluster> = scoped_api(client.clone(), namespace);
     let statefulsets: Api<StatefulSet> = scoped_api(client.clone(), namespace);
-    let services: Api<Service> = scoped_api(client.clone(), namespace);
-    let configmaps: Api<ConfigMap> = scoped_api(client.clone(), namespace);
-    let secrets: Api<Secret> = scoped_api(client.clone(), namespace);
-    let pdbs: Api<PodDisruptionBudget> = scoped_api(client.clone(), namespace);
+    let services_meta = scoped_metadata_api::<Service>(client.clone(), namespace);
+    let configmaps_meta = scoped_metadata_api::<ConfigMap>(client.clone(), namespace);
+    let secrets_meta = scoped_metadata_api::<Secret>(client.clone(), namespace);
+    let pdbs_meta = scoped_metadata_api::<PodDisruptionBudget>(client.clone(), namespace);
 
     // Use consistent watcher configuration across all controllers
     let watcher_config = default_watcher_config();
@@ -139,16 +154,16 @@ pub async fn run_controller_scoped(
     let (reader, cluster_stream) = create_filtered_stream(clusters, watcher_config.clone());
 
     // Create and run the controller using for_stream with the pre-filtered stream
-    // Memory optimization: Use metadata_watcher for owned resources where we only need to know
-    // they exist/changed (ConfigMaps, Secrets, Services, PDBs). Keep full watcher for StatefulSet
-    // since we read .status.readyReplicas. metadata_watcher returns PartialObjectMeta which only
+    // Memory optimization: Use watcher over Api<PartialObjectMeta<…>> for owned resources where
+    // we only need to know they exist/changed (ConfigMaps, Secrets, Services, PDBs). Keep full
+    // watcher for StatefulSet since we read .status.readyReplicas. PartialObjectMeta only
     // contains TypeMeta + ObjectMeta, reducing memory and IO.
     Controller::for_stream(cluster_stream, reader)
         .owns(statefulsets, watcher_config.clone())
-        .owns_stream(metadata_watcher(services, watcher_config.clone()).touched_objects())
-        .owns_stream(metadata_watcher(configmaps, watcher_config.clone()).touched_objects())
-        .owns_stream(metadata_watcher(secrets, watcher_config.clone()).touched_objects())
-        .owns_stream(metadata_watcher(pdbs, watcher_config).touched_objects())
+        .owns_stream(watcher(services_meta, watcher_config.clone()).touched_objects())
+        .owns_stream(watcher(configmaps_meta, watcher_config.clone()).touched_objects())
+        .owns_stream(watcher(secrets_meta, watcher_config.clone()).touched_objects())
+        .owns_stream(watcher(pdbs_meta, watcher_config).touched_objects())
         .run(reconcile, error_policy, ctx)
         .for_each(|result| async move {
             match result {
@@ -203,7 +218,7 @@ pub async fn run_database_controller_scoped(client: Client, namespace: Option<&s
 
     // Set up APIs for the controller (namespaced or cluster-wide)
     let databases: Api<PostgresDatabase> = scoped_api(client.clone(), namespace);
-    let secrets: Api<Secret> = scoped_api(client.clone(), namespace);
+    let secrets_meta = scoped_metadata_api::<Secret>(client.clone(), namespace);
 
     // Use consistent watcher configuration across all controllers
     let watcher_config = default_watcher_config();
@@ -213,9 +228,10 @@ pub async fn run_database_controller_scoped(client: Client, namespace: Option<&s
 
     // Create and run the controller
     // Watch PostgresDatabase and owned secrets
-    // Memory optimization: Use metadata_watcher for secrets since we only need to know they exist
+    // Memory optimization: Use watcher over Api<PartialObjectMeta<…>> for secrets since we only
+    // need to know they exist/changed.
     Controller::for_stream(database_stream, reader)
-        .owns_stream(metadata_watcher(secrets, watcher_config).touched_objects())
+        .owns_stream(watcher(secrets_meta, watcher_config).touched_objects())
         .run(reconcile_database, database_error_policy, ctx)
         .for_each(|result| async move {
             match result {

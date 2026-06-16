@@ -12,7 +12,7 @@ A Kubernetes operator written in Rust that manages PostgreSQL clusters using Pat
 |-----------|-----------------|-------|
 | Rust | 1.95+ | Edition 2024, MSRV enforced in `Cargo.toml` |
 | Kubernetes | 1.35+ | Required for in-place resize, pod generation tracking |
-| kube-rs | 3.x | With k8s-openapi v1_35 (Kubernetes 1.35 native types) |
+| kube-rs | 4.x | With k8s-openapi v1_36 (Kubernetes 1.36 native types, wire-compatible with 1.35+) |
 | cert-manager | 1.0+ | Required for TLS certificate management |
 | Patroni | 3.0+ | Used via Spilo image |
 | PostgreSQL | 15, 16, 17, 18 | Supported versions in Spilo |
@@ -224,7 +224,7 @@ The operator leverages Kubernetes 1.35+ features for enhanced functionality:
 - Compare with `metadata.generation` to detect sync status
 - Enables precise detection of when pod changes are fully applied
 
-These features are available natively via k8s-openapi v1_35 (`ContainerResizePolicy`, `pod.status.resize`, `container_status.allocated_resources`).
+These features are available natively via k8s-openapi v1_36 (`ContainerResizePolicy`, `pod.status.resize`, `container_status.allocated_resources`).
 
 ## Patroni/Spilo Integration
 
