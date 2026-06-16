@@ -368,7 +368,7 @@ pub fn generate_patroni_role_binding(cluster: &PostgresCluster) -> RoleBinding {
             ..Default::default()
         },
         role_ref: RoleRef {
-            api_group: "rbac.authorization.k8s.io".to_string(),
+            api_group: Some("rbac.authorization.k8s.io".to_string()),
             kind: "Role".to_string(),
             name: name.clone(),
         },

@@ -204,7 +204,7 @@ echo "Logical backup complete: ${DEST}"
             owner_references: Some(vec![owner_reference(cluster)]),
             ..Default::default()
         },
-        spec: Some(cronjob_spec),
+        spec: cronjob_spec,
         ..Default::default()
     })
 }
@@ -336,7 +336,7 @@ mod tests {
         }));
 
         let cj = generate_logical_backup_cronjob(&cluster).expect("cronjob");
-        let spec = cj.spec.as_ref().expect("spec");
+        let spec = &cj.spec;
         assert_eq!(spec.schedule, "0 3 * * *");
         assert_eq!(spec.successful_jobs_history_limit, Some(5));
         assert_eq!(spec.failed_jobs_history_limit, Some(1));
@@ -358,8 +358,6 @@ mod tests {
         let cj = generate_logical_backup_cronjob(&cluster).unwrap();
         let pod_spec = cj
             .spec
-            .as_ref()
-            .unwrap()
             .job_template
             .spec
             .as_ref()
@@ -388,8 +386,6 @@ mod tests {
         let cj = generate_logical_backup_cronjob(&cluster).unwrap();
         let env = cj
             .spec
-            .as_ref()
-            .unwrap()
             .job_template
             .spec
             .as_ref()
@@ -463,8 +459,6 @@ mod tests {
         let cj = generate_logical_backup_cronjob(&cluster).unwrap();
         let env = cj
             .spec
-            .as_ref()
-            .unwrap()
             .job_template
             .spec
             .as_ref()
