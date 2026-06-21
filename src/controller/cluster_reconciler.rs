@@ -169,6 +169,89 @@ async fn check_missing_resources(
 /// After this duration, the cluster will transition to Failed state
 const CREATING_TIMEOUT_SECS: i64 = 600;
 
+/// Backfill the `connection-string` key into an existing credentials Secret.
+///
+/// The credentials Secret is only created when absent (its passwords are random
+/// and must not be regenerated on every reconcile), so clusters created before
+/// the `connection-string` key existed never receive it — breaking KEDA
+/// connection-based scaling. This adds the key in place, derived from the
+/// already-stored superuser password, without touching the passwords. No-op when
+/// the key is already present or the password cannot be read.
+async fn backfill_connection_string(
+    ctx: &Context,
+    ns: &str,
+    cluster_name: &str,
+    secret_name: &str,
+    existing: &Secret,
+) -> Result<()> {
+    // Server-side, stringData is merged into data, so the key shows up in `data`.
+    let already_present = existing
+        .data
+        .as_ref()
+        .is_some_and(|d| d.contains_key(secret::CONNECTION_STRING_KEY))
+        || existing
+            .string_data
+            .as_ref()
+            .is_some_and(|d| d.contains_key(secret::CONNECTION_STRING_KEY));
+    if already_present {
+        return Ok(());
+    }
+
+    // Recover the superuser password from the existing secret (kube decodes
+    // `data` values to raw bytes).
+    let Some(password) = existing
+        .data
+        .as_ref()
+        .and_then(|d| d.get("POSTGRES_PASSWORD"))
+        .and_then(|b| String::from_utf8(b.0.clone()).ok())
+    else {
+        warn!(
+            "Cannot backfill connection-string for secret {}: POSTGRES_PASSWORD missing or invalid",
+            secret_name
+        );
+        return Ok(());
+    };
+
+    let connection_string = secret::build_connection_string(cluster_name, ns, &password);
+    let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
+    let patch = serde_json::json!({
+        "stringData": { secret::CONNECTION_STRING_KEY: connection_string }
+    });
+    secrets_api
+        .patch(
+            secret_name,
+            &PatchParams::apply("postgres-operator"),
+            &Patch::Merge(&patch),
+        )
+        .await?;
+    debug!("Backfilled connection-string into secret {}", secret_name);
+    Ok(())
+}
+
+/// How often a full reconciliation is forced even when the spec generation is
+/// unchanged, so externally-modified core resources (StatefulSet, Services,
+/// ConfigMap, RBAC, PDB, NetworkPolicy) are re-applied via server-side apply and
+/// drift is repaired. (5 minutes.)
+const DRIFT_RECONCILE_INTERVAL_SECS: i64 = 300;
+
+/// Decide whether a full (drift-repairing) reconcile is due given the timestamp
+/// of the last full reconcile. Returns true when there is no recorded timestamp,
+/// when it cannot be parsed, or when at least `interval_secs` have elapsed.
+fn full_reconcile_due(
+    last_full_reconcile: Option<&str>,
+    now: Timestamp,
+    interval_secs: i64,
+) -> bool {
+    match last_full_reconcile {
+        None => true,
+        Some(ts) => match ts.parse::<Timestamp>() {
+            Ok(prev) => now.as_second() - prev.as_second() >= interval_secs,
+            // Unparseable timestamp: re-apply to be safe.
+            Err(_) => true,
+        },
+    }
+}
+
 /// Default backoff configuration for error handling
 fn default_backoff() -> BackoffConfig {
     BackoffConfig::default()
@@ -203,9 +286,24 @@ pub async fn reconcile(cluster: Arc<PostgresCluster>, ctx: Arc<Context>) -> Resu
     // If they're missing, we need full reconciliation to recreate them
     let missing = check_missing_resources(&cluster, &ctx, &ns).await?;
 
-    // Skip full reconciliation if spec hasn't changed, cluster is running, AND
-    // all critical resources exist
-    if !is_spec_changed && current_phase == ClusterPhase::Running && !missing.any_missing() {
+    // Force a periodic full reconcile so externally-modified core resources are
+    // re-applied (drift repair), even when the spec generation is unchanged.
+    let drift_reconcile_due = full_reconcile_due(
+        cluster
+            .status
+            .as_ref()
+            .and_then(|s| s.last_full_reconcile.as_deref()),
+        Timestamp::now(),
+        DRIFT_RECONCILE_INTERVAL_SECS,
+    );
+
+    // Skip full reconciliation if spec hasn't changed, cluster is running, all
+    // critical resources exist, AND a drift reconcile is not yet due.
+    if !is_spec_changed
+        && current_phase == ClusterPhase::Running
+        && !missing.any_missing()
+        && !drift_reconcile_due
+    {
         debug!(
             "Spec unchanged for {} (generation: {:?}, observed: {:?}), checking status only",
             name,
@@ -214,6 +312,13 @@ pub async fn reconcile(cluster: Arc<PostgresCluster>, ctx: Arc<Context>) -> Resu
         );
         // Still check and update status periodically
         return check_and_update_status(&cluster, &ctx, &ns).await;
+    }
+
+    if drift_reconcile_due && !is_spec_changed && current_phase == ClusterPhase::Running {
+        debug!(
+            "Drift reconcile interval elapsed for {}, re-applying core resources",
+            name
+        );
     }
 
     // Log why we're doing full reconciliation
@@ -869,9 +974,17 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
     // Ensure Secret exists (credentials)
     let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
     let secret_name = format!("{}-credentials", name);
-    if secrets_api.get_opt(&secret_name).await?.is_none() {
-        let secret = secret::generate_credentials_secret(cluster);
-        apply_resource(ctx, ns, &secret).await?;
+    match secrets_api.get_opt(&secret_name).await? {
+        None => {
+            let secret = secret::generate_credentials_secret(cluster);
+            apply_resource(ctx, ns, &secret).await?;
+        }
+        Some(existing) => {
+            // Backfill the connection-string key for secrets created before it
+            // was added, without regenerating the existing passwords (which are
+            // random and only set on creation).
+            backfill_connection_string(ctx, ns, &name, &secret_name, &existing).await?;
+        }
     }
 
     // Ensure Patroni ConfigMap exists
@@ -1423,6 +1536,16 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
                 "Failed to update PgBouncer status (non-fatal)"
             );
         }
+    }
+
+    // Record that a full reconcile (which re-applies all core resources via SSA)
+    // just completed, so the periodic drift-repair timer resets. Non-fatal.
+    if let Err(e) = status_manager.stamp_full_reconcile().await {
+        debug!(
+            cluster = %name,
+            error = %e,
+            "Failed to stamp lastFullReconcile (non-fatal)"
+        );
     }
 
     // Requeue interval based on current phase
@@ -2854,8 +2977,53 @@ pub fn any_resize_in_progress(resize_statuses: &[crate::crd::PodResourceResizeSt
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
-    use super::PATRONI_DEADLOCK_GRACE;
+    use super::{DRIFT_RECONCILE_INTERVAL_SECS, PATRONI_DEADLOCK_GRACE, full_reconcile_due};
     use crate::resources::patroni::startup_probe_window_secs;
+    use jiff::Timestamp;
+
+    #[test]
+    fn full_reconcile_due_when_no_timestamp() {
+        // Never reconciled before -> always due.
+        assert!(full_reconcile_due(
+            None,
+            Timestamp::now(),
+            DRIFT_RECONCILE_INTERVAL_SECS
+        ));
+    }
+
+    #[test]
+    fn full_reconcile_due_when_unparseable() {
+        assert!(full_reconcile_due(
+            Some("not-a-timestamp"),
+            Timestamp::now(),
+            DRIFT_RECONCILE_INTERVAL_SECS
+        ));
+    }
+
+    #[test]
+    fn full_reconcile_not_due_within_interval() {
+        let now = Timestamp::now();
+        // Stamped 10s ago, interval is 5 minutes -> not due.
+        let recent = (now - jiff::SignedDuration::from_secs(10)).to_string();
+        assert!(!full_reconcile_due(
+            Some(&recent),
+            now,
+            DRIFT_RECONCILE_INTERVAL_SECS
+        ));
+    }
+
+    #[test]
+    fn full_reconcile_due_after_interval() {
+        let now = Timestamp::now();
+        // Stamped well past the interval -> due.
+        let stale =
+            (now - jiff::SignedDuration::from_secs(DRIFT_RECONCILE_INTERVAL_SECS + 60)).to_string();
+        assert!(full_reconcile_due(
+            Some(&stale),
+            now,
+            DRIFT_RECONCILE_INTERVAL_SECS
+        ));
+    }
 
     /// Patroni DCS deadlock recovery may delete `<cluster>-0` once a pod has
     /// been stuck for `PATRONI_DEADLOCK_GRACE`. If that grace is shorter

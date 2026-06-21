@@ -359,35 +359,34 @@ KEDA-based auto-scaling configuration. Requires [KEDA](https://keda.sh/) to be i
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `enabled` | boolean | No | false | Enable auto-scaling |
-| `minReplicas` | integer | No | 1 | Minimum replica count |
+| `minReplicas` | integer | No | spec.replicas | Minimum replica count (0 enables scale-to-zero) |
 | `maxReplicas` | integer | No | 10 | Maximum replica count |
-| `cpuTargetUtilization` | integer | No | - | CPU utilization target (percentage) |
-| `connectionThreshold` | integer | No | - | Connection count threshold for scaling |
-| `scaleDownStabilization` | integer | No | 300 | Seconds to wait before scaling down |
-| `pollingInterval` | integer | No | 30 | Seconds between metric checks |
-| `cooldownPeriod` | integer | No | 300 | Cooldown after scaling event |
+| `metrics.cpu.targetUtilization` | integer | No | 70 | CPU utilization target (percentage) |
+| `metrics.connections.targetPerReplica` | integer | No | 100 | Target active connections per replica |
+| `replicationLagThreshold` | string | No | 30s | Lag threshold for reader routing (duration string) |
+| `lagThresholdBytes` | integer | No | - | Lag threshold in bytes (takes precedence over `replicationLagThreshold`) |
+| `estimatedThroughputMbPerSec` | integer | No | 100 | Estimated write throughput for converting time-based lag to bytes |
 
 **Example (CPU-based scaling):**
 
 ```yaml
 scaling:
-  enabled: true
   minReplicas: 2
   maxReplicas: 10
-  cpuTargetUtilization: 70
-  scaleDownStabilization: 600
+  metrics:
+    cpu:
+      targetUtilization: 70
 ```
 
 **Example (Connection-based scaling):**
 
 ```yaml
 scaling:
-  enabled: true
   minReplicas: 3
   maxReplicas: 15
-  connectionThreshold: 100
-  pollingInterval: 15
+  metrics:
+    connections:
+      targetPerReplica: 100
 ```
 
 ### NetworkPolicySpec

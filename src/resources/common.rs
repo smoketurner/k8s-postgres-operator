@@ -62,7 +62,8 @@ pub fn standard_labels(cluster_name: &str) -> BTreeMap<String, String> {
 /// Generate labels for a PostgresCluster including user-defined cost allocation labels.
 ///
 /// This merges standard operator labels with user-defined labels from the cluster spec.
-/// User labels can override standard labels except for the cluster identifier.
+/// User labels can override standard labels except for protected labels used in
+/// Service selectors and Patroni DCS discovery.
 ///
 /// Common user labels for cost allocation:
 /// - `team`: Team that owns this cluster
@@ -73,11 +74,18 @@ pub fn cluster_labels(cluster: &PostgresCluster) -> BTreeMap<String, String> {
     let name = cluster.name_any();
     let mut labels = standard_labels(&name);
 
-    // Merge user-defined labels from the cluster spec
-    // User labels can override standard labels (except cluster identifier)
+    // Labels that must not be overridden by user-provided spec.labels. These are
+    // used in Service selectors (and Patroni DCS), so overriding them would break
+    // traffic routing (e.g. the primary/replica services would get 0 endpoints).
+    const PROTECTED_LABELS: &[&str] = &[
+        "postgres-operator.smoketurner.com/cluster", // Cluster identifier
+        "app.kubernetes.io/name",                    // Used in Service selectors
+        "app.kubernetes.io/component", // Used in PDB selector (postgresql vs pgbouncer)
+    ];
+
+    // Merge user-defined labels from the cluster spec, skipping protected labels.
     for (key, value) in &cluster.spec.labels {
-        // Don't allow overriding the cluster identifier
-        if key != "postgres-operator.smoketurner.com/cluster" {
+        if !PROTECTED_LABELS.contains(&key.as_str()) {
             labels.insert(key.clone(), value.clone());
         }
     }
@@ -282,6 +290,69 @@ mod tests {
         assert_eq!(
             labels.get("postgres-operator.smoketurner.com/cluster"),
             Some(&"real-cluster".to_string())
+        );
+    }
+
+    #[test]
+    fn test_cluster_labels_cannot_override_app_name() {
+        use crate::crd::{
+            PostgresCluster, PostgresClusterSpec, PostgresVersion, StorageSpec, TLSSpec,
+        };
+        use kube::core::ObjectMeta;
+
+        let mut user_labels = BTreeMap::new();
+        // Try to override the app name used by Service selectors and the
+        // component label used by the PDB selector.
+        user_labels.insert("app.kubernetes.io/name".to_string(), "hacked".to_string());
+        user_labels.insert(
+            "app.kubernetes.io/component".to_string(),
+            "hacked".to_string(),
+        );
+
+        let cluster = PostgresCluster {
+            metadata: ObjectMeta {
+                name: Some("real-cluster".to_string()),
+                namespace: Some("test-ns".to_string()),
+                ..Default::default()
+            },
+            spec: PostgresClusterSpec {
+                version: PostgresVersion::V16,
+                replicas: 1,
+                storage: StorageSpec {
+                    size: "10Gi".to_string(),
+                    storage_class: None,
+                },
+                labels: user_labels,
+                resources: None,
+                postgresql_params: Default::default(),
+                backup: None,
+                pgbouncer: None,
+                tls: TLSSpec::default(),
+                metrics: None,
+                service: None,
+                restore: None,
+                scaling: None,
+                network_policy: None,
+                sidecars: vec![],
+                node_selector: Default::default(),
+                tolerations: vec![],
+                topology_spread_constraints: vec![],
+                priority_class_name: None,
+            },
+            status: None,
+        };
+
+        let labels = cluster_labels(&cluster);
+
+        // Should not be able to override app.kubernetes.io/name (used in selectors)
+        assert_eq!(
+            labels.get("app.kubernetes.io/name"),
+            Some(&"real-cluster".to_string())
+        );
+        // Nor the component label (PDB selector targets component=postgresql)
+        assert_eq!(
+            labels.get("app.kubernetes.io/component"),
+            Some(&"postgresql".to_string())
         );
     }
 

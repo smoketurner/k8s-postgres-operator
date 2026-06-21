@@ -511,13 +511,23 @@ spec:
                   Auto-scaling configuration for the cluster.
                   Requires KEDA to be installed in the cluster.
                 properties:
-                  idleTimeout:
-                    default: 30m
+                  estimatedThroughputMbPerSec:
+                    default: 100
                     description: |
-                      Time without connections before scaling to minReplicas.
-                      Format: duration string (e.g., "30m", "1h").
-                      Default: 30m
-                    type: string
+                      Estimated write throughput in MB/s for converting time-based
+                      lag thresholds to bytes. Only used when lagThresholdBytes is not set.
+                      Default: 100 (100 MB/s)
+                    minimum: 1
+                    type: integer
+                  lagThresholdBytes:
+                    description: |
+                      Replication lag threshold in bytes (alternative to time-based threshold).
+                      If set, this takes precedence over replicationLagThreshold.
+                      Use this for more precise control when you know your write throughput.
+                      Example: 1000000000 (1GB)
+                    format: int64
+                    minimum: 0
+                    type: integer
                   maxReplicas:
                     default: 10
                     description: Maximum number of replicas
@@ -560,13 +570,6 @@ spec:
                       Replicas exceeding this threshold are excluded from the reader service.
                       Format: duration string (e.g., "30s", "1m").
                       Default: 30s
-                    type: string
-                  wakeupTimeout:
-                    default: 5m
-                    description: |
-                      Maximum time to wait for cluster wake-up on connection attempt.
-                      Only applies when minReplicas=0 (scale-to-zero).
-                      Default: 5m
                     type: string
                 type: object
               service:
@@ -889,6 +892,13 @@ spec:
                 type: string
               lastErrorTime:
                 description: Timestamp of the last error
+                type: string
+              lastFullReconcile:
+                description: |
+                  Timestamp (RFC3339) of the last full reconciliation that
+                  re-applied all core resources. Used to periodically re-apply
+                  core resources and repair external drift even when the spec
+                  generation is unchanged.
                 type: string
               maxReplicationLagBytes:
                 description: Maximum replication lag across all replicas (in bytes)

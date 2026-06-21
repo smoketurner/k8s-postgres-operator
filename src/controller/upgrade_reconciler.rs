@@ -229,6 +229,24 @@ pub async fn reconcile_upgrade(
                 current_phase
             );
 
+            // Clean up the target-side replication objects before deleting the
+            // orphaned upgrade, mirroring handle_deletion(). Without this, the
+            // target retains an orphaned subscription pointing at the now-gone
+            // source (consuming a logical replication worker slot and requiring
+            // manual disable + `slot_name = NONE` + DROP). cleanup_replication
+            // handles a missing source safely. Same phase exclusion as deletion.
+            if !matches!(
+                current_phase,
+                UpgradePhase::Completed | UpgradePhase::RolledBack | UpgradePhase::Pending
+            ) && let Err(e) = cleanup_replication(&upgrade, &ctx, &ns).await
+            {
+                warn!(
+                    "Failed to clean up replication for orphaned upgrade {}: {}",
+                    upgrade.name_any(),
+                    e
+                );
+            }
+
             // Remove finalizer first to allow deletion
             if has_finalizer(&upgrade) {
                 let api: Api<PostgresUpgrade> = Api::namespaced(ctx.client.clone(), &ns);
@@ -1043,41 +1061,18 @@ async fn setup_replication(
     let pub_name = generate_publication_name(&upgrade.name_any());
     let sub_name = generate_subscription_name(&upgrade.name_any());
 
-    // Copy schema from source to target before setting up replication
-    // Logical replication only replicates DML (data), not DDL (schema)
-    // Note: copy_schema still uses pod exec for pg_dump
-    info!(
-        "Copying schema from source {} to target {} for upgrade {}",
-        source_name,
-        target_name,
-        upgrade.name_any()
-    );
-    replication::copy_schema(
-        &ctx.client,
-        source_ns,
-        source_name,
-        ns,
-        &target_name,
-        "postgres",
-    )
-    .await?;
-
-    // Connect to source cluster and create publication
+    // Connect to source cluster and create publication.
     let source_conn =
         PostgresConnection::connect_primary(&ctx.client, source_ns, source_name).await?;
     replication::setup_publication(&source_conn, &pub_name).await?;
 
-    // Purge idle-in-transaction sessions on the source so the slot
-    // creation triggered by `CREATE SUBSCRIPTION` below can take a
-    // consistent snapshot. Without this, slot creation can hang silently
-    // on busy clusters — the most common opaque ConfiguringReplication
-    // stall per Wiz's documented Aurora playbook.
-    purge_source_idle_transactions(upgrade, ctx, source_ns, source_name, &source_conn).await?;
-
-    // Install the DDL audit event trigger on the source so any DDL run
-    // during the replication window is counted. The reconciler polls
-    // `count_ddl_events` periodically and refuses to cut over if the
-    // count is non-zero (unless `spec.strategy.acknowledgeDDL` is set).
+    // Install the DDL audit event trigger on the source BEFORE copying the
+    // schema. `copy_schema` runs `pg_dump` against an MVCC snapshot taken at the
+    // start of the dump; any DDL executed on the source after that snapshot is
+    // not in the copied schema. Installing the audit first ensures such DDL is
+    // counted (the reconciler polls `count_ddl_events` and refuses to cut over
+    // if the count is non-zero unless `spec.strategy.acknowledgeDDL` is set),
+    // closing the otherwise-silent schema-drift window during the copy.
     if let Err(e) = ddl_audit::install_ddl_audit(&source_conn).await {
         warn!(
             "Failed to install DDL audit on source {}/{}: {}; cutover will not be \
@@ -1097,6 +1092,33 @@ async fn setup_replication(
         )
         .await;
     }
+
+    // Purge idle-in-transaction sessions on the source so the slot
+    // creation triggered by `CREATE SUBSCRIPTION` below can take a
+    // consistent snapshot. Without this, slot creation can hang silently
+    // on busy clusters — the most common opaque ConfiguringReplication
+    // stall per Wiz's documented Aurora playbook.
+    purge_source_idle_transactions(upgrade, ctx, source_ns, source_name, &source_conn).await?;
+
+    // Copy schema from source to target. Logical replication only replicates
+    // DML (data), not DDL (schema). The DDL audit installed above now covers any
+    // user DDL that lands on the source during this dump/apply window.
+    // Note: copy_schema still uses pod exec for pg_dump.
+    info!(
+        "Copying schema from source {} to target {} for upgrade {}",
+        source_name,
+        target_name,
+        upgrade.name_any()
+    );
+    replication::copy_schema(
+        &ctx.client,
+        source_ns,
+        source_name,
+        ns,
+        &target_name,
+        "postgres",
+    )
+    .await?;
 
     // Get source cluster service host
     let source_host = format!("{}-primary.{}.svc", source_name, source_ns);

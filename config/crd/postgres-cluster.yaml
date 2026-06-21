@@ -550,20 +550,6 @@ spec:
                       description: Maximum number of replicas
                       minimum: 1
                       default: 10
-                    idleTimeout:
-                      type: string
-                      description: |
-                        Time without connections before scaling to minReplicas.
-                        Format: duration string (e.g., "30m", "1h").
-                        Default: 30m
-                      default: "30m"
-                    wakeupTimeout:
-                      type: string
-                      description: |
-                        Maximum time to wait for cluster wake-up on connection attempt.
-                        Only applies when minReplicas=0 (scale-to-zero).
-                        Default: 5m
-                      default: "5m"
                     replicationLagThreshold:
                       type: string
                       description: |
@@ -572,6 +558,23 @@ spec:
                         Format: duration string (e.g., "30s", "1m").
                         Default: 30s
                       default: "30s"
+                    lagThresholdBytes:
+                      type: integer
+                      format: int64
+                      description: |
+                        Replication lag threshold in bytes (alternative to time-based threshold).
+                        If set, this takes precedence over replicationLagThreshold.
+                        Use this for more precise control when you know your write throughput.
+                        Example: 1000000000 (1GB)
+                      minimum: 0
+                    estimatedThroughputMbPerSec:
+                      type: integer
+                      description: |
+                        Estimated write throughput in MB/s for converting time-based
+                        lag thresholds to bytes. Only used when lagThresholdBytes is not set.
+                        Default: 100 (100 MB/s)
+                      minimum: 1
+                      default: 100
                     metrics:
                       type: object
                       description: Scaling metrics configuration
@@ -989,3 +992,10 @@ spec:
                     createdAt:
                       type: string
                       description: Timestamp when the relationship was created (RFC3339 format)
+                lastFullReconcile:
+                  type: string
+                  description: |
+                    Timestamp (RFC3339) of the last full reconciliation that
+                    re-applied all core resources. Used to periodically re-apply
+                    core resources and repair external drift even when the spec
+                    generation is unchanged.

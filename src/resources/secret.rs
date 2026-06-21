@@ -20,6 +20,26 @@ fn generate_password(len: usize) -> String {
         .collect()
 }
 
+/// Secret key holding the PostgreSQL connection string used by the KEDA
+/// connection-based autoscaling TriggerAuthentication.
+pub const CONNECTION_STRING_KEY: &str = "connection-string";
+
+/// Build the PostgreSQL connection string for the primary service. The KEDA
+/// TriggerAuthentication for connection-based autoscaling references the
+/// `connection-string` key, so it must exist in the credentials secret or the
+/// resulting ScaledObject's PostgreSQL trigger fails to evaluate (blocking all
+/// scaling).
+pub fn build_connection_string(
+    cluster_name: &str,
+    namespace: &str,
+    superuser_password: &str,
+) -> String {
+    format!(
+        "postgresql://postgres:{}@{}-primary.{}.svc.cluster.local:5432/postgres?sslmode=require",
+        superuser_password, cluster_name, namespace
+    )
+}
+
 /// Generate the credentials Secret
 pub fn generate_credentials_secret(cluster: &PostgresCluster) -> Secret {
     let name = format!("{}-credentials", cluster.name_any());
@@ -32,10 +52,14 @@ pub fn generate_credentials_secret(cluster: &PostgresCluster) -> Secret {
     let superuser_password = generate_password(32);
     let replication_password = generate_password(32);
 
+    let namespace = ns.clone().unwrap_or_else(|| "default".to_string());
+    let connection_string = build_connection_string(&cluster_name, &namespace, &superuser_password);
+
     let string_data = BTreeMap::from([
         ("POSTGRES_PASSWORD".to_string(), superuser_password.clone()),
         ("REPLICATION_PASSWORD".to_string(), replication_password),
         ("PGPASSWORD".to_string(), superuser_password),
+        (CONNECTION_STRING_KEY.to_string(), connection_string),
     ]);
 
     Secret {

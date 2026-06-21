@@ -259,9 +259,15 @@ pub async fn run_preflight_checks(
     Ok(outcome)
 }
 
-/// Look for permanent user tables that don't have a primary key and don't
-/// have an explicit non-default replica identity (i.e. `relreplident` is
-/// `'n'` "nothing" or `'d'` "default" — the latter falls back to the PK).
+/// Look for permanent user tables that cannot replicate UPDATE/DELETE under
+/// logical replication. Two cases are unsafe:
+///
+/// - `relreplident = 'n'` ("nothing"): UPDATE/DELETE can never be replicated,
+///   **regardless of whether the table has a primary key**. Attempting them on
+///   the source produces a publisher-side error
+///   (`cannot update table ... because it does not have a replica identity`).
+/// - `relreplident = 'd'` ("default"): falls back to the primary key, so it is
+///   only unsafe when the table has no primary key.
 ///
 /// Returns `Ok(None)` if all user tables are safe to replicate.
 async fn check_replica_identity(
@@ -275,10 +281,12 @@ async fn check_replica_identity(
           AND c.relpersistence = 'p'
           AND n.nspname NOT IN ('pg_catalog', 'information_schema')
           AND n.nspname NOT LIKE 'pg_%'
-          AND c.relreplident IN ('n', 'd')
-          AND NOT EXISTS (
-              SELECT 1 FROM pg_catalog.pg_index i
-              WHERE i.indrelid = c.oid AND i.indisprimary
+          AND (
+              c.relreplident = 'n'
+              OR (c.relreplident = 'd' AND NOT EXISTS (
+                  SELECT 1 FROM pg_catalog.pg_index i
+                  WHERE i.indrelid = c.oid AND i.indisprimary
+              ))
           )
         ORDER BY 1
     ";

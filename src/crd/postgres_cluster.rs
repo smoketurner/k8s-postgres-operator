@@ -1412,6 +1412,12 @@ pub struct PostgresClusterStatus {
     /// Provides traceability for the cluster's origin/lineage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<UpgradeLineageRef>,
+
+    /// Timestamp (RFC3339) of the last full reconciliation that re-applied all
+    /// core resources. Used to periodically re-apply core resources (and repair
+    /// external drift) even when the spec generation is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_full_reconcile: Option<String>,
 }
 
 /// Connection information for connecting to the PostgreSQL cluster

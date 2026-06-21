@@ -33,12 +33,19 @@ pub fn generate_pdb(cluster: &PostgresCluster) -> PodDisruptionBudget {
 
     let labels = standard_labels(&cluster_name);
 
-    // Match all pods in the Patroni cluster (both master and replicas)
+    // Match only the PostgreSQL pods in the Patroni cluster (both master and
+    // replicas). The `component=postgresql` label excludes pgBouncer pods, which
+    // share the name/cluster labels but must not count toward the PostgreSQL
+    // availability budget (minAvailable is derived from PostgreSQL replicas only).
     let match_labels = BTreeMap::from([
         ("app.kubernetes.io/name".to_string(), cluster_name.clone()),
         (
             "postgres-operator.smoketurner.com/cluster".to_string(),
             cluster_name,
+        ),
+        (
+            "app.kubernetes.io/component".to_string(),
+            "postgresql".to_string(),
         ),
     ]);
 
