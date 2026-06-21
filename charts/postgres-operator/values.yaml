@@ -252,7 +252,6 @@ extraVolumes: []
 #     scaling:
 #       minReplicas: 3      # Minimum replicas (0 enables scale-to-zero)
 #       maxReplicas: 10     # Maximum replicas for auto-scaling
-#       idleTimeout: 30m    # Time before scaling to minReplicas
 #       metrics:
 #         cpu:
 #           targetUtilization: 70

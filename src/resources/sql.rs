@@ -342,7 +342,8 @@ pub(crate) async fn create_database(
 /// Ensure a role exists (idempotent - creates if not exists)
 ///
 /// Returns true if the role was created, false if it already existed.
-/// If the role exists, the password is updated to match.
+/// If the role exists, its password AND attributes (privileges, login,
+/// connection limit) are reconciled to match the desired spec.
 pub(crate) async fn ensure_role(
     conn: &PostgresConnection,
     role_name: &str,
@@ -352,9 +353,12 @@ pub(crate) async fn ensure_role(
     login: bool,
 ) -> SqlResult<bool> {
     if role_exists(conn, role_name).await? {
-        debug!(role = %role_name, "Role already exists, updating password");
+        debug!(role = %role_name, "Role already exists, reconciling password and attributes");
         // Update password to ensure it matches the secret
         update_role_password(conn, role_name, password).await?;
+        // Reconcile privileges, login capability, and connection limit so spec
+        // edits (e.g. revoking SUPERUSER or disabling LOGIN) take effect.
+        update_role_attributes(conn, role_name, privileges, connection_limit, login).await?;
         return Ok(false);
     }
 
@@ -368,6 +372,75 @@ pub(crate) async fn ensure_role(
     )
     .await?;
     Ok(true)
+}
+
+/// Reconcile an existing role's attributes to match the desired spec.
+///
+/// Idempotent: every supported capability flag is set explicitly (positive or
+/// negative form) so capabilities absent from `privileges` are revoked, and the
+/// connection limit is set to its desired value (-1 = unlimited when unset).
+/// `ALTER ROLE` is safe to re-run with the same desired state.
+pub(crate) async fn update_role_attributes(
+    conn: &PostgresConnection,
+    role_name: &str,
+    privileges: &[String],
+    connection_limit: Option<i32>,
+    login: bool,
+) -> SqlResult<()> {
+    let sql = build_alter_role_attributes_sql(role_name, privileges, connection_limit, login);
+    conn.batch_execute(&sql).await?;
+    Ok(())
+}
+
+/// Build the `ALTER ROLE ... WITH ...` statement that reconciles a role's
+/// capability flags, login capability, and connection limit to the desired spec.
+fn build_alter_role_attributes_sql(
+    role_name: &str,
+    privileges: &[String],
+    connection_limit: Option<i32>,
+    login: bool,
+) -> String {
+    // Capability flags PostgreSQL supports on a role, each with a positive and
+    // negative form. LOGIN is handled separately via the `login` flag below.
+    const CAPABILITIES: &[(&str, &str)] = &[
+        ("SUPERUSER", "NOSUPERUSER"),
+        ("CREATEDB", "NOCREATEDB"),
+        ("CREATEROLE", "NOCREATEROLE"),
+        ("REPLICATION", "NOREPLICATION"),
+        ("BYPASSRLS", "NOBYPASSRLS"),
+    ];
+
+    let wanted: Vec<String> = privileges.iter().map(|p| p.to_ascii_uppercase()).collect();
+    let has = |flag: &str| wanted.iter().any(|p| p == flag);
+
+    let mut clauses: Vec<String> = Vec::new();
+    for (on, off) in CAPABILITIES {
+        clauses.push(if has(on) {
+            (*on).to_string()
+        } else {
+            (*off).to_string()
+        });
+    }
+
+    // LOGIN is driven by the dedicated `login` flag (also honor it if listed
+    // among the privileges).
+    clauses.push(if login || has("LOGIN") {
+        "LOGIN".to_string()
+    } else {
+        "NOLOGIN".to_string()
+    });
+
+    // -1 means unlimited (the PostgreSQL default for a new role).
+    clauses.push(format!(
+        "CONNECTION LIMIT {}",
+        connection_limit.unwrap_or(-1)
+    ));
+
+    format!(
+        "ALTER ROLE {} WITH {}",
+        quote_identifier(role_name),
+        clauses.join(" ")
+    )
 }
 
 /// Create a role (not idempotent - will fail if role exists)
@@ -590,6 +663,44 @@ mod tests {
         // Should be different each time
         let password2 = generate_password();
         assert_ne!(password, password2);
+    }
+
+    #[test]
+    fn test_build_alter_role_attributes_grants_and_revokes() {
+        // A role with a subset of privileges + login + a connection limit.
+        let sql = build_alter_role_attributes_sql(
+            "app_user",
+            &["CREATEDB".to_string(), "LOGIN".to_string()],
+            Some(10),
+            true,
+        );
+
+        assert!(sql.starts_with("ALTER ROLE \"app_user\" WITH "));
+        // Requested capability is granted...
+        assert!(sql.contains("CREATEDB"), "sql: {sql}");
+        assert!(!sql.contains("NOCREATEDB"), "sql: {sql}");
+        // ...and unrequested ones are explicitly revoked.
+        assert!(sql.contains("NOSUPERUSER"), "sql: {sql}");
+        assert!(sql.contains("NOCREATEROLE"), "sql: {sql}");
+        assert!(sql.contains("NOREPLICATION"), "sql: {sql}");
+        assert!(sql.contains("NOBYPASSRLS"), "sql: {sql}");
+        assert!(
+            sql.contains("LOGIN") && !sql.contains("NOLOGIN"),
+            "sql: {sql}"
+        );
+        assert!(sql.contains("CONNECTION LIMIT 10"), "sql: {sql}");
+    }
+
+    #[test]
+    fn test_build_alter_role_attributes_disables_login_and_unlimited() {
+        // No privileges, login disabled, no connection limit => fully revoked,
+        // NOLOGIN, and CONNECTION LIMIT -1 (unlimited).
+        let sql = build_alter_role_attributes_sql("locked", &[], None, false);
+
+        assert!(sql.contains("NOSUPERUSER"), "sql: {sql}");
+        assert!(sql.contains("NOCREATEDB"), "sql: {sql}");
+        assert!(sql.contains("NOLOGIN"), "sql: {sql}");
+        assert!(sql.contains("CONNECTION LIMIT -1"), "sql: {sql}");
     }
 
     #[test]

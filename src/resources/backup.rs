@@ -226,28 +226,14 @@ pub fn generate_backup_env_vars(cluster: &PostgresCluster) -> Vec<EnvVar> {
 
             // Custom endpoint for S3-compatible storage
             if let Some(endpoint_url) = endpoint {
+                // Only set AWS_ENDPOINT. Spilo derives WALE_S3_ENDPOINT /
+                // WALG_S3_ENDPOINT from AWS_ENDPOINT (replacing "://" with
+                // "+path://") when WALE_S3_ENDPOINT is unset. Setting it
+                // ourselves previously defaulted missing ports to :9000, which
+                // broke HTTPS endpoints without an explicit port.
                 env_vars.push(EnvVar {
                     name: "AWS_ENDPOINT".to_string(),
                     value: Some(endpoint_url.clone()),
-                    ..Default::default()
-                });
-                env_vars.push(EnvVar {
-                    name: "WALE_S3_ENDPOINT".to_string(),
-                    value: Some(format!(
-                        "{}+path://{}:{}",
-                        if endpoint_url.starts_with("https") {
-                            "https"
-                        } else {
-                            "http"
-                        },
-                        endpoint_url
-                            .trim_start_matches("https://")
-                            .trim_start_matches("http://")
-                            .split(':')
-                            .next()
-                            .unwrap_or("localhost"),
-                        endpoint_url.split(':').nth(2).unwrap_or("9000")
-                    )),
                     ..Default::default()
                 });
             }
@@ -648,6 +634,83 @@ mod tests {
         assert_eq!(
             prefix_var.value.as_deref(),
             Some("s3://my-bucket/test-ns/test-cluster")
+        );
+    }
+
+    fn s3_backup_with_endpoint(endpoint: &str) -> BackupSpec {
+        BackupSpec {
+            schedule: "0 2 * * *".to_string(),
+            retention: RetentionPolicy {
+                count: Some(7),
+                max_age: None,
+            },
+            destination: BackupDestination::S3 {
+                bucket: "my-bucket".to_string(),
+                region: "us-east-1".to_string(),
+                endpoint: Some(endpoint.to_string()),
+                credentials_secret: "aws-creds".to_string(),
+                path: None,
+                force_path_style: true,
+            },
+            wal_archiving: None,
+            encryption: None,
+            compression: None,
+            backup_from_replica: false,
+            upload_concurrency: None,
+            download_concurrency: None,
+            enable_delta_backups: false,
+            delta_max_steps: None,
+            logical: None,
+        }
+    }
+
+    #[test]
+    fn test_https_endpoint_without_port_generates_correct_wale_endpoint() {
+        let cluster =
+            create_test_cluster(Some(s3_backup_with_endpoint("https://storage.example.com")));
+        let env_vars = generate_backup_env_vars(&cluster);
+
+        // AWS_ENDPOINT must be passed through verbatim so Spilo can derive the
+        // WAL-G endpoint itself.
+        let aws_endpoint = env_vars
+            .iter()
+            .find(|e| e.name == "AWS_ENDPOINT")
+            .expect("AWS_ENDPOINT should be present");
+        assert_eq!(
+            aws_endpoint.value.as_deref(),
+            Some("https://storage.example.com")
+        );
+
+        // We must NOT emit a WALE_S3_ENDPOINT (which previously defaulted the
+        // missing port to :9000 and broke HTTPS endpoints).
+        assert!(
+            !env_vars.iter().any(|e| e.name == "WALE_S3_ENDPOINT"),
+            "WALE_S3_ENDPOINT should not be set; got: {:?}",
+            env_vars
+                .iter()
+                .find(|e| e.name == "WALE_S3_ENDPOINT")
+                .and_then(|e| e.value.clone())
+        );
+    }
+
+    #[test]
+    fn test_http_endpoint_without_port_generates_correct_wale_endpoint() {
+        let cluster =
+            create_test_cluster(Some(s3_backup_with_endpoint("http://storage.example.com")));
+        let env_vars = generate_backup_env_vars(&cluster);
+
+        let aws_endpoint = env_vars
+            .iter()
+            .find(|e| e.name == "AWS_ENDPOINT")
+            .expect("AWS_ENDPOINT should be present");
+        assert_eq!(
+            aws_endpoint.value.as_deref(),
+            Some("http://storage.example.com")
+        );
+
+        assert!(
+            !env_vars.iter().any(|e| e.name == "WALE_S3_ENDPOINT"),
+            "WALE_S3_ENDPOINT should not be set"
         );
     }
 

@@ -285,6 +285,26 @@ impl<'a> StatusManager<'a> {
         Ok(())
     }
 
+    /// Stamp `status.lastFullReconcile` with the current time. Called at the end
+    /// of a successful full reconcile so the periodic drift-repair timer resets.
+    /// Uses a merge patch so it does not disturb other status fields.
+    pub async fn stamp_full_reconcile(&self) -> Result<()> {
+        let api: Api<PostgresCluster> = Api::namespaced(self.ctx.client.clone(), self.ns);
+        let name = self.cluster.name_any();
+        let patch = serde_json::json!({
+            "status": {
+                "lastFullReconcile": Timestamp::now().to_string(),
+            }
+        });
+        api.patch_status(
+            &name,
+            &PatchParams::apply("postgres-operator"),
+            &Patch::Merge(&patch),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Patch only the observed-replica fields without touching `phase` or
     /// `conditions`. Used when the reconciler sees the live counts have
     /// changed but the state machine has not (or has refused to) transition
@@ -433,6 +453,12 @@ impl<'a> StatusManager<'a> {
                 .as_ref()
                 .and_then(|s| s.successor.clone()),
             origin: self.cluster.status.as_ref().and_then(|s| s.origin.clone()),
+            // Preserve the drift-repair timestamp across status-only updates.
+            last_full_reconcile: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.last_full_reconcile.clone()),
         };
 
         self.update(status).await
@@ -525,6 +551,12 @@ impl<'a> StatusManager<'a> {
                 .as_ref()
                 .and_then(|s| s.successor.clone()),
             origin: self.cluster.status.as_ref().and_then(|s| s.origin.clone()),
+            // Preserve the drift-repair timestamp across status-only updates.
+            last_full_reconcile: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.last_full_reconcile.clone()),
         };
 
         self.update(status).await
@@ -628,6 +660,12 @@ impl<'a> StatusManager<'a> {
                 .as_ref()
                 .and_then(|s| s.successor.clone()),
             origin: self.cluster.status.as_ref().and_then(|s| s.origin.clone()),
+            // Preserve the drift-repair timestamp across status-only updates.
+            last_full_reconcile: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.last_full_reconcile.clone()),
         };
 
         self.update(status).await
@@ -695,6 +733,8 @@ impl<'a> StatusManager<'a> {
             // Preserve upgrade lineage (set by upgrade_reconciler)
             successor: existing_status.and_then(|s| s.successor.clone()),
             origin: existing_status.and_then(|s| s.origin.clone()),
+            // Preserve the drift-repair timestamp.
+            last_full_reconcile: existing_status.and_then(|s| s.last_full_reconcile.clone()),
         };
 
         self.update(status).await
@@ -785,6 +825,12 @@ impl<'a> StatusManager<'a> {
                 .as_ref()
                 .and_then(|s| s.successor.clone()),
             origin: self.cluster.status.as_ref().and_then(|s| s.origin.clone()),
+            // Preserve the drift-repair timestamp across status-only updates.
+            last_full_reconcile: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.last_full_reconcile.clone()),
         };
 
         self.update(status).await

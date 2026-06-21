@@ -670,11 +670,11 @@ Scale based on PostgreSQL connection count:
 ```yaml
 spec:
   scaling:
-    enabled: true
     minReplicas: 3
     maxReplicas: 15
-    connectionThreshold: 100  # Scale when connections exceed 100 per replica
-    pollingInterval: 15       # Check every 15 seconds
+    metrics:
+      connections:
+        targetPerReplica: 100  # Scale when active connections exceed 100 per replica
 ```
 
 ### Monitoring Scaling

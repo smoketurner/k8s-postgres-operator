@@ -434,6 +434,20 @@ mod secret_tests {
         assert_eq!(owner_refs.len(), 1);
         assert_eq!(owner_refs[0].kind, "PostgresCluster");
     }
+
+    #[test]
+    fn test_secret_contains_connection_string() {
+        let cluster = create_test_cluster("my-cluster", "default", 1);
+        let secret = secret::generate_credentials_secret(&cluster);
+
+        let string_data = secret.string_data.as_ref().unwrap();
+        // KEDA's connection-scaling TriggerAuthentication references this key.
+        let conn = string_data
+            .get("connection-string")
+            .expect("connection-string key must be present");
+        assert!(conn.starts_with("postgresql://postgres:"));
+        assert!(conn.contains("my-cluster-primary.default.svc.cluster.local:5432"));
+    }
 }
 
 mod pdb_tests {
@@ -495,6 +509,32 @@ mod pdb_tests {
         let owner_refs = pdb_resource.metadata.owner_references.as_ref().unwrap();
         assert_eq!(owner_refs.len(), 1);
         assert_eq!(owner_refs[0].kind, "PostgresCluster");
+    }
+
+    #[test]
+    fn test_pdb_selector_matches_only_patroni_pods() {
+        let cluster = create_test_cluster("my-cluster", "default", 3);
+        let pdb_resource = pdb::generate_pdb(&cluster);
+
+        let spec = pdb_resource.spec.as_ref().unwrap();
+        let selector = spec.selector.as_ref().unwrap();
+        let match_labels = selector.match_labels.as_ref().unwrap();
+
+        // The PDB must scope to PostgreSQL pods only so pgBouncer pods (which
+        // share the name/cluster labels but carry component=pgbouncer) do not
+        // count toward the PostgreSQL availability budget.
+        assert_eq!(
+            match_labels.get("app.kubernetes.io/component"),
+            Some(&"postgresql".to_string())
+        );
+        assert_eq!(
+            match_labels.get("app.kubernetes.io/name"),
+            Some(&"my-cluster".to_string())
+        );
+        assert_eq!(
+            match_labels.get("postgres-operator.smoketurner.com/cluster"),
+            Some(&"my-cluster".to_string())
+        );
     }
 }
 
