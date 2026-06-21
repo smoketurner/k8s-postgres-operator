@@ -169,6 +169,65 @@ async fn check_missing_resources(
 /// After this duration, the cluster will transition to Failed state
 const CREATING_TIMEOUT_SECS: i64 = 600;
 
+/// Backfill the `connection-string` key into an existing credentials Secret.
+///
+/// The credentials Secret is only created when absent (its passwords are random
+/// and must not be regenerated on every reconcile), so clusters created before
+/// the `connection-string` key existed never receive it — breaking KEDA
+/// connection-based scaling. This adds the key in place, derived from the
+/// already-stored superuser password, without touching the passwords. No-op when
+/// the key is already present or the password cannot be read.
+async fn backfill_connection_string(
+    ctx: &Context,
+    ns: &str,
+    cluster_name: &str,
+    secret_name: &str,
+    existing: &Secret,
+) -> Result<()> {
+    // Server-side, stringData is merged into data, so the key shows up in `data`.
+    let already_present = existing
+        .data
+        .as_ref()
+        .is_some_and(|d| d.contains_key(secret::CONNECTION_STRING_KEY))
+        || existing
+            .string_data
+            .as_ref()
+            .is_some_and(|d| d.contains_key(secret::CONNECTION_STRING_KEY));
+    if already_present {
+        return Ok(());
+    }
+
+    // Recover the superuser password from the existing secret (kube decodes
+    // `data` values to raw bytes).
+    let Some(password) = existing
+        .data
+        .as_ref()
+        .and_then(|d| d.get("POSTGRES_PASSWORD"))
+        .and_then(|b| String::from_utf8(b.0.clone()).ok())
+    else {
+        warn!(
+            "Cannot backfill connection-string for secret {}: POSTGRES_PASSWORD missing or invalid",
+            secret_name
+        );
+        return Ok(());
+    };
+
+    let connection_string = secret::build_connection_string(cluster_name, ns, &password);
+    let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
+    let patch = serde_json::json!({
+        "stringData": { secret::CONNECTION_STRING_KEY: connection_string }
+    });
+    secrets_api
+        .patch(
+            secret_name,
+            &PatchParams::apply("postgres-operator"),
+            &Patch::Merge(&patch),
+        )
+        .await?;
+    debug!("Backfilled connection-string into secret {}", secret_name);
+    Ok(())
+}
+
 /// How often a full reconciliation is forced even when the spec generation is
 /// unchanged, so externally-modified core resources (StatefulSet, Services,
 /// ConfigMap, RBAC, PDB, NetworkPolicy) are re-applied via server-side apply and
@@ -915,9 +974,17 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
     // Ensure Secret exists (credentials)
     let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
     let secret_name = format!("{}-credentials", name);
-    if secrets_api.get_opt(&secret_name).await?.is_none() {
-        let secret = secret::generate_credentials_secret(cluster);
-        apply_resource(ctx, ns, &secret).await?;
+    match secrets_api.get_opt(&secret_name).await? {
+        None => {
+            let secret = secret::generate_credentials_secret(cluster);
+            apply_resource(ctx, ns, &secret).await?;
+        }
+        Some(existing) => {
+            // Backfill the connection-string key for secrets created before it
+            // was added, without regenerating the existing passwords (which are
+            // random and only set on creation).
+            backfill_connection_string(ctx, ns, &name, &secret_name, &existing).await?;
+        }
     }
 
     // Ensure Patroni ConfigMap exists

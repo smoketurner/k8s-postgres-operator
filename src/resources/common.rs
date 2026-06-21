@@ -80,6 +80,7 @@ pub fn cluster_labels(cluster: &PostgresCluster) -> BTreeMap<String, String> {
     const PROTECTED_LABELS: &[&str] = &[
         "postgres-operator.smoketurner.com/cluster", // Cluster identifier
         "app.kubernetes.io/name",                    // Used in Service selectors
+        "app.kubernetes.io/component", // Used in PDB selector (postgresql vs pgbouncer)
     ];
 
     // Merge user-defined labels from the cluster spec, skipping protected labels.
@@ -300,8 +301,13 @@ mod tests {
         use kube::core::ObjectMeta;
 
         let mut user_labels = BTreeMap::new();
-        // Try to override the app name used by Service selectors
+        // Try to override the app name used by Service selectors and the
+        // component label used by the PDB selector.
         user_labels.insert("app.kubernetes.io/name".to_string(), "hacked".to_string());
+        user_labels.insert(
+            "app.kubernetes.io/component".to_string(),
+            "hacked".to_string(),
+        );
 
         let cluster = PostgresCluster {
             metadata: ObjectMeta {
@@ -342,6 +348,11 @@ mod tests {
         assert_eq!(
             labels.get("app.kubernetes.io/name"),
             Some(&"real-cluster".to_string())
+        );
+        // Nor the component label (PDB selector targets component=postgresql)
+        assert_eq!(
+            labels.get("app.kubernetes.io/component"),
+            Some(&"postgresql".to_string())
         );
     }
 

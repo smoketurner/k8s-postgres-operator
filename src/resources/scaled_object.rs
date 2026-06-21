@@ -314,12 +314,13 @@ pub fn generate_scaled_object(cluster: &PostgresCluster) -> Option<DynamicObject
             restore_to_original_replica_count: Some(true),
         }),
         triggers,
-        // Degrade gracefully to the base replica count if a trigger (e.g. the
-        // PostgreSQL connection scaler) cannot be evaluated, instead of leaving
-        // the HPA inactive.
+        // Degrade gracefully to the configured minimum replica count if a
+        // trigger (e.g. the PostgreSQL connection scaler) cannot be evaluated,
+        // instead of leaving the HPA inactive. Honor scale-to-zero
+        // (minReplicas: 0) rather than forcing a floor of 1.
         fallback: Some(FallbackConfig {
             failure_threshold: 3,
-            replicas: min_replicas.max(1),
+            replicas: min_replicas.max(0),
         }),
     };
 
