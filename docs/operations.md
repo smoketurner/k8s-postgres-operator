@@ -656,11 +656,11 @@ Scale replicas based on CPU utilization:
 spec:
   replicas: 3  # Initial/minimum replicas
   scaling:
-    enabled: true
     minReplicas: 3
     maxReplicas: 10
-    cpuTargetUtilization: 70
-    scaleDownStabilization: 600  # Wait 10 min before scaling down
+    metrics:
+      cpu:
+        targetUtilization: 70  # Scale when CPU exceeds 70%
 ```
 
 ### Connection-Based Scaling

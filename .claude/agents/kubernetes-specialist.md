@@ -306,7 +306,7 @@ ValidatingAdmissionWebhooks (`src/webhooks/`):
 - Server implementation at `src/webhooks/server.rs`
 
 KEDA auto-scaling integration (`src/resources/scaled_object.rs`):
-- Generates KEDA ScaledObjects when scaling spec enabled
+- Generates KEDA ScaledObjects when maxReplicas > minReplicas
 - Supports CPU-based and connection-based triggers
 - Automatic scale-down stabilization
 - Only creates ScaledObjects for clusters with >= 2 replicas

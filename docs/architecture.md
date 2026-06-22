@@ -309,6 +309,7 @@ spec:
   selector:
     matchLabels:
       postgres-operator.smoketurner.com/cluster: <name>
+      app.kubernetes.io/component: postgresql
 ```
 
 ## Leader Election

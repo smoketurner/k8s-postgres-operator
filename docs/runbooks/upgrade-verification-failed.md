@@ -151,12 +151,16 @@ SELECT n.nspname, c.relname
 FROM pg_class c
 JOIN pg_namespace n ON c.relnamespace = n.oid
 WHERE c.relkind = 'r'
+  AND c.relpersistence = 'p'
   AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-  AND NOT EXISTS (
-    SELECT 1 FROM pg_index i
-    WHERE i.indrelid = c.oid AND i.indisprimary
-  )
-  AND c.relreplident = 'd';
+  AND n.nspname NOT LIKE 'pg_%'
+  AND (
+    c.relreplident = 'n'
+    OR (c.relreplident = 'd' AND NOT EXISTS (
+      SELECT 1 FROM pg_catalog.pg_index i
+      WHERE i.indrelid = c.oid AND i.indisprimary
+    ))
+  );
 "
 ```
 

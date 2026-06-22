@@ -498,6 +498,7 @@ The status subresource is read-only and managed by the operator.
 | `maxReplicationLagBytes` | integer | Maximum lag across all replicas (bytes) |
 | `replicasLagging` | boolean | Whether any replica exceeds lag threshold |
 | `connectionInfo` | [ConnectionInfo](#connectioninfo) | Connection endpoints for applications |
+| `lastFullReconcile` | string | Timestamp of last full reconciliation (RFC3339) |
 
 ### Phase Values
 
@@ -744,10 +745,10 @@ The operator applies these labels to all managed resources:
 
 | Label | Description |
 |-------|-------------|
-| `app.kubernetes.io/name` | Cluster name |
-| `app.kubernetes.io/component` | Component name (postgresql, pgbouncer) |
+| `app.kubernetes.io/name` | Cluster name (protected) |
+| `app.kubernetes.io/component` | Component name (protected; postgresql, pgbouncer) |
 | `app.kubernetes.io/managed-by` | "postgres-operator" |
-| `postgres-operator.smoketurner.com/cluster` | Cluster name (protected, cannot be overridden) |
+| `postgres-operator.smoketurner.com/cluster` | Cluster name (protected) |
 
 ### User-Defined Labels
 
@@ -762,7 +763,10 @@ spec:
     environment: production
 ```
 
-User-defined labels are merged with standard labels on all managed resources. The `postgres-operator.smoketurner.com/cluster` label cannot be overridden.
+User-defined labels are merged with standard labels on all managed resources. The following labels are protected and cannot be overridden:
+- `postgres-operator.smoketurner.com/cluster`
+- `app.kubernetes.io/name`
+- `app.kubernetes.io/component`
 
 ### Patroni Labels
 
