@@ -95,12 +95,6 @@ pub enum DatabaseError {
     #[error("Referenced cluster not found: {0}/{1}")]
     ClusterNotFound(String, String),
 
-    #[error("Cluster not ready: {0}/{1} is in phase {2}")]
-    ClusterNotReady(String, String, String),
-
-    #[error("Missing cluster name in metadata")]
-    MissingClusterName,
-
     #[error("Missing namespace in metadata")]
     MissingNamespace,
 
