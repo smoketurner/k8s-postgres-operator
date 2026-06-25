@@ -29,14 +29,20 @@ pub const CONNECTION_STRING_KEY: &str = "connection-string";
 /// `connection-string` key, so it must exist in the credentials secret or the
 /// resulting ScaledObject's PostgreSQL trigger fails to evaluate (blocking all
 /// scaling).
+///
+/// `tls_enabled` must reflect `spec.tls.enabled`: when TLS is disabled the
+/// operator does not configure PostgreSQL for SSL, so a `sslmode=require`
+/// client (libpq/KEDA) would be rejected and scaling would silently fail.
 pub fn build_connection_string(
     cluster_name: &str,
     namespace: &str,
     superuser_password: &str,
+    tls_enabled: bool,
 ) -> String {
+    let sslmode = if tls_enabled { "require" } else { "disable" };
     format!(
-        "postgresql://postgres:{}@{}-primary.{}.svc.cluster.local:5432/postgres?sslmode=require",
-        superuser_password, cluster_name, namespace
+        "postgresql://postgres:{}@{}-primary.{}.svc.cluster.local:5432/postgres?sslmode={}",
+        superuser_password, cluster_name, namespace, sslmode
     )
 }
 
@@ -53,7 +59,12 @@ pub fn generate_credentials_secret(cluster: &PostgresCluster) -> Secret {
     let replication_password = generate_password(32);
 
     let namespace = ns.clone().unwrap_or_else(|| "default".to_string());
-    let connection_string = build_connection_string(&cluster_name, &namespace, &superuser_password);
+    let connection_string = build_connection_string(
+        &cluster_name,
+        &namespace,
+        &superuser_password,
+        cluster.spec.tls.enabled,
+    );
 
     let string_data = BTreeMap::from([
         ("POSTGRES_PASSWORD".to_string(), superuser_password.clone()),
