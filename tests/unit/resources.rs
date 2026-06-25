@@ -437,7 +437,8 @@ mod secret_tests {
 
     #[test]
     fn test_secret_contains_connection_string() {
-        let cluster = create_test_cluster("my-cluster", "default", 1);
+        // TLS enabled => SSL must be required.
+        let cluster = create_test_cluster_with_tls("my-cluster", "default", 1);
         let secret = secret::generate_credentials_secret(&cluster);
 
         let string_data = secret.string_data.as_ref().unwrap();
@@ -447,6 +448,25 @@ mod secret_tests {
             .expect("connection-string key must be present");
         assert!(conn.starts_with("postgresql://postgres:"));
         assert!(conn.contains("my-cluster-primary.default.svc.cluster.local:5432"));
+        assert!(conn.contains("sslmode=require"), "conn: {conn}");
+    }
+
+    #[test]
+    fn test_connection_string_sslmode_follows_tls_disabled() {
+        // When TLS is disabled the server is not configured for SSL, so the
+        // connection string must use sslmode=disable or KEDA/libpq cannot connect.
+        // create_test_cluster builds with TLS disabled.
+        let cluster = create_test_cluster("my-cluster", "default", 1);
+        let secret = secret::generate_credentials_secret(&cluster);
+
+        let conn = secret
+            .string_data
+            .as_ref()
+            .unwrap()
+            .get("connection-string")
+            .expect("connection-string key must be present");
+        assert!(conn.contains("sslmode=disable"), "conn: {conn}");
+        assert!(!conn.contains("sslmode=require"), "conn: {conn}");
     }
 }
 

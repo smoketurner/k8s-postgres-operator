@@ -18,33 +18,17 @@ pub enum Error {
     #[error("Missing object key: {0}")]
     MissingObjectKey(&'static str),
 
-    #[error("Invalid configuration: {0}")]
-    InvalidConfig(String),
-
-    #[error("Resource not found: {0}")]
-    NotFound(String),
-
-    #[error("Finalizer error: {0}")]
-    FinalizerError(String),
-
     #[error("Validation error: {0}")]
     ValidationError(String),
 
     #[error("Backup execution failed: {0}")]
     BackupExecFailed(String),
-
-    #[error("Transient error (will retry): {0}")]
-    TransientError(String),
-
-    #[error("Permanent error (will not retry): {0}")]
-    PermanentError(String),
 }
 
 impl Error {
     /// Check if this error indicates a resource was not found
     pub fn is_not_found(&self) -> bool {
         match self {
-            Error::NotFound(_) => true,
             Error::KubeError(e) => matches!(e, kube::Error::Api(api_err) if api_err.code == 404),
             _ => false,
         }
@@ -70,20 +54,13 @@ impl Error {
                     _ => true,
                 }
             }
-            // Transient errors are explicitly retryable
-            Error::TransientError(_) => true,
-            // Permanent errors should not be retried
-            Error::PermanentError(_) => false,
             // Configuration and validation errors are permanent
-            Error::InvalidConfig(_) => false,
             Error::ValidationError(_) => false,
             // Backup execution failures are retryable
             Error::BackupExecFailed(_) => true,
             // Other errors default to retryable
             Error::SerializationError(_) => false,
             Error::MissingObjectKey(_) => false,
-            Error::NotFound(_) => true, // Resource might appear later
-            Error::FinalizerError(_) => true,
         }
     }
 }

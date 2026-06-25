@@ -183,6 +183,7 @@ async fn backfill_connection_string(
     cluster_name: &str,
     secret_name: &str,
     existing: &Secret,
+    tls_enabled: bool,
 ) -> Result<()> {
     // Server-side, stringData is merged into data, so the key shows up in `data`.
     let already_present = existing
@@ -212,7 +213,8 @@ async fn backfill_connection_string(
         return Ok(());
     };
 
-    let connection_string = secret::build_connection_string(cluster_name, ns, &password);
+    let connection_string =
+        secret::build_connection_string(cluster_name, ns, &password, tls_enabled);
     let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
     let patch = serde_json::json!({
         "stringData": { secret::CONNECTION_STRING_KEY: connection_string }
@@ -983,7 +985,15 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
             // Backfill the connection-string key for secrets created before it
             // was added, without regenerating the existing passwords (which are
             // random and only set on creation).
-            backfill_connection_string(ctx, ns, &name, &secret_name, &existing).await?;
+            backfill_connection_string(
+                ctx,
+                ns,
+                &name,
+                &secret_name,
+                &existing,
+                cluster.spec.tls.enabled,
+            )
+            .await?;
         }
     }
 

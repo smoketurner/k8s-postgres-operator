@@ -2,8 +2,7 @@
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use postgres_operator::controller::cluster_status::{
-    ConditionBuilder, condition_status, condition_types, get_replica_pod_names, ready_summary,
-    spec_changed,
+    ConditionBuilder, condition_status, condition_types, ready_summary, spec_changed,
 };
 use postgres_operator::crd::{
     ClusterPhase, Condition, PostgresCluster, PostgresClusterSpec, PostgresClusterStatus,
@@ -187,7 +186,6 @@ mod condition_builder_tests {
         assert_eq!(condition_types::PROGRESSING, "Progressing");
         assert_eq!(condition_types::DEGRADED, "Degraded");
         assert_eq!(condition_types::CONFIG_VALID, "ConfigurationValid");
-        assert_eq!(condition_types::REPLICAS_READY, "ReplicasReady");
     }
 
     #[test]
@@ -267,35 +265,6 @@ mod spec_changed_tests {
         let cluster = create_test_cluster_with_status("test", 6, Some(status));
         // Generation increased, spec changed
         assert!(spec_changed(&cluster));
-    }
-}
-
-mod get_replica_pod_names_tests {
-    use super::*;
-
-    #[test]
-    fn test_single_replica() {
-        let names = get_replica_pod_names("my-cluster", 1);
-        assert_eq!(names, vec!["my-cluster-0"]);
-    }
-
-    #[test]
-    fn test_three_replicas() {
-        let names = get_replica_pod_names("pg-test", 3);
-        assert_eq!(names, vec!["pg-test-0", "pg-test-1", "pg-test-2"]);
-    }
-
-    #[test]
-    fn test_zero_replicas() {
-        let names = get_replica_pod_names("empty", 0);
-        assert!(names.is_empty());
-    }
-
-    #[test]
-    fn test_many_replicas() {
-        let names = get_replica_pod_names("large", 5);
-        assert_eq!(names.len(), 5);
-        assert_eq!(names[4], "large-4");
     }
 }
 

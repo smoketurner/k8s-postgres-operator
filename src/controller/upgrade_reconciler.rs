@@ -60,14 +60,6 @@ pub const CUTOVER_ANNOTATION: &str = "postgres-operator.smoketurner.com/cutover"
 /// Annotation for triggering rollback
 pub const ROLLBACK_ANNOTATION: &str = "postgres-operator.smoketurner.com/rollback";
 
-/// Default replication lag threshold in bytes (0 for zero lag)
-#[allow(dead_code)]
-const DEFAULT_LAG_THRESHOLD_BYTES: i64 = 0;
-
-/// Default row count tolerance for verification
-#[allow(dead_code)]
-const DEFAULT_ROW_COUNT_TOLERANCE: i64 = 0;
-
 /// Context for the upgrade reconciler
 pub struct UpgradeContext {
     pub client: Client,
@@ -1128,6 +1120,24 @@ async fn setup_replication(
 
     // Connect to target cluster and create subscription
     let target_conn = PostgresConnection::connect_primary(&ctx.client, ns, &target_name).await?;
+
+    // The DDL audit infrastructure was installed on the source before copy_schema
+    // (to catch DDL during the dump window), so pg_dump captured the audit table,
+    // function, and event trigger into the target. They must only live on the
+    // source for the upgrade window — drop them from the target so they don't
+    // accumulate spurious records or, if later dropped, abort target DDL via the
+    // dangling event trigger. Best-effort: never fail the upgrade on cleanup.
+    if let Err(e) = ddl_audit::uninstall_ddl_audit(&target_conn).await {
+        warn!(
+            "Failed to remove copied DDL audit objects from target {}/{}: {}; \
+             you may need to manually `DROP EVENT TRIGGER {} CASCADE`",
+            ns,
+            target_name,
+            e,
+            ddl_audit::AUDIT_TRIGGER
+        );
+    }
+
     setup_subscription_with_consistent_snapshot_retry(
         upgrade,
         ctx,

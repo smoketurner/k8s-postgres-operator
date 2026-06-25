@@ -25,8 +25,6 @@ pub mod condition_types {
     pub const DEGRADED: &str = "Degraded";
     /// Cluster configuration is valid
     pub const CONFIG_VALID: &str = "ConfigurationValid";
-    /// All replicas are synchronized
-    pub const REPLICAS_READY: &str = "ReplicasReady";
     /// Resource resize is in progress (Kubernetes 1.35+, KEP-1287)
     pub const RESOURCE_RESIZE_IN_PROGRESS: &str = "ResourceResizeInProgress";
     /// All pod specs have been applied by kubelet (Kubernetes 1.35+, KEP-5067)
@@ -956,13 +954,6 @@ pub fn spec_changed(cluster: &PostgresCluster) -> bool {
         (Some(_), None) => true, // Never observed, needs reconciliation
         _ => true,               // No generation, always reconcile
     }
-}
-
-/// Get the list of replica pod names from a StatefulSet
-pub fn get_replica_pod_names(sts_name: &str, replica_count: i32) -> Vec<String> {
-    (0..replica_count)
-        .map(|i| format!("{}-{}", sts_name, i))
-        .collect()
 }
 
 /// Generate connection info for a PostgresCluster
