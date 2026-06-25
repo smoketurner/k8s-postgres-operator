@@ -60,14 +60,6 @@ pub const CUTOVER_ANNOTATION: &str = "postgres-operator.smoketurner.com/cutover"
 /// Annotation for triggering rollback
 pub const ROLLBACK_ANNOTATION: &str = "postgres-operator.smoketurner.com/rollback";
 
-/// Default replication lag threshold in bytes (0 for zero lag)
-#[allow(dead_code)]
-const DEFAULT_LAG_THRESHOLD_BYTES: i64 = 0;
-
-/// Default row count tolerance for verification
-#[allow(dead_code)]
-const DEFAULT_ROW_COUNT_TOLERANCE: i64 = 0;
-
 /// Context for the upgrade reconciler
 pub struct UpgradeContext {
     pub client: Client,
