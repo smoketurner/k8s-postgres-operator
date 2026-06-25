@@ -433,31 +433,6 @@ impl PostgresConnection {
     }
 }
 
-/// Information about a PostgreSQL connection
-#[derive(Debug, Clone)]
-pub struct ConnectionInfo {
-    /// Full version string (e.g., "PostgreSQL 17.2 on x86_64-pc-linux-gnu")
-    pub pg_version: String,
-    /// Whether the connection is using TLS
-    pub ssl_enabled: bool,
-    /// TLS version if SSL is enabled (e.g., "TLSv1.3")
-    pub ssl_version: Option<String>,
-    /// Whether this is a replica (in recovery mode)
-    pub is_replica: bool,
-    /// Replication lag in seconds (only set for replicas)
-    pub replication_lag_secs: Option<f64>,
-}
-
-impl ConnectionInfo {
-    /// Extract major version number (e.g., 17 from "PostgreSQL 17.2 ...")
-    pub fn major_version(&self) -> Option<u8> {
-        self.pg_version
-            .strip_prefix("PostgreSQL ")
-            .and_then(|v| v.split('.').next())
-            .and_then(|v| v.parse().ok())
-    }
-}
-
 // =============================================================================
 // TLS Configuration
 // =============================================================================
