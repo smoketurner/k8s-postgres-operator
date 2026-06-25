@@ -66,24 +66,8 @@ struct WalGBackup {
     /// Backup time in RFC3339 format
     time: String,
 
-    /// Backup method (wal-g or other)
-    #[allow(dead_code)]
-    wal_file_name: Option<String>,
-
-    /// Start LSN
-    #[allow(dead_code)]
-    start_lsn: Option<u64>,
-
-    /// Finish LSN
-    #[allow(dead_code)]
-    finish_lsn: Option<u64>,
-
     /// Compressed size in bytes
     compressed_size: Option<i64>,
-
-    /// Uncompressed size in bytes
-    #[allow(dead_code)]
-    uncompressed_size: Option<i64>,
 }
 
 /// pg_stat_archiver output (from PostgreSQL)
