@@ -68,12 +68,6 @@ impl<'a> ValidationContext<'a> {
         }
     }
 
-    /// Check if this is a CREATE operation (no old object)
-    #[allow(dead_code)]
-    pub fn is_create(&self) -> bool {
-        self.old_cluster.is_none()
-    }
-
     /// Check if namespace is marked as production
     pub fn is_production_namespace(&self) -> bool {
         self.namespace_labels
