@@ -19,7 +19,6 @@ use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::metrics::histogram::{Histogram, exponential_buckets};
 use prometheus_client::registry::Registry;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
@@ -214,8 +213,6 @@ pub struct HealthState {
     pub ready: RwLock<bool>,
     /// Metrics registry
     pub metrics: Metrics,
-    /// Last successful reconcile timestamp
-    pub last_reconcile: AtomicU64,
 }
 
 impl Default for HealthState {
@@ -229,7 +226,6 @@ impl HealthState {
         Self {
             ready: RwLock::new(false),
             metrics: Metrics::new(),
-            last_reconcile: AtomicU64::new(0),
         }
     }
 
