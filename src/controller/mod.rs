@@ -41,6 +41,4 @@ pub use cluster_validation::{
     validate_version_upgrade,
 };
 // Status types used by unit tests
-pub use cluster_status::{
-    ConditionBuilder, condition_status, condition_types, get_replica_pod_names, spec_changed,
-};
+pub use cluster_status::{ConditionBuilder, condition_status, condition_types, spec_changed};
