@@ -601,11 +601,6 @@ fn escape_sql_string(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-/// Public version of escape_sql_string for use in other modules
-pub fn escape_sql_string_pub(s: &str) -> String {
-    escape_sql_string(s)
-}
-
 /// Validate that a name is safe for use as a PostgreSQL identifier
 ///
 /// Returns true if the name matches the pattern: starts with letter or underscore,
@@ -663,6 +658,12 @@ mod tests {
             escape_sql_string("multiple'single'quotes"),
             "multiple''single''quotes"
         );
+        assert_eq!(escape_sql_string(""), "");
+        assert_eq!(escape_sql_string("'quoted'"), "''quoted''");
+        assert_eq!(escape_sql_string("café"), "café");
+        assert_eq!(escape_sql_string("日本語"), "日本語");
+        // Backslashes are not escaped (standard_conforming_strings=on).
+        assert_eq!(escape_sql_string("path\\to\\file"), "path\\to\\file");
     }
 
     #[test]
@@ -773,5 +774,30 @@ mod tests {
             "''; DROP TABLE users;--"
         );
         assert_eq!(quote_identifier("test\"injection"), "\"test\"\"injection\"");
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::string_slice
+)]
+mod escape_sql_string_proptests {
+    use super::escape_sql_string;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Escaping never panics and doubles exactly the single quotes in any input.
+        #[test]
+        fn doubles_every_single_quote(input in "['a-zA-Z0-9 ;-]{0,40}") {
+            let escaped = escape_sql_string(&input);
+            prop_assert_eq!(
+                escaped.matches('\'').count(),
+                input.matches('\'').count() * 2,
+            );
+        }
     }
 }
