@@ -36,17 +36,9 @@ pub enum ReplicationError {
     #[error("PostgreSQL client error: {0}")]
     PostgresClient(#[from] PostgresClientError),
 
-    /// Publication not found
-    #[error("Publication not found: {0}")]
-    PublicationNotFound(String),
-
     /// Subscription not found
     #[error("Subscription not found: {0}")]
     SubscriptionNotFound(String),
-
-    /// Subscription not ready
-    #[error("Subscription not ready: {name}, state: {state}")]
-    SubscriptionNotReady { name: String, state: String },
 
     /// Invalid LSN format
     #[error("Invalid LSN format: {0}")]
@@ -55,10 +47,6 @@ pub enum ReplicationError {
     /// Replication slot not found
     #[error("Replication slot not found: {0}")]
     ReplicationSlotNotFound(String),
-
-    /// Parse error
-    #[error("Failed to parse value: {0}")]
-    ParseError(String),
 }
 
 /// Result type for replication operations
