@@ -592,11 +592,6 @@ fn escape_sql_string(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-/// Public version of escape_sql_string for use in other modules
-pub fn escape_sql_string_pub(s: &str) -> String {
-    escape_sql_string(s)
-}
-
 /// Validate that a name is safe for use as a PostgreSQL identifier
 ///
 /// Returns true if the name matches the pattern: starts with letter or underscore,

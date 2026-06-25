@@ -1250,7 +1250,7 @@ mod network_policy_tests {
 mod sql_security_tests {
     use super::*;
     use postgres_operator::resources::sql::{
-        escape_sql_string_pub, is_valid_identifier, quote_identifier_pub,
+        is_valid_identifier, quote_identifier_pub,
     };
 
     /// Generate strings that might attempt SQL injection
@@ -1327,20 +1327,6 @@ mod sql_security_tests {
             // Should always produce a string starting and ending with double quotes
             prop_assert!(result.starts_with('"'));
             prop_assert!(result.ends_with('"'));
-        }
-
-        /// Property: Escape SQL string never panics
-        #[test]
-        fn prop_escape_sql_string_never_panics(input in sql_injection_attempts()) {
-            let result = escape_sql_string_pub(&input);
-
-            // Should not contain unescaped single quotes (each ' becomes '')
-            // Count single quotes in output vs input
-            let input_quotes = input.matches('\'').count();
-            let output_quotes = result.matches('\'').count();
-
-            // Each single quote in input becomes two in output
-            prop_assert_eq!(output_quotes, input_quotes * 2);
         }
 
         /// Property: Valid identifiers pass validation

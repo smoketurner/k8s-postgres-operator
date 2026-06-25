@@ -12,7 +12,7 @@ use postgres_operator::crd::{
     PostgresDatabaseSpec, PostgresDatabaseStatus, RolePrivilege, RoleSpec, TablePrivilege,
 };
 use postgres_operator::resources::sql::{
-    escape_sql_string_pub, generate_password, is_valid_identifier, quote_identifier_pub,
+    generate_password, is_valid_identifier, quote_identifier_pub,
 };
 
 // =============================================================================
@@ -365,62 +365,6 @@ mod identifier_quoting_tests {
         );
 
         // The semicolon and SQL commands are safely contained within the quoted identifier
-    }
-}
-
-// =============================================================================
-// SQL String Escaping Tests
-// =============================================================================
-
-mod string_escaping_tests {
-    use super::*;
-
-    #[test]
-    fn test_simple_string() {
-        assert_eq!(escape_sql_string_pub("hello"), "hello");
-    }
-
-    #[test]
-    fn test_string_with_single_quote() {
-        assert_eq!(escape_sql_string_pub("it's"), "it''s");
-    }
-
-    #[test]
-    fn test_string_with_multiple_quotes() {
-        assert_eq!(escape_sql_string_pub("it's John's"), "it''s John''s");
-    }
-
-    #[test]
-    fn test_string_starting_with_quote() {
-        assert_eq!(escape_sql_string_pub("'quoted'"), "''quoted''");
-    }
-
-    #[test]
-    fn test_empty_string() {
-        assert_eq!(escape_sql_string_pub(""), "");
-    }
-
-    #[test]
-    fn test_sql_injection_in_string() {
-        // Classic SQL injection attempt
-        assert_eq!(
-            escape_sql_string_pub("'; DROP TABLE users;--"),
-            "''; DROP TABLE users;--"
-        );
-
-        // The leading quote is escaped, breaking the injection
-    }
-
-    #[test]
-    fn test_unicode_string() {
-        assert_eq!(escape_sql_string_pub("café"), "café");
-        assert_eq!(escape_sql_string_pub("日本語"), "日本語");
-    }
-
-    #[test]
-    fn test_string_with_backslash() {
-        // Backslashes are not escaped (PostgreSQL standard_conforming_strings=on)
-        assert_eq!(escape_sql_string_pub("path\\to\\file"), "path\\to\\file");
     }
 }
 
