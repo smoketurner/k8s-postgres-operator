@@ -1249,9 +1249,7 @@ mod network_policy_tests {
 
 mod sql_security_tests {
     use super::*;
-    use postgres_operator::resources::sql::{
-        is_valid_identifier, quote_identifier_pub,
-    };
+    use postgres_operator::resources::sql::{is_valid_identifier, quote_identifier_pub};
 
     /// Generate strings that might attempt SQL injection
     fn sql_injection_attempts() -> impl Strategy<Value = String> {
