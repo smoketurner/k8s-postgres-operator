@@ -9,7 +9,7 @@
 //! Requirements:
 //! - KEDA must be installed in the cluster
 //! - The cluster must have replicas >= 2 (production mode)
-//! - scaling.readers.enabled must be true
+//! - maxReplicas > minReplicas (scaling is auto-enabled when this condition is met)
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, ApiResource, DynamicObject, Patch, PatchParams};
