@@ -1128,6 +1128,24 @@ async fn setup_replication(
 
     // Connect to target cluster and create subscription
     let target_conn = PostgresConnection::connect_primary(&ctx.client, ns, &target_name).await?;
+
+    // The DDL audit infrastructure was installed on the source before copy_schema
+    // (to catch DDL during the dump window), so pg_dump captured the audit table,
+    // function, and event trigger into the target. They must only live on the
+    // source for the upgrade window — drop them from the target so they don't
+    // accumulate spurious records or, if later dropped, abort target DDL via the
+    // dangling event trigger. Best-effort: never fail the upgrade on cleanup.
+    if let Err(e) = ddl_audit::uninstall_ddl_audit(&target_conn).await {
+        warn!(
+            "Failed to remove copied DDL audit objects from target {}/{}: {}; \
+             you may need to manually `DROP EVENT TRIGGER {} CASCADE`",
+            ns,
+            target_name,
+            e,
+            ddl_audit::AUDIT_TRIGGER
+        );
+    }
+
     setup_subscription_with_consistent_snapshot_retry(
         upgrade,
         ctx,

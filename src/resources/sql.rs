@@ -392,6 +392,15 @@ pub(crate) async fn update_role_attributes(
     Ok(())
 }
 
+/// Whether a role should have the LOGIN attribute. A role can log in when the
+/// dedicated `login` flag is set, or when `LOGIN` is listed among its
+/// privileges. Shared by `create_role` and `build_alter_role_attributes_sql`
+/// so the CREATE and ALTER paths interpret the same spec identically and
+/// `ensure_role` stays idempotent.
+fn role_wants_login(login: bool, privileges: &[String]) -> bool {
+    login || privileges.iter().any(|p| p.eq_ignore_ascii_case("LOGIN"))
+}
+
 /// Build the `ALTER ROLE ... WITH ...` statement that reconciles a role's
 /// capability flags, login capability, and connection limit to the desired spec.
 fn build_alter_role_attributes_sql(
@@ -423,8 +432,8 @@ fn build_alter_role_attributes_sql(
     }
 
     // LOGIN is driven by the dedicated `login` flag (also honor it if listed
-    // among the privileges).
-    clauses.push(if login || has("LOGIN") {
+    // among the privileges). Shared with `create_role` so both paths agree.
+    clauses.push(if role_wants_login(login, privileges) {
         "LOGIN".to_string()
     } else {
         "NOLOGIN".to_string()
@@ -463,7 +472,7 @@ pub(crate) async fn create_role(
         escape_sql_string(password)
     );
 
-    if login {
+    if role_wants_login(login, privileges) {
         sql.push_str(" LOGIN");
     }
 
@@ -701,6 +710,33 @@ mod tests {
         assert!(sql.contains("NOCREATEDB"), "sql: {sql}");
         assert!(sql.contains("NOLOGIN"), "sql: {sql}");
         assert!(sql.contains("CONNECTION LIMIT -1"), "sql: {sql}");
+    }
+
+    #[test]
+    fn test_role_wants_login() {
+        // The dedicated flag enables LOGIN regardless of privileges.
+        assert!(role_wants_login(true, &[]));
+        // LOGIN listed among privileges enables LOGIN even when the flag is off.
+        assert!(role_wants_login(false, &["LOGIN".to_string()]));
+        assert!(role_wants_login(false, &["login".to_string()]));
+        assert!(role_wants_login(
+            false,
+            &["CREATEDB".to_string(), "Login".to_string()]
+        ));
+        // Neither source asks for LOGIN => NOLOGIN.
+        assert!(!role_wants_login(false, &[]));
+        assert!(!role_wants_login(false, &["CREATEDB".to_string()]));
+    }
+
+    #[test]
+    fn test_alter_login_from_privileges_only() {
+        // `login: false` but `LOGIN` in privileges must still yield LOGIN, so the
+        // ALTER path matches what CREATE produces for the same spec (idempotency).
+        let sql = build_alter_role_attributes_sql("app_user", &["LOGIN".to_string()], None, false);
+        assert!(
+            sql.contains("LOGIN") && !sql.contains("NOLOGIN"),
+            "sql: {sql}"
+        );
     }
 
     #[test]

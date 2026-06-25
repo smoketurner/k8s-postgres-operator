@@ -2725,3 +2725,163 @@ async fn test_superseded_cluster_modification_blocked() {
         .await
         .ok();
 }
+
+/// Test: DDL audit objects are not copied to the target cluster
+///
+/// The operator installs DDL audit infrastructure (table, function, event
+/// trigger) on the source before copying the schema so it can detect DDL during
+/// the replication window. Because `copy_schema` runs `pg_dump`, those objects
+/// would otherwise be carried into the target and persist after cutover. This
+/// verifies they are removed from the target.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Kubernetes cluster"]
+async fn test_ddl_audit_not_copied_to_target() {
+    let cluster = init_test().await;
+    let client = cluster.new_client().await.expect("create client");
+
+    let ns = TestNamespace::create(client.clone(), "upgrade-e2e")
+        .await
+        .expect("create namespace");
+
+    let _operator = ScopedOperator::start(client.clone(), ns.name()).await;
+
+    let cluster_api: Api<PostgresCluster> = Api::namespaced(client.clone(), ns.name());
+    let upgrade_api: Api<PostgresUpgrade> = Api::namespaced(client.clone(), ns.name());
+
+    // Create source cluster
+    tracing::info!("Creating source cluster...");
+    let source = PostgresClusterBuilder::single("source", ns.name())
+        .with_version(PostgresVersion::V16)
+        .with_storage("1Gi", None)
+        .without_tls()
+        .build();
+    cluster_api
+        .create(&PostParams::default(), &source)
+        .await
+        .expect("create source cluster");
+
+    wait_for_cluster(
+        &cluster_api,
+        "source",
+        cluster_operational(1),
+        POSTGRES_READY_TIMEOUT,
+    )
+    .await
+    .expect("source cluster should become operational");
+
+    // Run the upgrade to completion with manual cutover.
+    tracing::info!("Creating upgrade...");
+    let upgrade = PostgresUpgradeBuilder::new("test-upgrade", ns.name())
+        .with_source_cluster("source")
+        .with_target_version(PostgresVersion::V17)
+        .with_manual_cutover()
+        .with_verification_passes(1)
+        .build();
+
+    upgrade_api
+        .create(&PostParams::default(), &upgrade)
+        .await
+        .expect("create upgrade");
+
+    wait_for_upgrade_named(
+        &upgrade_api,
+        "test-upgrade",
+        upgrade_ready_for_cutover(),
+        "ready_for_cutover",
+        UPGRADE_TIMEOUT,
+    )
+    .await
+    .expect("upgrade should be ready for cutover");
+
+    let cutover_patch = serde_json::json!({
+        "metadata": {
+            "annotations": {
+                "postgres-operator.smoketurner.com/cutover": "now"
+            }
+        }
+    });
+    upgrade_api
+        .patch(
+            "test-upgrade",
+            &PatchParams::default(),
+            &Patch::Merge(&cutover_patch),
+        )
+        .await
+        .expect("apply cutover annotation");
+
+    wait_for_upgrade_named(
+        &upgrade_api,
+        "test-upgrade",
+        upgrade_terminal(),
+        "terminal",
+        UPGRADE_PHASE_TIMEOUT,
+    )
+    .await
+    .expect("upgrade should complete");
+
+    // Connect to the target and assert the DDL audit objects are absent.
+    tracing::info!("Verifying DDL audit objects are absent on target...");
+    let target_creds = fetch_credentials(&client, ns.name(), "test-upgrade-target-credentials")
+        .await
+        .expect("fetch target credentials");
+
+    let target_pf = PortForward::start(
+        client.clone(),
+        ns.name(),
+        PortForwardTarget::service("test-upgrade-target-primary", 5432),
+        None,
+    )
+    .await
+    .expect("start target port-forward");
+
+    {
+        let (pg_client, conn) = tokio_postgres::Config::new()
+            .host("127.0.0.1")
+            .port(target_pf.local_port())
+            .user(&target_creds.username)
+            .password(&target_creds.password)
+            .dbname("postgres")
+            .connect(tokio_postgres::NoTls)
+            .await
+            .expect("connect to target");
+
+        tokio::spawn(async move {
+            if let Err(e) = conn.await {
+                tracing::warn!("Connection error: {}", e);
+            }
+        });
+
+        let trigger_exists: bool = pg_client
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM pg_event_trigger \
+                 WHERE evtname = 'postgres_operator_ddl_audit')",
+                &[],
+            )
+            .await
+            .expect("query event trigger")
+            .get(0);
+        assert!(
+            !trigger_exists,
+            "DDL audit event trigger should not exist on target"
+        );
+
+        let table_exists: bool = pg_client
+            .query_one(
+                "SELECT to_regclass('public.postgres_operator_ddl_audit') IS NOT NULL",
+                &[],
+            )
+            .await
+            .expect("query audit table")
+            .get(0);
+        assert!(!table_exists, "DDL audit table should not exist on target");
+    }
+    drop(target_pf);
+
+    tracing::info!("SUCCESS: DDL audit objects absent on target!");
+
+    // Cleanup
+    upgrade_api
+        .delete("test-upgrade", &DeleteParams::default())
+        .await
+        .ok();
+}
