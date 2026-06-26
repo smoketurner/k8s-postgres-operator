@@ -843,6 +843,7 @@ spec:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | string | Yes | Role name |
+| `login` | boolean | No | Whether this role can log in (default: true) |
 | `privileges` | []string | No | Role privileges (LOGIN, CREATEDB, CREATEROLE, SUPERUSER) |
 | `secretName` | string | No | Secret name for generated credentials |
 | `connectionLimit` | integer | No | Connection limit for this role |
