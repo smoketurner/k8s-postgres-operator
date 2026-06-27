@@ -23,6 +23,9 @@
 //! - **Uninstall** — on any terminal phase (`Completed`, `Failed`,
 //!   `RolledBack`) and on deletion of the `PostgresUpgrade` resource.
 //!   Drops the trigger, function, and audit table. Idempotent.
+//! - **Target cleanup** — `pg_dump` captures the audit objects during schema
+//!   copy, so they are present on the target after `copy_schema`. The operator
+//!   removes them from the target immediately after the subscription is created.
 //!
 //! ## Schema
 //!
@@ -182,7 +185,8 @@ pub async fn recent_ddl_samples(
 }
 
 /// Drop the audit trigger, function, and table. Idempotent.
-/// Called on terminal upgrade phases and on resource deletion.
+/// Called on terminal upgrade phases, on resource deletion, and on the target
+/// cluster after schema copy (to remove objects captured by pg_dump).
 #[instrument(skip(conn))]
 pub async fn uninstall_ddl_audit(conn: &PostgresConnection) -> ReplicationResult<()> {
     // Trigger and function first, since a trigger may reference the

@@ -140,9 +140,15 @@ typically Spilo's `postgres` superuser):
 | Event trigger | `postgres_operator_ddl_audit` |
 
 The operator uninstalls all three on terminal phases (`Completed`, `Failed`,
-`RolledBack`) and on deletion of the `PostgresUpgrade`. If the resource is
-force-deleted (`kubectl delete --force --grace-period=0`) and the upgrade
-finalizer is bypassed, you can clean up manually:
+`RolledBack`) and on deletion of the `PostgresUpgrade`.
+
+Because `pg_dump` captures the audit objects during schema copy, they are also
+present on the target cluster immediately after `copy_schema`. The operator
+removes them from the target automatically; you do not need to clean up the
+target manually.
+
+If the resource is force-deleted (`kubectl delete --force --grace-period=0`)
+and the upgrade finalizer is bypassed, you can clean up the source manually:
 
 ```sql
 DROP EVENT TRIGGER IF EXISTS postgres_operator_ddl_audit;
