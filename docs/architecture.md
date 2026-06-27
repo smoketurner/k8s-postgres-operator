@@ -343,10 +343,11 @@ BackoffConfig {
 
 | Error Type | Behavior |
 |------------|----------|
-| Transient | Retry with backoff |
+| KubeError (5xx, 409, 429, network) | Retry with backoff |
+| KubeError (4xx, except 409/429) | Fail fast |
 | Validation | Fail fast, update status |
-| NotFound | Ignore (likely deleted) |
-| Permanent | Fail, require intervention |
+| BackupExecFailed | Retry with backoff |
+| SerializationError, MissingObjectKey | Fail fast |
 
 ## Metrics and Observability
 
