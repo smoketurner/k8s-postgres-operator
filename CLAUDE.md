@@ -153,7 +153,7 @@ PostgresCluster-specific modules use a `cluster_` prefix; PostgresUpgrade-specif
 - `cluster_reconciler.rs`: Main PostgresCluster reconciliation loop - handles finalizers, spec change detection, resource application, state transitions
 - `cluster_state_machine.rs`: Formal FSM with states (Pending, Creating, Running, Updating, Scaling, Degraded, Recovering, Failed, Deleting) and guarded transitions
 - `cluster_error.rs`: Custom errors with exponential backoff configuration
-- `cluster_status.rs`: Condition management (Ready, Progressing, Degraded, ConfigurationValid, ReplicasReady, ResourceResizeInProgress)
+- `cluster_status.rs`: Condition management (Ready, Progressing, Degraded, ConfigurationValid, ResourceResizeInProgress, PodGenerationSynced)
 - `cluster_validation.rs`: Spec validation logic
 - `cluster_replication_lag.rs`: Replication lag monitoring via Patroni REST API
 - `cluster_backup_status.rs`: Backup status collection from WAL-G

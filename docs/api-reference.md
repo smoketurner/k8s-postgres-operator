@@ -535,9 +535,8 @@ Standard Kubernetes `metav1.Condition` (`k8s.io/apimachinery/pkg/apis/meta/v1.Co
 | Progressing | Moving toward desired state |
 | Degraded | Running but with issues |
 | ConfigurationValid | Spec passes validation |
-| ReplicasReady | All replicas synchronized |
-| PodGenerationSynced | All pods have applied their spec (K8s 1.35+) |
 | ResourceResizeInProgress | In-place resource resize in progress (K8s 1.35+) |
+| PodGenerationSynced | All pods have applied their spec (K8s 1.35+) |
 
 ### PodInfo
 

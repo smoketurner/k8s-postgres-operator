@@ -135,7 +135,7 @@ The operator maintains Kubernetes-standard conditions:
 | Progressing | Moving toward desired state |
 | Degraded | Running but with issues |
 | ConfigurationValid | Spec passes validation |
-| ReplicasReady | All replicas synchronized |
+| ResourceResizeInProgress | In-place resource resize in progress (K8s 1.35+) |
 | PodGenerationSynced | All pods have applied their spec (K8s 1.35+) |
 
 #### Kubernetes 1.35+ Enhanced Status Tracking

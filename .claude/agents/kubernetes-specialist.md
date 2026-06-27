@@ -279,7 +279,6 @@ Operator status conditions for PostgresCluster:
 - Progressing: Moving toward desired state
 - Degraded: Running but with reduced capacity
 - ConfigurationValid: Spec passes validation
-- ReplicasReady: All replicas synchronized with primary
 - ResourceResizeInProgress: In-place resize in progress (K8s 1.35+)
 - PodGenerationSynced: All pods applied current spec (K8s 1.35+)
 - Use standard condition format (type, status, reason, message, lastTransitionTime)
