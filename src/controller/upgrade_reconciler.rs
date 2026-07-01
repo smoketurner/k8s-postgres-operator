@@ -2217,9 +2217,23 @@ async fn cleanup_replication(
     // Try to connect to target and drop subscription
     if let Ok(target_conn) =
         PostgresConnection::connect_primary(&ctx.client, ns, &target_name).await
-        && let Err(e) = replication::drop_subscription(&target_conn, &sub_name).await
     {
-        warn!("Failed to drop subscription {}: {}", sub_name, e);
+        if let Err(e) = replication::drop_subscription(&target_conn, &sub_name).await {
+            warn!("Failed to drop subscription {}: {}", sub_name, e);
+        }
+        // Defense-in-depth: remove any DDL audit objects copied onto the target by
+        // copy_schema if the inline cleanup in setup_replication failed. Idempotent
+        // via DROP ... IF EXISTS, so this is a no-op when nothing was copied.
+        if let Err(e) = ddl_audit::uninstall_ddl_audit(&target_conn).await {
+            warn!(
+                "Failed to remove copied DDL audit objects from target {}/{}: {}; \
+                 you may need to manually `DROP EVENT TRIGGER {} CASCADE`",
+                ns,
+                target_name,
+                e,
+                ddl_audit::AUDIT_TRIGGER
+            );
+        }
     }
 
     // Try to connect to source and drop publication/replication slot
