@@ -695,25 +695,6 @@ pub fn upgrade_sequences_synced() -> impl Condition<PostgresUpgrade> {
     }
 }
 
-/// Condition that checks if target cluster is ready
-pub fn upgrade_target_ready() -> impl Condition<PostgresUpgrade> {
-    |obj: Option<&PostgresUpgrade>| {
-        obj.and_then(|upgrade| upgrade.status.as_ref())
-            .and_then(|status| status.target_cluster.as_ref())
-            .map(|target| target.ready)
-            .unwrap_or(false)
-    }
-}
-
-/// Condition that checks if source cluster is ready
-pub fn upgrade_source_ready() -> impl Condition<PostgresUpgrade> {
-    |obj: Option<&PostgresUpgrade>| {
-        obj.and_then(|upgrade| upgrade.status.as_ref())
-            .and_then(|status| status.source_cluster.as_ref())
-            .map(|source| source.ready)
-            .unwrap_or(false)
-    }
-}
 
 /// Condition that checks if upgrade has a specific condition type with given status
 pub fn upgrade_has_condition(
