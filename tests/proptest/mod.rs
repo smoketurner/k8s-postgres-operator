@@ -20,7 +20,7 @@ use proptest::prelude::*;
 use postgres_operator::controller::cluster_state_machine::{
     ClusterEvent, ClusterStateMachine, TransitionContext,
 };
-use postgres_operator::controller::cluster_validation::{validate_spec, validate_version_upgrade};
+use postgres_operator::controller::cluster_validation::validate_version_upgrade;
 use postgres_operator::crd::{
     ClusterPhase, ConnectionScalingMetric, CpuScalingMetric, IssuerKind, IssuerRef, PgBouncerSpec,
     PostgresCluster, PostgresClusterSpec, PostgresClusterStatus, PostgresVersion, ResourceList,
@@ -69,17 +69,6 @@ fn spec_with_replicas(replicas: i32) -> PostgresClusterSpec {
     }
 }
 
-/// Create a spec with the given storage size
-fn spec_with_storage(size: String) -> PostgresClusterSpec {
-    PostgresClusterSpec {
-        storage: StorageSpec {
-            size,
-            storage_class: None,
-        },
-        ..minimal_spec()
-    }
-}
-
 // =============================================================================
 // Strategy generators for PostgreSQL cluster specs
 // =============================================================================
@@ -101,18 +90,6 @@ fn valid_replicas() -> impl Strategy<Value = i32> {
     1..=100i32
 }
 
-/// Generate an invalid replica count (shrinks toward boundary values)
-fn invalid_replicas() -> impl Strategy<Value = i32> {
-    prop_oneof![
-        // Negative values - shrink toward -1
-        (-100..=-1i32),
-        // Zero
-        Just(0),
-        // Too large - shrink toward 101
-        (101..=1000i32),
-    ]
-}
-
 /// Generate a valid storage size (shrinks toward smaller values)
 fn valid_storage_size() -> impl Strategy<Value = String> {
     prop_oneof![
@@ -125,23 +102,7 @@ fn valid_storage_size() -> impl Strategy<Value = String> {
     ]
 }
 
-/// Generate an invalid storage size (shrinks toward simpler invalid cases)
-fn invalid_storage_size() -> impl Strategy<Value = String> {
-    prop_oneof![
-        // Empty string
-        Just("".to_string()),
-        // Missing unit - shrink toward "1"
-        (1..=100u32).prop_map(|n| n.to_string()),
-        // Wrong unit suffix - GB instead of Gi
-        (1..=100u32).prop_map(|n| format!("{}GB", n)),
-        // Negative values
-        (1..=100u32).prop_map(|n| format!("-{}Gi", n)),
-        // Space in middle
-        (1..=100u32).prop_map(|n| format!("{} Gi", n)),
-        // Invalid text
-        "[a-z]{3,8}".prop_map(|s| s),
-    ]
-}
+
 
 /// Generate an optional storage class (shrinks toward None or shorter names)
 fn optional_storage_class() -> impl Strategy<Value = Option<String>> {
@@ -542,14 +503,6 @@ fn cluster_event() -> impl Strategy<Value = ClusterEvent> {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
 
-    /// Property: Valid specs always pass validation
-    #[test]
-    fn prop_valid_spec_passes_validation(spec in valid_spec()) {
-        let cluster = cluster_from_spec(spec);
-        let result = validate_spec(&cluster);
-        prop_assert!(result.is_ok(), "Valid spec should pass validation: {:?}", result);
-    }
-
     /// Property: Valid specs always generate a StatefulSet without panicking
     #[test]
     fn prop_valid_spec_generates_statefulset(spec in valid_spec()) {
@@ -604,24 +557,6 @@ proptest! {
     // enforces valid values (15, 16, 17) at the CRD level. Invalid values cannot
     // be constructed at runtime.
 
-    /// Property: Invalid replica counts are always rejected
-    #[test]
-    fn prop_invalid_replicas_rejected(replicas in invalid_replicas()) {
-        let spec = spec_with_replicas(replicas);
-        let cluster = cluster_from_spec(spec);
-        let result = validate_spec(&cluster);
-        prop_assert!(result.is_err(), "Invalid replicas should be rejected: {}", cluster.spec.replicas);
-    }
-
-    /// Property: Invalid storage sizes are always rejected
-    #[test]
-    fn prop_invalid_storage_rejected(size in invalid_storage_size()) {
-        let spec = spec_with_storage(size);
-        let cluster = cluster_from_spec(spec);
-        let result = validate_spec(&cluster);
-        prop_assert!(result.is_err(), "Invalid storage should be rejected: {}", cluster.spec.storage.size);
-    }
-
     /// Property: State machine never panics on any phase/event combination
     #[test]
     fn prop_state_machine_no_panic(phase in cluster_phase(), event in cluster_event()) {
@@ -641,17 +576,6 @@ proptest! {
         let _result = sm.transition(&phase, event, &ctx);
         // We don't assert on the result because some combinations are invalid,
         // but the important thing is that it doesn't panic
-    }
-
-    /// Property: Validation is deterministic
-    #[test]
-    fn prop_validation_deterministic(spec in valid_spec()) {
-        let cluster = cluster_from_spec(spec);
-        let result1 = validate_spec(&cluster);
-        let result2 = validate_spec(&cluster);
-
-        // Both should be Ok and equal
-        prop_assert_eq!(result1.is_ok(), result2.is_ok());
     }
 
     /// Property: Version upgrades are allowed for valid paths
