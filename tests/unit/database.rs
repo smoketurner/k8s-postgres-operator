@@ -3,7 +3,6 @@
 //! Tests for:
 //! - PostgresDatabase CRD structure and defaults
 //! - SQL escaping and injection prevention
-//! - Identifier validation
 //! - Password generation
 //! - Connection string formatting
 
@@ -11,9 +10,7 @@ use postgres_operator::crd::{
     ClusterRef, DatabaseConditionType, DatabasePhase, DatabaseSpec, GrantSpec, PostgresDatabase,
     PostgresDatabaseSpec, PostgresDatabaseStatus, RolePrivilege, RoleSpec, TablePrivilege,
 };
-use postgres_operator::resources::sql::{
-    generate_password, is_valid_identifier, quote_identifier_pub,
-};
+use postgres_operator::resources::sql::{generate_password, quote_identifier_pub};
 
 // =============================================================================
 // PostgresDatabase CRD Tests
@@ -365,80 +362,6 @@ mod identifier_quoting_tests {
         );
 
         // The semicolon and SQL commands are safely contained within the quoted identifier
-    }
-}
-
-// =============================================================================
-// Identifier Validation Tests
-// =============================================================================
-
-mod identifier_validation_tests {
-    use super::*;
-
-    #[test]
-    fn test_valid_simple_identifier() {
-        assert!(is_valid_identifier("users"));
-        assert!(is_valid_identifier("my_table"));
-        assert!(is_valid_identifier("table123"));
-    }
-
-    #[test]
-    fn test_valid_underscore_start() {
-        assert!(is_valid_identifier("_private"));
-        assert!(is_valid_identifier("_"));
-    }
-
-    #[test]
-    fn test_valid_single_char() {
-        assert!(is_valid_identifier("a"));
-        assert!(is_valid_identifier("z"));
-    }
-
-    #[test]
-    fn test_invalid_empty() {
-        assert!(!is_valid_identifier(""));
-    }
-
-    #[test]
-    fn test_invalid_starts_with_number() {
-        assert!(!is_valid_identifier("123abc"));
-        assert!(!is_valid_identifier("1"));
-    }
-
-    #[test]
-    fn test_invalid_uppercase() {
-        assert!(!is_valid_identifier("Users"));
-        assert!(!is_valid_identifier("USERS"));
-        assert!(!is_valid_identifier("userTable"));
-    }
-
-    #[test]
-    fn test_invalid_special_chars() {
-        assert!(!is_valid_identifier("user-table"));
-        assert!(!is_valid_identifier("user.table"));
-        assert!(!is_valid_identifier("user@table"));
-        assert!(!is_valid_identifier("user table"));
-        assert!(!is_valid_identifier("user;table"));
-    }
-
-    #[test]
-    fn test_invalid_too_long() {
-        let long_name = "a".repeat(64);
-        assert!(!is_valid_identifier(&long_name));
-    }
-
-    #[test]
-    fn test_valid_max_length() {
-        let max_name = "a".repeat(63);
-        assert!(is_valid_identifier(&max_name));
-    }
-
-    #[test]
-    fn test_invalid_sql_keywords_still_valid_identifiers() {
-        // SQL keywords are valid identifiers (they're just quoted)
-        assert!(is_valid_identifier("select"));
-        assert!(is_valid_identifier("from"));
-        assert!(is_valid_identifier("where"));
     }
 }
 

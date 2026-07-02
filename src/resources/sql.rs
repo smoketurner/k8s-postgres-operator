@@ -601,27 +601,6 @@ fn escape_sql_string(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-/// Validate that a name is safe for use as a PostgreSQL identifier
-///
-/// Returns true if the name matches the pattern: starts with letter or underscore,
-/// followed by letters, digits, or underscores. Max length 63 characters.
-pub fn is_valid_identifier(name: &str) -> bool {
-    if name.is_empty() || name.len() > 63 {
-        return false;
-    }
-
-    let mut chars = name.chars();
-
-    // First character must be letter or underscore
-    match chars.next() {
-        Some(c) if c.is_ascii_lowercase() || c == '_' => {}
-        _ => return false,
-    }
-
-    // Rest must be letters, digits, or underscores
-    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-}
-
 /// Generate a secure random password
 pub fn generate_password() -> String {
     use rand::RngExt;
@@ -738,28 +717,6 @@ mod tests {
             sql.contains("LOGIN") && !sql.contains("NOLOGIN"),
             "sql: {sql}"
         );
-    }
-
-    #[test]
-    fn test_is_valid_identifier() {
-        // Valid identifiers
-        assert!(is_valid_identifier("mydb"));
-        assert!(is_valid_identifier("my_database"));
-        assert!(is_valid_identifier("db123"));
-        assert!(is_valid_identifier("_private"));
-        assert!(is_valid_identifier("a"));
-
-        // Invalid identifiers
-        assert!(!is_valid_identifier("")); // Empty
-        assert!(!is_valid_identifier("123db")); // Starts with number
-        assert!(!is_valid_identifier("my-database")); // Contains hyphen
-        assert!(!is_valid_identifier("my database")); // Contains space
-        assert!(!is_valid_identifier("MyDatabase")); // Contains uppercase
-        assert!(!is_valid_identifier("db;drop")); // Contains semicolon
-        assert!(!is_valid_identifier("a".repeat(64).as_str())); // Too long (64 chars)
-
-        // Edge case: exactly 63 characters is valid
-        assert!(is_valid_identifier(&"a".repeat(63)));
     }
 
     #[test]
