@@ -36,9 +36,6 @@ pub use cluster_state_machine::{
     ClusterEvent, ClusterStateMachine, TransitionContext, TransitionResult,
 };
 // Validation types used by proptest and unit tests
-pub use cluster_validation::{
-    MAX_REPLICAS, MIN_REPLICAS, SpecDiff, validate_spec, validate_spec_change,
-    validate_version_upgrade,
-};
+pub use cluster_validation::validate_version_upgrade;
 // Status types used by unit tests
 pub use cluster_status::{ConditionBuilder, condition_status, condition_types, spec_changed};
