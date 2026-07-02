@@ -243,12 +243,7 @@ mod tests {
 
     #[test]
     fn test_error_classification_blocks_cutover() {
-        assert!(
-            UpgradeError::SequenceSyncFailed {
-                failed_count: 3
-            }
-            .blocks_cutover()
-        );
+        assert!(UpgradeError::SequenceSyncFailed { failed_count: 3 }.blocks_cutover());
         assert!(!UpgradeError::ValidationError("invalid".to_string()).blocks_cutover());
         assert!(!UpgradeError::SqlError("err".to_string()).blocks_cutover());
     }
