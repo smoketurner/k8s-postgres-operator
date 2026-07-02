@@ -21,17 +21,6 @@ pub enum UpgradeError {
     #[error("Validation failed: {0}")]
     ValidationError(String),
 
-    /// Version downgrade attempted
-    #[error("Version downgrade not allowed: {from_version} -> {to_version}")]
-    DowngradeNotAllowed {
-        from_version: String,
-        to_version: String,
-    },
-
-    /// Unsupported PostgreSQL version
-    #[error("Unsupported PostgreSQL version: {0}")]
-    UnsupportedVersion(String),
-
     /// Source cluster not found
     #[error("Source cluster not found: {namespace}/{name}")]
     SourceClusterNotFound { namespace: String, name: String },
@@ -39,14 +28,6 @@ pub enum UpgradeError {
     /// Target cluster not found
     #[error("Target cluster not found: {namespace}/{name}")]
     TargetClusterNotFound { namespace: String, name: String },
-
-    /// Immutable field change attempted
-    #[error("Immutable field cannot be changed: {field}")]
-    ImmutableFieldChange { field: String },
-
-    /// Concurrent upgrade exists
-    #[error("Another upgrade is already in progress for source cluster: {0}")]
-    ConcurrentUpgrade(String),
 
     // ============================================
     // Transient Errors (retry with backoff)
@@ -63,29 +44,9 @@ pub enum UpgradeError {
     #[error("PostgreSQL client error: {0}")]
     PostgresClientError(#[from] crate::resources::postgres_client::PostgresClientError),
 
-    /// Source cluster not ready
-    #[error("Source cluster not ready: {0}")]
-    SourceClusterNotReady(String),
-
-    /// Target cluster not ready
-    #[error("Target cluster not ready: {0}")]
-    TargetClusterNotReady(String),
-
-    /// Target cluster creation in progress
-    #[error("Target cluster creation in progress")]
-    TargetCreationInProgress,
-
     /// SQL execution error
     #[error("SQL execution failed: {0}")]
     SqlError(String),
-
-    /// Replication setup error
-    #[error("Replication setup failed: {0}")]
-    ReplicationSetupError(String),
-
-    /// Subscription not active
-    #[error("Subscription not active: {0}")]
-    SubscriptionNotActive(String),
 
     /// Connection draining timeout
     #[error("Connection draining timeout: {0}")]
@@ -95,10 +56,6 @@ pub enum UpgradeError {
     #[error("Service switch failed: {0}")]
     ServiceSwitchFailed(String),
 
-    /// Timeout error
-    #[error("Phase timeout: {phase} exceeded {timeout}")]
-    PhaseTimeout { phase: String, timeout: String },
-
     /// Generic transient error
     #[error("Transient error (will retry): {0}")]
     TransientError(String),
@@ -106,44 +63,9 @@ pub enum UpgradeError {
     // ============================================
     // Verification Errors (block cutover, continue monitoring)
     // ============================================
-    /// Row count mismatch between source and target
-    #[error("Row count mismatch: {mismatched_tables} tables differ")]
-    RowCountMismatch { mismatched_tables: i32 },
-
-    /// Replication lag too high for cutover
-    #[error("Replication lag too high: {lag_bytes} bytes ({lag_seconds}s)")]
-    ReplicationLagTooHigh { lag_bytes: i64, lag_seconds: i64 },
-
-    /// LSN positions not in sync
-    #[error("LSN positions not in sync: source={source_lsn}, target={target_lsn}")]
-    LsnNotInSync {
-        source_lsn: String,
-        target_lsn: String,
-    },
-
-    /// Backup requirement not met
-    #[error("No recent backup found within {required}")]
-    BackupRequirementNotMet { required: String },
-
     /// Sequence sync failed
     #[error("Sequence synchronization failed: {failed_count} sequences failed")]
     SequenceSyncFailed { failed_count: i32 },
-
-    /// Verification not passed enough times
-    #[error("Verification passed {actual} times, need {required}")]
-    InsufficientVerificationPasses { actual: i32, required: i32 },
-
-    // ============================================
-    // Rollback Errors
-    // ============================================
-    /// Rollback requested from a phase that does not support it (cutover or
-    /// post-cutover). Recovery from a bad target after cutover requires PITR
-    /// from a pre-upgrade backup; see `docs/upgrades.md`.
-    #[error(
-        "Rollback is not supported in phase {phase}: cutover has begun or completed. \
-         See docs/upgrades.md for post-cutover recovery."
-    )]
-    RollbackNotAllowedInPhase { phase: String },
 
     // ============================================
     // Preflight Errors
@@ -176,12 +98,7 @@ impl UpgradeError {
             UpgradeError::KubeError(_)
                 | UpgradeError::ReplicationError(_)
                 | UpgradeError::PostgresClientError(_)
-                | UpgradeError::SourceClusterNotReady(_)
-                | UpgradeError::TargetClusterNotReady(_)
-                | UpgradeError::TargetCreationInProgress
                 | UpgradeError::SqlError(_)
-                | UpgradeError::ReplicationSetupError(_)
-                | UpgradeError::SubscriptionNotActive(_)
                 | UpgradeError::ConnectionDrainTimeout(_)
                 | UpgradeError::ServiceSwitchFailed(_)
                 | UpgradeError::TransientError(_)
@@ -193,42 +110,16 @@ impl UpgradeError {
         matches!(
             self,
             UpgradeError::ValidationError(_)
-                | UpgradeError::DowngradeNotAllowed { .. }
-                | UpgradeError::UnsupportedVersion(_)
                 | UpgradeError::SourceClusterNotFound { .. }
                 | UpgradeError::TargetClusterNotFound { .. }
-                | UpgradeError::ImmutableFieldChange { .. }
-                | UpgradeError::ConcurrentUpgrade(_)
                 | UpgradeError::PreflightCheckFailed { .. }
-                | UpgradeError::RollbackNotAllowedInPhase { .. }
         )
     }
 
     /// Returns true if this error blocks automatic cutover but doesn't prevent
     /// continued monitoring and progress toward cutover readiness.
     pub fn blocks_cutover(&self) -> bool {
-        matches!(
-            self,
-            UpgradeError::RowCountMismatch { .. }
-                | UpgradeError::ReplicationLagTooHigh { .. }
-                | UpgradeError::LsnNotInSync { .. }
-                | UpgradeError::BackupRequirementNotMet { .. }
-                | UpgradeError::SequenceSyncFailed { .. }
-                | UpgradeError::InsufficientVerificationPasses { .. }
-        )
-    }
-
-    /// Returns true if this error indicates a timeout
-    pub fn is_timeout(&self) -> bool {
-        matches!(
-            self,
-            UpgradeError::PhaseTimeout { .. } | UpgradeError::ConnectionDrainTimeout(_)
-        )
-    }
-
-    /// Returns true if this error is related to rollback
-    pub fn is_rollback_error(&self) -> bool {
-        matches!(self, UpgradeError::RollbackNotAllowedInPhase { .. })
+        matches!(self, UpgradeError::SequenceSyncFailed { .. })
     }
 }
 
@@ -300,22 +191,21 @@ mod tests {
 
     #[test]
     fn test_error_classification_retryable() {
-        assert!(UpgradeError::SourceClusterNotReady("not ready".to_string()).is_retryable());
-        assert!(UpgradeError::TargetCreationInProgress.is_retryable());
         assert!(UpgradeError::SqlError("connection refused".to_string()).is_retryable());
+        assert!(UpgradeError::ConnectionDrainTimeout("timed out".to_string()).is_retryable());
+        assert!(UpgradeError::TransientError("retry me".to_string()).is_retryable());
     }
 
     #[test]
     fn test_error_classification_permanent() {
         assert!(UpgradeError::ValidationError("invalid".to_string()).is_permanent());
         assert!(
-            UpgradeError::DowngradeNotAllowed {
-                from_version: "17".to_string(),
-                to_version: "16".to_string(),
+            UpgradeError::SourceClusterNotFound {
+                namespace: "default".to_string(),
+                name: "my-cluster".to_string(),
             }
             .is_permanent()
         );
-        assert!(UpgradeError::ConcurrentUpgrade("other-upgrade".to_string()).is_permanent());
         assert!(
             UpgradeError::PreflightCheckFailed {
                 summary: "1 preflight check failed".to_string(),
@@ -341,8 +231,6 @@ mod tests {
         assert!(!err.is_retryable());
         assert!(err.is_permanent());
         assert!(!err.blocks_cutover());
-        assert!(!err.is_timeout());
-        assert!(!err.is_rollback_error());
 
         // Display surfaces the summary (machine-grepable) without
         // duplicating the full list (that lives in the structured field).
@@ -355,25 +243,9 @@ mod tests {
 
     #[test]
     fn test_error_classification_blocks_cutover() {
-        assert!(
-            UpgradeError::RowCountMismatch {
-                mismatched_tables: 5
-            }
-            .blocks_cutover()
-        );
-        assert!(
-            UpgradeError::ReplicationLagTooHigh {
-                lag_bytes: 1000,
-                lag_seconds: 10,
-            }
-            .blocks_cutover()
-        );
-        assert!(
-            UpgradeError::BackupRequirementNotMet {
-                required: "1h".to_string()
-            }
-            .blocks_cutover()
-        );
+        assert!(UpgradeError::SequenceSyncFailed { failed_count: 3 }.blocks_cutover());
+        assert!(!UpgradeError::ValidationError("invalid".to_string()).blocks_cutover());
+        assert!(!UpgradeError::SqlError("err".to_string()).blocks_cutover());
     }
 
     #[test]
@@ -381,10 +253,8 @@ mod tests {
         // Verify that errors are only in one category
         let errors: Vec<UpgradeError> = vec![
             UpgradeError::ValidationError("test".to_string()),
-            UpgradeError::SourceClusterNotReady("test".to_string()),
-            UpgradeError::RowCountMismatch {
-                mismatched_tables: 1,
-            },
+            UpgradeError::SqlError("test".to_string()),
+            UpgradeError::SequenceSyncFailed { failed_count: 1 },
         ];
 
         for error in &errors {
@@ -409,9 +279,7 @@ mod tests {
     #[test]
     fn test_backoff_delay_for_verification_error() {
         let config = UpgradeBackoffConfig::default();
-        let error = UpgradeError::RowCountMismatch {
-            mismatched_tables: 5,
-        };
+        let error = UpgradeError::SequenceSyncFailed { failed_count: 5 };
 
         let delay = config.delay_for_error(&error, 0);
         assert_eq!(delay, config.verification_delay);
