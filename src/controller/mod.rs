@@ -29,7 +29,6 @@ pub use upgrade_reconciler::{
 };
 pub use upgrade_state_machine::{
     UpgradeEvent, UpgradeStateMachine, UpgradeTransitionContext, UpgradeTransitionResult,
-    determine_upgrade_event,
 };
 // State machine types used by proptest
 pub use cluster_state_machine::{

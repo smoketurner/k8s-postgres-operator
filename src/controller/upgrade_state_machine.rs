@@ -28,8 +28,6 @@ pub enum UpgradeEvent {
     TargetClusterReady,
     /// Publication and subscription have been configured
     ReplicationConfigured,
-    /// Initial data sync completed, replication is active
-    InitialSyncCompleted,
     /// Replication is caught up (lag within threshold)
     ReplicationCaughtUp,
     /// Row counts and data verification passed
@@ -64,7 +62,6 @@ impl fmt::Display for UpgradeEvent {
             UpgradeEvent::ValidationPassed => write!(f, "ValidationPassed"),
             UpgradeEvent::TargetClusterReady => write!(f, "TargetClusterReady"),
             UpgradeEvent::ReplicationConfigured => write!(f, "ReplicationConfigured"),
-            UpgradeEvent::InitialSyncCompleted => write!(f, "InitialSyncCompleted"),
             UpgradeEvent::ReplicationCaughtUp => write!(f, "ReplicationCaughtUp"),
             UpgradeEvent::VerificationPassed => write!(f, "VerificationPassed"),
             UpgradeEvent::SequencesSynced => write!(f, "SequencesSynced"),
@@ -160,11 +157,6 @@ impl Default for UpgradeTransitionContext {
 }
 
 impl UpgradeTransitionContext {
-    /// Check if replication is caught up (lag below threshold)
-    pub fn replication_caught_up(&self, max_lag_bytes: i64) -> bool {
-        matches!(self.replication_lag_bytes, Some(lag) if lag <= max_lag_bytes)
-    }
-
     /// Check if verification is complete and the FSM may transition out of
     /// `Verifying` into `SyncingSequences`.
     ///
@@ -690,139 +682,6 @@ fn ddl_guard_message() -> String {
         .to_string()
 }
 
-/// Determine the appropriate event based on upgrade context
-pub fn determine_upgrade_event(
-    current_phase: &UpgradePhase,
-    ctx: &UpgradeTransitionContext,
-) -> Option<UpgradeEvent> {
-    // Check for rollback request first (high priority).
-    // The FSM transition guard and `can_rollback()` on the source phase
-    // enforce that rollback is only valid pre-cutover; this just routes the
-    // event.
-    if ctx.rollback_requested {
-        return Some(UpgradeEvent::RollbackRequested);
-    }
-
-    // Check for timeout
-    if ctx.phase_timeout_elapsed {
-        return Some(UpgradeEvent::TimeoutOccurred);
-    }
-
-    // Check for errors
-    if ctx.error_message.is_some() {
-        return Some(UpgradeEvent::ErrorOccurred);
-    }
-
-    // Phase-specific event determination
-    match current_phase {
-        UpgradePhase::Pending => {
-            if ctx.source_cluster_ready {
-                Some(UpgradeEvent::ValidationPassed)
-            } else {
-                None
-            }
-        }
-
-        UpgradePhase::CreatingTarget => {
-            if ctx.target_cluster_ready {
-                Some(UpgradeEvent::TargetClusterReady)
-            } else {
-                None
-            }
-        }
-
-        UpgradePhase::ConfiguringReplication => {
-            // Check if replication is now active (indicated by lag being available)
-            if ctx.replication_lag_bytes.is_some() {
-                Some(UpgradeEvent::ReplicationConfigured)
-            } else {
-                None
-            }
-        }
-
-        UpgradePhase::Replicating => {
-            // Check if replication has caught up (lag below threshold)
-            if ctx.replication_caught_up(0) {
-                Some(UpgradeEvent::ReplicationCaughtUp)
-            } else {
-                None
-            }
-        }
-
-        UpgradePhase::Verifying => {
-            if ctx.verification_complete() {
-                Some(UpgradeEvent::VerificationPassed)
-            } else if ctx.row_count_mismatches > 0 {
-                Some(UpgradeEvent::VerificationFailed)
-            } else {
-                None
-            }
-        }
-
-        UpgradePhase::SyncingSequences => {
-            if ctx.sequences_synced {
-                Some(UpgradeEvent::SequencesSynced)
-            } else {
-                None
-            }
-        }
-
-        UpgradePhase::ReadyForCutover => {
-            if ctx.cutover_mode == CutoverMode::Manual {
-                Some(UpgradeEvent::PreChecksPassed)
-            } else if ctx.ready_for_auto_cutover() {
-                Some(UpgradeEvent::AutoCutoverConditionsMet)
-            } else if ctx.row_count_mismatches > 0 {
-                Some(UpgradeEvent::VerificationFailed)
-            } else {
-                None
-            }
-        }
-
-        UpgradePhase::WaitingForManualCutover => {
-            // Manual cutover is triggered by annotation - handled by reconciler
-            // Here we just check for verification regression
-            if ctx.row_count_mismatches > 0 {
-                Some(UpgradeEvent::VerificationFailed)
-            } else {
-                None
-            }
-        }
-
-        UpgradePhase::CuttingOver => {
-            // Service switching completion is determined by reconciler
-            None
-        }
-
-        UpgradePhase::HealthChecking => {
-            // Health check completion is determined by reconciler
-            None
-        }
-
-        UpgradePhase::Completed => {
-            // Terminal state - no events. Rollback is not supported after
-            // cutover completes; recovery requires PITR from a pre-upgrade
-            // backup.
-            None
-        }
-
-        UpgradePhase::Failed => {
-            // Terminal state - only rollback event is relevant, to clean up
-            // resources left behind by a pre-cutover failure.
-            if ctx.rollback_requested {
-                Some(UpgradeEvent::RollbackRequested)
-            } else {
-                None
-            }
-        }
-
-        UpgradePhase::RolledBack => {
-            // Terminal state - no events
-            None
-        }
-    }
-}
-
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -1223,36 +1082,6 @@ mod tests {
             result,
             UpgradeTransitionResult::InvalidTransition { .. }
         ));
-    }
-
-    #[test]
-    fn test_determine_upgrade_event_pending() {
-        let mut ctx = default_ctx();
-        ctx.source_cluster_ready = true;
-
-        let event = determine_upgrade_event(&UpgradePhase::Pending, &ctx);
-        assert_eq!(event, Some(UpgradeEvent::ValidationPassed));
-    }
-
-    #[test]
-    fn test_determine_upgrade_event_rollback_priority() {
-        let mut ctx = default_ctx();
-        ctx.source_cluster_ready = true;
-        ctx.rollback_requested = true;
-
-        // Rollback should take priority
-        let event = determine_upgrade_event(&UpgradePhase::Replicating, &ctx);
-        assert_eq!(event, Some(UpgradeEvent::RollbackRequested));
-    }
-
-    #[test]
-    fn test_determine_upgrade_event_error_priority() {
-        let mut ctx = default_ctx();
-        ctx.source_cluster_ready = true;
-        ctx.error_message = Some("Something went wrong".to_string());
-
-        let event = determine_upgrade_event(&UpgradePhase::Pending, &ctx);
-        assert_eq!(event, Some(UpgradeEvent::ErrorOccurred));
     }
 
     #[test]
