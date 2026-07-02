@@ -5,10 +5,9 @@ pub mod resources;
 pub mod webhooks;
 
 pub use controller::{
-    Context, DatabaseContext, Error, Result,
-    UpgradeContext,
-    context::DEFAULT_OPERATOR_NAMESPACE, database_error_policy, error_policy, reconcile,
-    reconcile_database, reconcile_upgrade, upgrade_error_policy,
+    Context, DatabaseContext, Error, Result, UpgradeContext, context::DEFAULT_OPERATOR_NAMESPACE,
+    database_error_policy, error_policy, reconcile, reconcile_database, reconcile_upgrade,
+    upgrade_error_policy,
 };
 pub use crd::{PostgresCluster, PostgresDatabase, PostgresUpgrade};
 pub use health::HealthState;
