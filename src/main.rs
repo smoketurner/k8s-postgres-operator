@@ -1,6 +1,5 @@
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use kube::Client;
@@ -76,9 +75,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create shared health state
     let health_state = Arc::new(HealthState::new());
 
-    // Track leadership status
-    let is_leader = Arc::new(AtomicBool::new(false));
-
     // Start health server immediately (probes should work even as non-leader)
     let health_handle = {
         let health_state = health_state.clone();
@@ -127,7 +123,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match lease_lock.try_acquire_or_renew().await {
             Ok(LeaseLockResult::Acquired(_)) => {
                 info!("Acquired leadership");
-                is_leader.store(true, Ordering::SeqCst);
                 break;
             }
             Ok(LeaseLockResult::NotAcquired(_)) => {
@@ -142,7 +137,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Start lease renewal background task
     let lease_renewal_handle = {
-        let is_leader = is_leader.clone();
         let lease_lock = LeaseLock::new(
             client.clone(),
             &namespace,
@@ -163,13 +157,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     Ok(LeaseLockResult::NotAcquired(_)) => {
                         error!("Lost leadership! Shutting down...");
-                        is_leader.store(false, Ordering::SeqCst);
                         // Exit so Kubernetes restarts us and we re-enter election
                         std::process::exit(1);
                     }
                     Err(e) => {
                         error!("Failed to renew lease: {}. Shutting down...", e);
-                        is_leader.store(false, Ordering::SeqCst);
                         std::process::exit(1);
                     }
                 }
