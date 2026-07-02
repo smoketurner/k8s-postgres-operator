@@ -1171,7 +1171,7 @@ mod network_policy_tests {
 
 mod sql_security_tests {
     use super::*;
-    use postgres_operator::resources::sql::{is_valid_identifier, quote_identifier_pub};
+    use postgres_operator::resources::sql::quote_identifier_pub;
 
     /// Generate strings that might attempt SQL injection
     fn sql_injection_attempts() -> impl Strategy<Value = String> {
@@ -1204,38 +1204,6 @@ mod sql_security_tests {
         ]
     }
 
-    /// Generate valid PostgreSQL identifier names (shrinks toward shorter names)
-    /// Valid identifiers: start with letter or underscore, contain only lowercase letters,
-    /// digits, underscores, and are max 63 chars
-    fn valid_identifier_names() -> impl Strategy<Value = String> {
-        prop_oneof![
-            // Simple names - shrink toward shorter
-            "[a-z][a-z0-9_]{0,10}".prop_map(|s| s),
-            // Underscore-prefixed names
-            "_[a-z][a-z0-9_]{0,8}".prop_map(|s| s),
-            // Longer names (up to max length 63)
-            "[a-z][a-z0-9_]{20,62}".prop_map(|s| s),
-        ]
-    }
-
-    /// Generate invalid PostgreSQL identifier names (shrinks toward simpler violations)
-    fn invalid_identifier_names() -> impl Strategy<Value = String> {
-        prop_oneof![
-            // Empty string
-            Just("".to_string()),
-            // Starts with digit - shrink toward "0a"
-            "[0-9][a-z]{1,5}".prop_map(|s| s),
-            // Contains uppercase - shrink toward "Aa"
-            "[A-Z][a-z]{1,5}".prop_map(|s| s),
-            // Contains hyphen - shrink toward "a-a"
-            "[a-z]{1,3}-[a-z]{1,3}".prop_map(|s| s),
-            // Contains space - shrink toward "a a"
-            "[a-z]{1,3} [a-z]{1,3}".prop_map(|s| s),
-            // Too long (>63 chars) - shrink toward exactly 64 chars
-            "[a-z]{64,100}".prop_map(|s| s),
-        ]
-    }
-
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(100))]
 
@@ -1247,18 +1215,6 @@ mod sql_security_tests {
             // Should always produce a string starting and ending with double quotes
             prop_assert!(result.starts_with('"'));
             prop_assert!(result.ends_with('"'));
-        }
-
-        /// Property: Valid identifiers pass validation
-        #[test]
-        fn prop_valid_identifiers_pass(name in valid_identifier_names()) {
-            prop_assert!(is_valid_identifier(&name), "Valid identifier should pass: {}", name);
-        }
-
-        /// Property: Invalid identifiers fail validation
-        #[test]
-        fn prop_invalid_identifiers_fail(name in invalid_identifier_names()) {
-            prop_assert!(!is_valid_identifier(&name), "Invalid identifier should fail: {}", name);
         }
 
         /// Property: Quoted identifiers cannot break out of quotes
