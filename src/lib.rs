@@ -5,16 +5,14 @@ pub mod resources;
 pub mod webhooks;
 
 pub use controller::{
-    BackoffConfig, Context, DatabaseContext, DatabaseError, Error, FINALIZER, Result,
-    UPGRADE_FINALIZER, UpgradeBackoffConfig, UpgradeContext, UpgradeError, UpgradeResult,
+    Context, DatabaseContext, Error, Result,
+    UpgradeContext,
     context::DEFAULT_OPERATOR_NAMESPACE, database_error_policy, error_policy, reconcile,
     reconcile_database, reconcile_upgrade, upgrade_error_policy,
 };
 pub use crd::{PostgresCluster, PostgresDatabase, PostgresUpgrade};
-pub use health::{HealthState, Metrics};
-pub use webhooks::{
-    WEBHOOK_CERT_PATH, WEBHOOK_KEY_PATH, WEBHOOK_PORT, WebhookError, run_webhook_server,
-};
+pub use health::HealthState;
+pub use webhooks::{WEBHOOK_CERT_PATH, WEBHOOK_KEY_PATH, run_webhook_server};
 
 use std::sync::Arc;
 
