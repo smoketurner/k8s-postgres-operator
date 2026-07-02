@@ -366,24 +366,9 @@ fn default_estimated_throughput() -> i32 {
 }
 
 impl ScalingSpec {
-    /// Returns the effective lag threshold in bytes.
-    /// Uses `lag_threshold_bytes` if set, otherwise calculates from time threshold.
-    pub fn effective_lag_threshold_bytes(&self, threshold_secs: f64) -> i64 {
-        self.lag_threshold_bytes.unwrap_or_else(|| {
-            let throughput_bytes_per_sec =
-                self.estimated_throughput_mb_per_sec as f64 * 1_000_000.0;
-            (threshold_secs * throughput_bytes_per_sec) as i64
-        })
-    }
     /// Returns the effective minimum replicas, defaulting to the cluster's desired replicas
     pub fn effective_min_replicas(&self, desired_replicas: i32) -> i32 {
         self.min_replicas.unwrap_or(desired_replicas)
-    }
-
-    /// Returns true if auto-scaling is effectively enabled (maxReplicas > minReplicas)
-    pub fn is_scaling_enabled(&self, desired_replicas: i32) -> bool {
-        let min = self.effective_min_replicas(desired_replicas);
-        self.max_replicas > min
     }
 }
 
