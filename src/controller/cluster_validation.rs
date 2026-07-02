@@ -46,8 +46,6 @@ pub fn validate_version_upgrade(old_version: &str, new_version: &str) -> Result<
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
-    use super::*;
-
     // Note: PostgreSQL version validation is now handled by the CRD enum (PostgresVersion)
     // The enum only allows valid versions: "15", "16", "17"
 }

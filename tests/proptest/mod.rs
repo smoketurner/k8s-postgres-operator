@@ -102,8 +102,6 @@ fn valid_storage_size() -> impl Strategy<Value = String> {
     ]
 }
 
-
-
 /// Generate an optional storage class (shrinks toward None or shorter names)
 fn optional_storage_class() -> impl Strategy<Value = Option<String>> {
     prop_oneof![
