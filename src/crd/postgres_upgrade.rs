@@ -441,14 +441,6 @@ pub struct PostgresUpgradeStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_read_only_at: Option<String>,
 
-    /// Source cluster information
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_cluster: Option<ClusterStatus>,
-
-    /// Target cluster information
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_cluster: Option<ClusterStatus>,
-
     /// Replication status
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replication: Option<ReplicationStatus>,
@@ -556,42 +548,6 @@ impl UpgradePhase {
                 | UpgradePhase::RolledBack
         )
     }
-}
-
-/// Status information for a cluster (source or target)
-#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct ClusterStatus {
-    /// Name of the cluster
-    pub name: String,
-
-    /// PostgreSQL version
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-
-    /// Whether the cluster is ready
-    #[serde(default)]
-    pub ready: bool,
-
-    /// Connection information
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_info: Option<ClusterConnectionInfo>,
-}
-
-/// Connection information for a cluster
-#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct ClusterConnectionInfo {
-    /// Primary service host
-    pub host: String,
-
-    /// PostgreSQL port
-    #[serde(default = "default_port")]
-    pub port: i32,
-}
-
-fn default_port() -> i32 {
-    5432
 }
 
 /// Replication status between source and target
@@ -771,22 +727,8 @@ pub mod condition_types {
 
 /// Annotation keys for controlling upgrade behavior
 pub mod annotations {
-    /// Annotation to trigger manual cutover: set to "now"
-    pub const CUTOVER: &str = "postgres-operator.smoketurner.com/cutover";
-    /// Annotation to trigger rollback: set to "now"
-    pub const ROLLBACK: &str = "postgres-operator.smoketurner.com/rollback";
     /// Annotation on source cluster indicating an upgrade is in progress
     pub const UPGRADE_IN_PROGRESS: &str = "postgres-operator.smoketurner.com/upgrade-in-progress";
-    /// Annotation on source cluster after cutover indicating it was superseded
-    pub const SUPERSEDED_BY: &str = "postgres-operator.smoketurner.com/superseded-by";
-}
-
-/// Label keys for upgrade resources
-pub mod labels {
-    /// Label linking resources to an upgrade
-    pub const UPGRADE: &str = "postgres-operator.smoketurner.com/upgrade";
-    /// Label indicating the role of a cluster in an upgrade (source/target)
-    pub const UPGRADE_ROLE: &str = "postgres-operator.smoketurner.com/upgrade-role";
 }
 
 #[cfg(test)]
