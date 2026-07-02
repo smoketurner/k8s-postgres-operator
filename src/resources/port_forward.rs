@@ -34,9 +34,6 @@ pub enum PortForwardError {
     #[error("No pods found for service: {0}")]
     NoPodsFound(String),
 
-    #[error("Pod has no IP address")]
-    NoPodIp,
-
     #[error("Port forward task failed")]
     TaskFailed,
 
