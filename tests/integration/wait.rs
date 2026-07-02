@@ -695,7 +695,6 @@ pub fn upgrade_sequences_synced() -> impl Condition<PostgresUpgrade> {
     }
 }
 
-
 /// Condition that checks if upgrade has a specific condition type with given status
 pub fn upgrade_has_condition(
     type_: &str,
