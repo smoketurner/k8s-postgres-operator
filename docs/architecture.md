@@ -49,7 +49,7 @@ The controller is the heart of the operator, implementing the reconciliation loo
 The reconciler handles the main reconciliation logic:
 
 1. **Finalizer handling**: Adds/removes finalizers for graceful deletion
-2. **Validation**: Validates spec changes (version, replicas, etc.)
+2. **Validation**: Validates version changes (no downgrades); spec validation via CEL in CRD
 3. **Change detection**: Compares `metadata.generation` with `status.observedGeneration`
 4. **Resource generation**: Creates/updates all child resources
 5. **Status management**: Updates cluster status and conditions
@@ -64,16 +64,13 @@ async fn reconcile(cluster: Arc<PostgresCluster>, ctx: Arc<Context>) -> Result<A
     // 2. Ensure finalizer exists
     ensure_finalizer(&cluster, &ctx).await?;
 
-    // 3. Validate spec
-    validate_spec(&cluster.spec)?;
-
-    // 4. Check for spec changes
+    // 3. Check for spec changes
     let spec_changed = has_spec_changed(&cluster);
 
-    // 5. Apply child resources
+    // 4. Apply child resources
     apply_resources(&cluster, &ctx).await?;
 
-    // 6. Update status
+    // 5. Update status
     update_status(&cluster, &ctx).await?;
 
     Ok(Action::requeue(Duration::from_secs(60)))
