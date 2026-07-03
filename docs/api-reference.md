@@ -1008,8 +1008,6 @@ For detailed upgrade procedures, see the [Upgrades Guide](upgrades.md).
 | `completedAt` | string | When the upgrade completed (RFC3339) |
 | `phaseStartedAt` | string | When the current phase started (RFC3339) |
 | `message` | string | Status message for current phase |
-| `sourceCluster` | [ClusterStatus](#clusterstatus-upgrade) | Source cluster status |
-| `targetCluster` | [ClusterStatus](#clusterstatus-upgrade) | Target cluster status |
 | `replication` | [ReplicationStatus](#replicationstatus) | Replication status |
 | `verification` | [VerificationStatus](#verificationstatus) | Row count verification status |
 | `sequences` | [SequenceSyncStatus](#sequencesyncstatus) | Sequence synchronization status |
