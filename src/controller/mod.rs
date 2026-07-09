@@ -17,24 +17,8 @@ pub mod upgrade_reconciler;
 pub mod upgrade_state_machine;
 
 // Public exports (used by main.rs, lib.rs, or integration tests)
-pub use cluster_error::{BackoffConfig, Error, Result};
-pub use cluster_reconciler::{FINALIZER, error_policy, reconcile};
+pub use cluster_error::{Error, Result};
+pub use cluster_reconciler::{error_policy, reconcile};
 pub use context::Context;
-pub use database_reconciler::{
-    DatabaseContext, DatabaseError, database_error_policy, reconcile_database,
-};
-pub use upgrade_error::{UpgradeBackoffConfig, UpgradeError, UpgradeResult};
-pub use upgrade_reconciler::{
-    UPGRADE_FINALIZER, UpgradeContext, reconcile_upgrade, upgrade_error_policy,
-};
-pub use upgrade_state_machine::{
-    UpgradeEvent, UpgradeStateMachine, UpgradeTransitionContext, UpgradeTransitionResult,
-};
-// State machine types used by proptest
-pub use cluster_state_machine::{
-    ClusterEvent, ClusterStateMachine, TransitionContext, TransitionResult,
-};
-// Validation types used by proptest and unit tests
-pub use cluster_validation::validate_version_upgrade;
-// Status types used by unit tests
-pub use cluster_status::{ConditionBuilder, condition_status, condition_types, spec_changed};
+pub use database_reconciler::{DatabaseContext, database_error_policy, reconcile_database};
+pub use upgrade_reconciler::{UpgradeContext, reconcile_upgrade, upgrade_error_policy};
