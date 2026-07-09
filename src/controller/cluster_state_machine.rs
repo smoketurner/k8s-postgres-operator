@@ -59,8 +59,6 @@ pub struct TransitionContext {
     pub desired_replicas: i32,
     /// Whether the spec has changed (generation mismatch)
     pub spec_changed: bool,
-    /// Error message if in failed state
-    pub error_message: Option<String>,
     /// Current retry count for backoff
     pub retry_count: i32,
     /// Number of pods with synced spec (observedGeneration == generation) (Kubernetes 1.35+)
@@ -78,7 +76,6 @@ impl TransitionContext {
             ready_replicas,
             desired_replicas,
             spec_changed: false,
-            error_message: None,
             retry_count: 0,
             synced_pods: 0,
             total_pods: 0,
