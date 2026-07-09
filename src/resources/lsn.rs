@@ -22,9 +22,7 @@
 //! [LSN]: https://www.postgresql.org/docs/current/datatype-pg-lsn.html
 
 use std::borrow::Cow;
-use std::cmp::Ordering;
 use std::fmt;
-use std::ops::Sub;
 use std::str::FromStr;
 
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
@@ -93,14 +91,6 @@ impl Lsn {
         let lo = parse_segment("lower", lower)?;
         Ok(Lsn((u64::from(hi) << 32) | u64::from(lo)))
     }
-
-    /// Distance from `older` to `self` in bytes, saturating at zero if
-    /// `self < older`. PostgreSQL's WAL is monotonic, so the saturation
-    /// is defensive — under normal operation `older` is always
-    /// `confirmed_flush_lsn` and `self` is `pg_current_wal_lsn()`.
-    pub fn bytes_ahead_of(self, older: Lsn) -> u64 {
-        self.0.saturating_sub(older.0)
-    }
 }
 
 fn parse_segment(name: &'static str, raw: &str) -> Result<u32, LsnParseError> {
@@ -128,25 +118,6 @@ impl FromStr for Lsn {
     type Err = LsnParseError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Lsn::parse(s)
-    }
-}
-
-impl Sub for Lsn {
-    type Output = u64;
-    fn sub(self, rhs: Lsn) -> u64 {
-        self.bytes_ahead_of(rhs)
-    }
-}
-
-impl PartialEq<u64> for Lsn {
-    fn eq(&self, other: &u64) -> bool {
-        self.0 == *other
-    }
-}
-
-impl PartialOrd<u64> for Lsn {
-    fn partial_cmp(&self, other: &u64) -> Option<Ordering> {
-        Some(self.0.cmp(other))
     }
 }
 
@@ -309,35 +280,6 @@ mod tests {
         assert!(zero < small);
         assert!(small < mid);
         assert!(mid < big);
-    }
-
-    #[test]
-    fn subtraction_is_byte_distance() {
-        let later = Lsn::parse("0/00010000").unwrap();
-        let earlier = Lsn::parse("0/00000000").unwrap();
-        assert_eq!(later - earlier, 0x1_0000);
-    }
-
-    #[test]
-    fn subtraction_saturates_when_lhs_lt_rhs() {
-        let earlier = Lsn::parse("0/00000000").unwrap();
-        let later = Lsn::parse("0/00010000").unwrap();
-        // earlier - later should saturate to 0, not panic or wrap.
-        assert_eq!(earlier - later, 0);
-    }
-
-    #[test]
-    fn bytes_ahead_of_zero_when_equal() {
-        let lsn = Lsn(0xDEAD_BEEF);
-        assert_eq!(lsn.bytes_ahead_of(lsn), 0);
-    }
-
-    #[test]
-    fn comparison_to_u64_uses_packed_value() {
-        // Using the PartialEq<u64> / PartialOrd<u64> impls.
-        assert!(Lsn(42) == 42u64);
-        assert!(Lsn(0) <= 0u64);
-        assert!(Lsn(5) > 4u64);
     }
 
     #[test]
