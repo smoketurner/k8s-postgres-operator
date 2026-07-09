@@ -563,7 +563,6 @@ proptest! {
             ready_replicas: 3,
             desired_replicas: 3,
             spec_changed: false,
-            error_message: None,
             retry_count: 0,
             synced_pods: 3,
             total_pods: 3,

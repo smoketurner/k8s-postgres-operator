@@ -14,7 +14,6 @@ mod transition_context_tests {
         assert_eq!(ctx.ready_replicas, 2);
         assert_eq!(ctx.desired_replicas, 3);
         assert!(!ctx.spec_changed);
-        assert!(ctx.error_message.is_none());
         assert_eq!(ctx.retry_count, 0);
     }
 
@@ -181,7 +180,6 @@ mod transition_context_tests {
     fn test_context_with_full_k8s_135_state() {
         let mut ctx = TransitionContext::new(3, 3);
         ctx.spec_changed = true;
-        ctx.error_message = None;
         ctx.retry_count = 0;
         ctx.synced_pods = 3;
         ctx.total_pods = 3;
