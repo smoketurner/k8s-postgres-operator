@@ -57,7 +57,6 @@ impl<'a> UpgradeValidationContext<'a> {
             source_cluster,
         }
     }
-
 }
 
 /// Validate that target version is greater than source version
