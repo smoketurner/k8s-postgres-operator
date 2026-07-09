@@ -58,10 +58,6 @@ impl<'a> UpgradeValidationContext<'a> {
         }
     }
 
-    /// Check if this is a CREATE operation (no old object)
-    pub fn is_create(&self) -> bool {
-        self.old_upgrade.is_none()
-    }
 }
 
 /// Validate that target version is greater than source version
