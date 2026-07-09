@@ -16,8 +16,3 @@ pub mod secret;
 pub mod service;
 pub mod service_monitor;
 pub mod sql;
-
-pub use common::{
-    API_VERSION, FIELD_MANAGER, KIND, cluster_labels, owner_reference, patroni_labels,
-    standard_labels,
-};
