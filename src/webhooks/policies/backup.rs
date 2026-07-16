@@ -28,6 +28,21 @@ const VIXIE_CRON_MACROS: &[&str] = &[
     "@reboot",
 ];
 
+/// `@`-specials accepted in `LogicalBackupSpec.schedule`.
+///
+/// The logical backup schedule drives a Kubernetes CronJob, whose parser
+/// accepts the standard shortcuts but not `@reboot` — a CronJob has no
+/// "boot" to fire on, so Kubernetes rejects it at apply time.
+const CRONJOB_CRON_MACROS: &[&str] = &[
+    "@yearly",
+    "@annually",
+    "@monthly",
+    "@weekly",
+    "@daily",
+    "@midnight",
+    "@hourly",
+];
+
 /// Validate backup configuration: encryption requirement and schedule format.
 ///
 /// Rules:
@@ -35,6 +50,8 @@ const VIXIE_CRON_MACROS: &[&str] = &[
 /// - If `spec.backup` is configured, `spec.backup.schedule` must be a valid
 ///   cron expression: either a vixie-cron `@`-special or a standard 5-field
 ///   crontab expression (minute hour day-of-month month day-of-week).
+/// - If `spec.backup.logical` is configured, its `schedule` must be valid for
+///   a Kubernetes CronJob (5-field cron or an `@`-special except `@reboot`).
 pub fn validate_backup(ctx: &ValidationContext) -> ValidationResult {
     let spec = &ctx.cluster.spec;
 
@@ -55,33 +72,54 @@ pub fn validate_backup(ctx: &ValidationContext) -> ValidationResult {
         }
     }
 
-    validate_schedule(&backup.schedule)
+    let result = validate_schedule(&backup.schedule, "spec.backup.schedule", VIXIE_CRON_MACROS);
+    if !result.allowed {
+        return result;
+    }
+
+    // The logical backup schedule feeds a Kubernetes CronJob, which supports
+    // a narrower macro set than Spilo's crontab (no @reboot).
+    if let Some(logical) = &backup.logical {
+        return validate_schedule(
+            &logical.schedule,
+            "spec.backup.logical.schedule",
+            CRONJOB_CRON_MACROS,
+        );
+    }
+
+    ValidationResult::allowed()
 }
 
 /// Validate a cron schedule string.
 ///
-/// Accepts vixie-cron `@`-specials (`@daily`, `@hourly`, `@reboot`, ...) and
-/// standard 5-field crontab expressions. Returns a denial with an actionable
-/// message when the schedule is empty or malformed.
-fn validate_schedule(schedule: &str) -> ValidationResult {
+/// Accepts the `@`-specials listed in `allowed_macros` and standard 5-field
+/// crontab expressions. Returns a denial naming `field_path` with an
+/// actionable message when the schedule is empty or malformed.
+fn validate_schedule(
+    schedule: &str,
+    field_path: &str,
+    allowed_macros: &[&str],
+) -> ValidationResult {
     let trimmed = schedule.trim();
     if trimmed.is_empty() {
         return ValidationResult::denied(
             "BackupScheduleInvalid",
-            "spec.backup.schedule must not be empty. Provide a 5-field cron expression (e.g., \"0 2 * * *\") or a shortcut like \"@daily\".",
+            &format!(
+                "{field_path} must not be empty. Provide a 5-field cron expression (e.g., \"0 2 * * *\") or a shortcut like \"@daily\".",
+            ),
         );
     }
 
     if trimmed.starts_with('@') {
         let lower = trimmed.to_ascii_lowercase();
-        if VIXIE_CRON_MACROS.contains(&lower.as_str()) {
+        if allowed_macros.contains(&lower.as_str()) {
             return ValidationResult::allowed();
         }
         return ValidationResult::denied(
             "BackupScheduleInvalid",
             &format!(
-                "spec.backup.schedule {schedule:?} is not a recognized cron shortcut. Supported shortcuts: {}.",
-                VIXIE_CRON_MACROS.join(", "),
+                "{field_path} {schedule:?} is not a recognized cron shortcut. Supported shortcuts: {}.",
+                allowed_macros.join(", "),
             ),
         );
     }
@@ -91,7 +129,7 @@ fn validate_schedule(schedule: &str) -> ValidationResult {
         return ValidationResult::denied(
             "BackupScheduleInvalid",
             &format!(
-                "spec.backup.schedule {schedule:?} must have 5 fields (minute hour day-of-month month day-of-week); found {field_count}.",
+                "{field_path} {schedule:?} must have 5 fields (minute hour day-of-month month day-of-week); found {field_count}.",
             ),
         );
     }
@@ -105,7 +143,7 @@ fn validate_schedule(schedule: &str) -> ValidationResult {
         Ok(_) => ValidationResult::allowed(),
         Err(err) => ValidationResult::denied(
             "BackupScheduleInvalid",
-            &format!("spec.backup.schedule {schedule:?} is not a valid cron expression: {err}"),
+            &format!("{field_path} {schedule:?} is not a valid cron expression: {err}"),
         ),
     }
 }
@@ -421,6 +459,90 @@ mod tests {
         assert!(
             message.contains("60 2 * * *"),
             "expected message to echo schedule, got {message:?}",
+        );
+    }
+
+    // --- spec.backup.logical.schedule (Kubernetes CronJob syntax) ---------
+
+    fn backup_with_logical_schedule(schedule: &str) -> BackupSpec {
+        let mut backup = valid_backup_with_encryption();
+        backup.logical = Some(crate::crd::LogicalBackupSpec {
+            enabled: true,
+            schedule: schedule.to_string(),
+            image: None,
+            resources: None,
+            successful_jobs_history_limit: None,
+            failed_jobs_history_limit: None,
+        });
+        backup
+    }
+
+    #[test]
+    fn test_logical_schedule_valid_five_field() {
+        let result = validate(backup_with_logical_schedule("0 3 * * *"));
+        assert!(result.allowed, "expected allowed, got {result:?}");
+    }
+
+    #[test]
+    fn test_logical_schedule_valid_daily_macro() {
+        let result = validate(backup_with_logical_schedule("@daily"));
+        assert!(result.allowed, "expected allowed, got {result:?}");
+    }
+
+    #[test]
+    fn test_logical_schedule_reboot_denied() {
+        // @reboot is valid for Spilo's crontab but not for a CronJob.
+        let result = validate(backup_with_logical_schedule("@reboot"));
+        assert!(!result.allowed);
+        assert_eq!(result.reason.as_deref(), Some("BackupScheduleInvalid"));
+        assert!(
+            result
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("spec.backup.logical.schedule"),
+            "message was {:?}",
+            result.message,
+        );
+    }
+
+    #[test]
+    fn test_logical_schedule_empty_denied() {
+        let result = validate(backup_with_logical_schedule(""));
+        assert!(!result.allowed);
+        assert!(
+            result
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("spec.backup.logical.schedule"),
+            "message was {:?}",
+            result.message,
+        );
+    }
+
+    #[test]
+    fn test_logical_schedule_garbage_denied() {
+        let result = validate(backup_with_logical_schedule("every day at 3"));
+        assert!(!result.allowed);
+        assert_eq!(result.reason.as_deref(), Some("BackupScheduleInvalid"));
+    }
+
+    #[test]
+    fn test_invalid_logical_schedule_does_not_mask_primary_schedule() {
+        // Primary schedule invalid + logical valid: the primary error wins.
+        let mut backup = backup_with_logical_schedule("@daily");
+        backup.schedule = "not a cron".to_string();
+        let result = validate(backup);
+        assert!(!result.allowed);
+        assert!(
+            result
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("spec.backup.schedule"),
+            "message was {:?}",
+            result.message,
         );
     }
 }

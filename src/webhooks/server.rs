@@ -95,9 +95,30 @@ pub(crate) async fn validate_postgres_cluster(
     // Get the old object for UPDATE operations (already typed)
     let old_cluster: Option<&PostgresCluster> = request.old_object.as_ref();
 
-    // Get namespace labels for production policy
+    // Get namespace labels for production policy. Fail closed: if the
+    // namespace cannot be read we cannot tell whether production policies
+    // apply, so deny rather than silently skipping enforcement.
     let namespace_labels = match &request.namespace {
-        Some(ns) => get_namespace_labels(&state.client, ns).await,
+        Some(ns) => match get_namespace_labels(&state.client, ns).await {
+            Ok(labels) => labels,
+            Err(e) => {
+                warn!(uid = %uid, namespace = %ns, error = %e, "Admission request denied - namespace lookup failed");
+                return (
+                    StatusCode::OK,
+                    Json(deny_with_reason(
+                        &request,
+                        &format!(
+                            "Unable to verify labels for namespace '{}': {}. \
+                             Namespace labels gate production policy enforcement, \
+                             so the request is denied. Retry once the Kubernetes \
+                             API is reachable.",
+                            ns, e
+                        ),
+                        "NamespaceLookupFailed",
+                    )),
+                );
+            }
+        },
         None => BTreeMap::new(),
     };
 
@@ -152,16 +173,17 @@ pub(crate) async fn validate_postgres_cluster(
 }
 
 /// Get namespace labels for policy decisions
-async fn get_namespace_labels(client: &Client, namespace: &str) -> BTreeMap<String, String> {
+///
+/// Returns an error when the namespace cannot be read so callers can fail
+/// closed: an empty label map is indistinguishable from "not a production
+/// namespace" and would silently bypass production policies.
+async fn get_namespace_labels(
+    client: &Client,
+    namespace: &str,
+) -> Result<BTreeMap<String, String>, kube::Error> {
     let ns_api: Api<Namespace> = Api::all(client.clone());
-
-    match ns_api.get(namespace).await {
-        Ok(ns) => ns.metadata.labels.unwrap_or_default(),
-        Err(e) => {
-            warn!(namespace = %namespace, error = %e, "Failed to get namespace, using empty labels");
-            BTreeMap::new()
-        }
-    }
+    let ns = ns_api.get(namespace).await?;
+    Ok(ns.metadata.labels.unwrap_or_default())
 }
 
 /// Pure helper: scan a list of `PostgresUpgrade` objects for one that
@@ -201,7 +223,10 @@ fn find_active_upgrade_for_cluster<'a>(
 /// Requires cluster-wide list permission on `postgresupgrades`; the
 /// operator ClusterRole already grants this (see `config/rbac/role.yaml`).
 ///
-/// Returns Some((reason, message)) if an upgrade is blocking modifications, None otherwise.
+/// Returns Some((reason, message)) if an upgrade is blocking modifications or
+/// the check could not be performed (fail-closed); None when it is verified
+/// that no active upgrade references the cluster (a 404 from a missing
+/// PostgresUpgrade CRD counts as verified — no upgrades can exist).
 async fn check_cluster_upgrade_in_progress(
     client: &Client,
     namespace: &str,
@@ -232,16 +257,35 @@ async fn check_cluster_upgrade_in_progress(
                 ),
             ))
         }
+        // The PostgresUpgrade CRD not being installed means no upgrades can
+        // exist, so allowing is safe (and keeps cluster-only installs working).
+        Err(kube::Error::Api(er)) if er.code == 404 => {
+            warn!(
+                namespace = %namespace,
+                cluster = %cluster_name,
+                "PostgresUpgrade CRD not installed, skipping upgrade-in-progress check"
+            );
+            None
+        }
+        // Any other failure means we cannot verify whether an upgrade is
+        // active. Fail closed: modifying a cluster mid-upgrade can corrupt
+        // the upgrade, so deny until the check can be performed.
         Err(e) => {
-            // If we can't check, log but allow the operation
-            // (fail-open to avoid blocking normal operations if CRD isn't installed)
             warn!(
                 namespace = %namespace,
                 cluster = %cluster_name,
                 error = %e,
-                "Failed to check for active upgrades, allowing operation"
+                "Failed to check for active upgrades, denying operation"
             );
-            None
+            Some((
+                "UpgradeCheckFailed".to_string(),
+                format!(
+                    "Unable to verify whether cluster '{}/{}' has an upgrade in \
+                     progress: {}. Modifications are denied until the check \
+                     succeeds; retry once the Kubernetes API is reachable.",
+                    namespace, cluster_name, e
+                ),
+            ))
         }
     }
 }
