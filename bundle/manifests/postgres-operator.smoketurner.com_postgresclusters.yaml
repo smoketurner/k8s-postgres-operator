@@ -1012,6 +1012,11 @@ spec:
               retryCount:
                 description: Current retry count for exponential backoff
                 type: integer
+              selector:
+                description: Serialized label selector for this cluster's PostgreSQL
+                  pods, exposed via the scale subresource's labelSelectorPath so HPA/VPA
+                  can discover the pods backing this cluster.
+                type: string
               successor:
                 description: Reference to the successor cluster that superseded this
                   one after an upgrade
@@ -1041,8 +1046,9 @@ spec:
     storage: true
     subresources:
       scale:
+        labelSelectorPath: .status.selector
         specReplicasPath: .spec.replicas
-        statusReplicasPath: .status.replicas
+        statusReplicasPath: .status.readyReplicas
       status: {}
 status:
   acceptedNames:

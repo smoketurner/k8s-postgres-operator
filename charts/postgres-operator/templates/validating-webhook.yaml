@@ -45,4 +45,37 @@ webhooks:
       - v1
     timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
     matchPolicy: Equivalent
+  - name: validate.postgresupgrade.postgres-operator.smoketurner.com
+    clientConfig:
+      service:
+        name: {{ include "postgres-operator.fullname" . }}-webhook
+        namespace: {{ .Release.Namespace }}
+        path: /validate-upgrade
+        port: 443
+      {{- if not .Values.webhook.certManager.enabled }}
+      caBundle: {{ required "webhook.caBundle is required when webhook.certManager.enabled is false" .Values.webhook.caBundle | quote }}
+      {{- else }}
+      caBundle: ""
+      {{- end }}
+    rules:
+      - apiGroups:
+          - postgres-operator.smoketurner.com
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - postgresupgrades
+        scope: Namespaced
+    failurePolicy: {{ .Values.webhook.failurePolicy }}
+    {{- with .Values.webhook.namespaceSelector }}
+    namespaceSelector:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    sideEffects: None
+    admissionReviewVersions:
+      - v1
+    timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+    matchPolicy: Equivalent
 {{- end }}

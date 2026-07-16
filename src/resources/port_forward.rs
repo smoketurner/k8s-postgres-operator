@@ -10,9 +10,7 @@
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::ListParams;
 use kube::{Api, Client};
-use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -94,11 +92,6 @@ impl PortForward {
         target: PortForwardTarget,
         local_port: Option<u16>,
     ) -> Result<Self, PortForwardError> {
-        let local_port = match local_port {
-            Some(p) => p,
-            None => get_available_port()?,
-        };
-
         let remote_port = target.remote_port();
 
         // Resolve target to a pod name
@@ -108,6 +101,15 @@ impl PortForward {
                 resolve_service_to_pod(&client, namespace, name).await?
             }
         };
+
+        // Bind the listener before spawning the forwarding task so bind
+        // failures propagate to the caller instead of being logged inside a
+        // detached task while `start()` reports success. Binding to port 0
+        // when no explicit port is requested lets the OS pick a free port,
+        // avoiding the reserve-then-rebind race of probing for one.
+        let bind_addr = format!("127.0.0.1:{}", local_port.unwrap_or(0));
+        let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+        let local_port = listener.local_addr()?.port();
 
         tracing::debug!(
             namespace = namespace,
@@ -123,17 +125,10 @@ impl PortForward {
         let ns = namespace.to_string();
         let pod = pod_name.clone();
 
-        // Start the port forwarding task
+        // Start the port forwarding task with the already-bound listener
         let handle = tokio::spawn(async move {
-            if let Err(e) =
-                run_port_forward(client, &ns, &pod, local_port, remote_port, shutdown_rx).await
-            {
-                tracing::warn!(error = %e, "Port forward error");
-            }
+            run_port_forward(client, &ns, &pod, listener, remote_port, shutdown_rx).await;
         });
-
-        // Wait a moment for the listener to start
-        tokio::time::sleep(Duration::from_millis(100)).await;
 
         tracing::info!(
             local_port = local_port,
@@ -244,21 +239,21 @@ async fn resolve_service_to_pod(
         .ok_or_else(|| PortForwardError::NoPodsFound(service_name.to_string()))
 }
 
-/// Run the port forwarding loop
+/// Run the port forwarding loop on an already-bound listener.
+///
+/// The listener is bound by `PortForward::start()` so that bind errors reach
+/// the caller; this loop only accepts connections and forwards them.
 async fn run_port_forward(
     client: Client,
     namespace: &str,
     pod_name: &str,
-    local_port: u16,
+    listener: tokio::net::TcpListener,
     remote_port: u16,
     mut shutdown_rx: oneshot::Receiver<()>,
-) -> Result<(), PortForwardError> {
+) {
     let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
 
-    // Bind to the local port
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", local_port)).await?;
-
-    tracing::debug!(local_port = local_port, "Port forward listener started");
+    tracing::debug!("Port forward listener started");
 
     loop {
         tokio::select! {
@@ -293,8 +288,6 @@ async fn run_port_forward(
             }
         }
     }
-
-    Ok(())
 }
 
 /// Handle a single port-forward connection
@@ -354,22 +347,24 @@ async fn handle_connection(
     Ok(())
 }
 
-/// Find an available local port by binding to port 0
-pub fn get_available_port() -> Result<u16, PortForwardError> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let port = listener.local_addr()?.port();
-    Ok(port)
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_get_available_port() {
-        let port = get_available_port().expect("should find port");
-        assert!(port > 0);
+    /// Bind failures must surface from `start()` itself, not be swallowed in
+    /// the forwarding task. Requesting a port that is already bound is the
+    /// simplest failure to provoke without a cluster; occupy one and assert
+    /// binding it again errors the same way `start()` now would.
+    #[tokio::test]
+    async fn test_bind_conflict_is_observable() {
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind to ephemeral port");
+        let port = occupied.local_addr().expect("local addr").port();
+
+        let result = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port)).await;
+        assert!(result.is_err(), "binding an occupied port must fail");
     }
 
     #[test]

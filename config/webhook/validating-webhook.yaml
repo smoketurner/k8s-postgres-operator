@@ -1,6 +1,6 @@
-# ValidatingWebhookConfiguration for PostgresCluster
+# ValidatingWebhookConfiguration for PostgresCluster and PostgresUpgrade
 #
-# Policies enforced:
+# PostgresCluster policies enforced:
 # - Tier 1 (Always):
 #   - BackupEncryptionRequired: Backups must have encryption configured
 #   - TLSIssuerRequired: TLS enabled requires an issuer reference
@@ -12,6 +12,12 @@
 #   - ProductionBackupRequired: Backup must be configured
 #   - ProductionResourceLimitsRequired: CPU and memory limits required
 #   - ProductionExternalAccessNotAllowed: External network access prohibited
+#
+# PostgresUpgrade policies enforced (/validate-upgrade):
+#   - SourceClusterImmutable / TargetVersionImmutable: spec cannot be
+#     repointed after creation
+#   - Version compatibility and source cluster state checks
+#   - ConcurrentUpgradeNotAllowed: one active upgrade per source cluster
 #
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
@@ -49,6 +55,36 @@ webhooks:
     # namespaceSelector:
     #   matchLabels:
     #     postgres-operator.smoketurner.com/validate: "true"
+    sideEffects: None
+    admissionReviewVersions:
+      - v1
+    # Timeout for webhook calls (default: 10s)
+    timeoutSeconds: 10
+    # Only validate when object actually changes
+    matchPolicy: Equivalent
+  - name: validate.postgresupgrade.postgres-operator.smoketurner.com
+    clientConfig:
+      service:
+        name: postgres-operator-webhook
+        namespace: postgres-operator-system
+        path: /validate-upgrade
+        port: 443
+      # CA bundle will be injected by cert-manager
+      caBundle: ""
+    rules:
+      - apiGroups:
+          - postgres-operator.smoketurner.com
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - postgresupgrades
+        scope: Namespaced
+    # Fail closed - reject requests if webhook is unavailable
+    # Change to Ignore for development/testing environments
+    failurePolicy: Fail
     sideEffects: None
     admissionReviewVersions:
       - v1

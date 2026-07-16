@@ -34,7 +34,7 @@ use crate::controller::cluster_state_machine::{
 };
 use crate::controller::cluster_status::{RunningProgress, StatusManager, spec_changed};
 use crate::controller::context::Context;
-use crate::controller::finalizer::remove_operator_finalizer;
+use crate::controller::finalizer::{add_operator_finalizer, remove_operator_finalizer};
 use crate::crd::{ClusterPhase, PostgresCluster, annotations as upgrade_annotations};
 use crate::resources::{
     backup, certificate, logical_backup, network_policy, patroni, pdb, pgbouncer, scaled_object,
@@ -169,14 +169,39 @@ async fn check_missing_resources(
 /// After this duration, the cluster will transition to Failed state
 const CREATING_TIMEOUT_SECS: i64 = 600;
 
-/// Backfill the `connection-string` key into an existing credentials Secret.
+/// Read the current `connection-string` value from a credentials Secret.
+///
+/// Server-side, `stringData` is merged into `data`, but check both so a
+/// not-yet-persisted value is still observed.
+fn current_connection_string(secret: &Secret) -> Option<String> {
+    secret
+        .data
+        .as_ref()
+        .and_then(|d| d.get(secret::CONNECTION_STRING_KEY))
+        .and_then(|b| String::from_utf8(b.0.clone()).ok())
+        .or_else(|| {
+            secret
+                .string_data
+                .as_ref()
+                .and_then(|d| d.get(secret::CONNECTION_STRING_KEY))
+                .cloned()
+        })
+}
+
+/// Backfill or refresh the `connection-string` key in an existing credentials
+/// Secret.
 ///
 /// The credentials Secret is only created when absent (its passwords are random
 /// and must not be regenerated on every reconcile), so clusters created before
 /// the `connection-string` key existed never receive it — breaking KEDA
-/// connection-based scaling. This adds the key in place, derived from the
-/// already-stored superuser password, without touching the passwords. No-op when
-/// the key is already present or the password cannot be read.
+/// connection-based scaling. The key is also derived from `spec.tls.enabled`
+/// (`sslmode=require` vs `disable`), so it must be rewritten when TLS is
+/// toggled or KEDA keeps connecting with a stale `sslmode` and scaling breaks.
+///
+/// Rebuilds the desired value from the already-stored superuser password and
+/// patches only this key when it is missing or differs, leaving the password
+/// keys untouched. No-op when the value already matches or the password cannot
+/// be read.
 async fn backfill_connection_string(
     ctx: &Context,
     ns: &str,
@@ -185,19 +210,6 @@ async fn backfill_connection_string(
     existing: &Secret,
     tls_enabled: bool,
 ) -> Result<()> {
-    // Server-side, stringData is merged into data, so the key shows up in `data`.
-    let already_present = existing
-        .data
-        .as_ref()
-        .is_some_and(|d| d.contains_key(secret::CONNECTION_STRING_KEY))
-        || existing
-            .string_data
-            .as_ref()
-            .is_some_and(|d| d.contains_key(secret::CONNECTION_STRING_KEY));
-    if already_present {
-        return Ok(());
-    }
-
     // Recover the superuser password from the existing secret (kube decodes
     // `data` values to raw bytes).
     let Some(password) = existing
@@ -215,6 +227,13 @@ async fn backfill_connection_string(
 
     let connection_string =
         secret::build_connection_string(cluster_name, ns, &password, tls_enabled);
+
+    // Skip the write when the stored value already matches (the common case);
+    // credentials secrets should not be touched on every reconcile.
+    if current_connection_string(existing).as_deref() == Some(connection_string.as_str()) {
+        return Ok(());
+    }
+
     let secrets_api: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
     let patch = serde_json::json!({
         "stringData": { secret::CONNECTION_STRING_KEY: connection_string }
@@ -226,7 +245,10 @@ async fn backfill_connection_string(
             &Patch::Merge(&patch),
         )
         .await?;
-    debug!("Backfilled connection-string into secret {}", secret_name);
+    debug!(
+        "Backfilled/refreshed connection-string in secret {}",
+        secret_name
+    );
     Ok(())
 }
 
@@ -639,6 +661,22 @@ async fn check_and_update_status(
                         );
                         status_manager.set_failed("ReplicasLost", &msg).await?;
                     }
+                    ClusterPhase::Degraded => {
+                        let msg = format!(
+                            "Cluster degraded: {}/{} replicas ready",
+                            ready_replicas, cluster.spec.replicas
+                        );
+                        status_manager
+                            .set_degraded(
+                                ready_replicas,
+                                cluster.spec.replicas,
+                                primary_pod,
+                                replica_pods,
+                                "ReplicasDegraded",
+                                &msg,
+                            )
+                            .await?;
+                    }
                     _ => {
                         status_manager
                             .set_updating(
@@ -650,6 +688,7 @@ async fn check_and_update_status(
                             .await?;
                     }
                 }
+                emit_state_transition_event(cluster, ctx, current_phase, to, description).await;
             }
             _ => {
                 status_manager
@@ -702,13 +741,7 @@ async fn check_and_update_status(
     }
 
     // Apply the optional logical backup CronJob (pg_dumpall). Non-fatal.
-    if let Err(e) = reconcile_logical_backup(cluster, ctx, ns).await {
-        warn!(
-            cluster = %name,
-            error = %e,
-            "Failed to reconcile logical backup CronJob (non-fatal)"
-        );
-    }
+    reconcile_logical_backup_nonfatal(cluster, ctx, ns).await;
 
     // Update PgBouncer ready replicas status if PgBouncer is enabled
     if pgbouncer::is_pgbouncer_enabled(cluster) {
@@ -1226,13 +1259,7 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
     }
 
     // Apply the optional logical backup CronJob (pg_dumpall). Non-fatal.
-    if let Err(e) = reconcile_logical_backup(cluster, ctx, ns).await {
-        warn!(
-            cluster = %name,
-            error = %e,
-            "Failed to reconcile logical backup CronJob (non-fatal)"
-        );
-    }
+    reconcile_logical_backup_nonfatal(cluster, ctx, ns).await;
 
     // Check StatefulSet status
     let sts_api: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), ns);
@@ -2147,6 +2174,33 @@ async fn reconcile_monitoring_resources(
     Ok(())
 }
 
+/// Reconcile the optional `pg_dumpall` CronJob, treating failure as non-fatal
+/// but surfacing it as a Warning event. A warn-level log alone left users with
+/// no `kubectl describe` visibility when the CronJob could not be applied
+/// (e.g. an invalid `spec.backup.logical.schedule`), so backups silently
+/// never happened.
+async fn reconcile_logical_backup_nonfatal(cluster: &PostgresCluster, ctx: &Context, ns: &str) {
+    if let Err(e) = reconcile_logical_backup(cluster, ctx, ns).await {
+        warn!(
+            cluster = %cluster.name_any(),
+            error = %e,
+            "Failed to reconcile logical backup CronJob (non-fatal)"
+        );
+        ctx.publish_warning_event(
+            cluster,
+            "LogicalBackupReconcileFailed",
+            "ReconcileLogicalBackup",
+            Some(format!(
+                "Failed to reconcile logical backup CronJob: {}. \
+                 Scheduled logical backups are not running; check \
+                 spec.backup.logical (e.g. the schedule format).",
+                e
+            )),
+        )
+        .await;
+    }
+}
+
 /// Reconcile the optional `pg_dumpall` CronJob. Creates/updates it when
 /// `spec.backup.logical.enabled` is true; deletes a previously-managed
 /// CronJob otherwise.
@@ -2183,25 +2237,13 @@ fn has_finalizer(cluster: &PostgresCluster) -> bool {
         .is_some_and(|f| f.contains(&FINALIZER.to_string()))
 }
 
-/// Add the finalizer to the resource
+/// Add the finalizer to the resource, preserving any existing finalizers
 async fn add_finalizer(cluster: &PostgresCluster, ctx: &Context, ns: &str) -> Result<()> {
     let api: Api<PostgresCluster> = Api::namespaced(ctx.client.clone(), ns);
     let name = cluster.name_any();
 
-    let patch = serde_json::json!({
-        "metadata": {
-            "finalizers": [FINALIZER]
-        }
-    });
+    add_operator_finalizer(&api, &name, cluster.metadata.finalizers.as_ref(), FINALIZER).await?;
 
-    api.patch(
-        &name,
-        &PatchParams::apply("postgres-operator"),
-        &Patch::Merge(&patch),
-    )
-    .await?;
-
-    info!("Added finalizer to {}", name);
     Ok(())
 }
 
@@ -3050,5 +3092,70 @@ mod tests {
             "PATRONI_DEADLOCK_GRACE ({grace}s) must be >= startup probe window ({probe}s) \
              to avoid killing legitimately slow bootstraps. See issue #109."
         );
+    }
+
+    // --- connection-string staleness (#186) -------------------------------
+    //
+    // Toggling spec.tls.enabled changes the sslmode in the desired connection
+    // string; the stored value must then be detected as stale so KEDA gets a
+    // connection string matching the cluster's actual TLS state.
+
+    use super::current_connection_string;
+    use crate::resources::secret::{CONNECTION_STRING_KEY, build_connection_string};
+    use k8s_openapi::ByteString;
+    use k8s_openapi::api::core::v1::Secret;
+    use std::collections::BTreeMap;
+
+    fn secret_with_connection_string(value: &str) -> Secret {
+        let mut data = BTreeMap::new();
+        data.insert(
+            CONNECTION_STRING_KEY.to_string(),
+            ByteString(value.as_bytes().to_vec()),
+        );
+        Secret {
+            data: Some(data),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn connection_string_stale_after_tls_toggle() {
+        let stored = build_connection_string("db", "ns", "pw", true);
+        let secret = secret_with_connection_string(&stored);
+        let desired = build_connection_string("db", "ns", "pw", false);
+        assert_ne!(
+            current_connection_string(&secret).as_deref(),
+            Some(desired.as_str()),
+            "sslmode change must be detected as stale"
+        );
+    }
+
+    #[test]
+    fn connection_string_current_when_unchanged() {
+        let stored = build_connection_string("db", "ns", "pw", true);
+        let secret = secret_with_connection_string(&stored);
+        let desired = build_connection_string("db", "ns", "pw", true);
+        assert_eq!(
+            current_connection_string(&secret).as_deref(),
+            Some(desired.as_str()),
+            "unchanged value must not trigger a secret write"
+        );
+    }
+
+    #[test]
+    fn connection_string_read_from_string_data() {
+        let mut string_data = BTreeMap::new();
+        string_data.insert(CONNECTION_STRING_KEY.to_string(), "value".to_string());
+        let secret = Secret {
+            string_data: Some(string_data),
+            ..Default::default()
+        };
+        assert_eq!(current_connection_string(&secret).as_deref(), Some("value"));
+    }
+
+    #[test]
+    fn connection_string_missing_key_reads_none() {
+        let secret = Secret::default();
+        assert_eq!(current_connection_string(&secret), None);
     }
 }

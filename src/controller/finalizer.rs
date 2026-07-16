@@ -1,5 +1,5 @@
-//! Shared helpers for removing the operator's finalizer without disturbing
-//! Kubernetes system finalizers.
+//! Shared helpers for adding and removing the operator's finalizer without
+//! disturbing Kubernetes system finalizers.
 //!
 //! Earlier versions of the reconcilers cleared the entire `metadata.finalizers`
 //! array by patching it to `null`. Under JSON Merge Patch semantics, a `null`
@@ -33,6 +33,70 @@ pub fn filter_finalizers(current: &[String], finalizer_to_remove: &str) -> Vec<S
         .filter(|f| f.as_str() != finalizer_to_remove)
         .cloned()
         .collect()
+}
+
+/// Return a new vector containing every existing finalizer plus
+/// `finalizer_to_add` appended, or `None` when it is already present.
+///
+/// Pure helper so the append logic can be unit tested without a Kubernetes
+/// client.
+#[must_use]
+pub fn append_finalizer(current: &[String], finalizer_to_add: &str) -> Option<Vec<String>> {
+    if current.iter().any(|f| f == finalizer_to_add) {
+        return None;
+    }
+    let mut finalizers = current.to_vec();
+    finalizers.push(finalizer_to_add.to_string());
+    Some(finalizers)
+}
+
+/// Add the operator's finalizer to a Kubernetes resource while preserving any
+/// other finalizers (user-added, system finalizers like `foregroundDeletion`,
+/// or those owned by other controllers).
+///
+/// Returns `Ok(())` without contacting the API server when the finalizer is
+/// already present.
+///
+/// The patch is sent with JSON Merge Patch semantics. Because Merge Patch
+/// replaces array fields wholesale, the full list (existing finalizers plus
+/// ours) is written back — patching `[finalizer]` alone would silently clobber
+/// every other finalizer on the object.
+///
+/// # Errors
+///
+/// Returns any error from `Api::patch`.
+pub async fn add_operator_finalizer<K>(
+    api: &Api<K>,
+    name: &str,
+    current_finalizers: Option<&Vec<String>>,
+    finalizer_to_add: &str,
+) -> Result<(), kube::Error>
+where
+    K: Resource + Clone + DeserializeOwned + Debug,
+{
+    let current = current_finalizers.map(Vec::as_slice).unwrap_or_default();
+    let Some(finalizers) = append_finalizer(current, finalizer_to_add) else {
+        return Ok(());
+    };
+
+    let patch = serde_json::json!({
+        "metadata": {
+            "finalizers": finalizers
+        }
+    });
+
+    api.patch(
+        name,
+        &PatchParams::apply("postgres-operator"),
+        &Patch::Merge(&patch),
+    )
+    .await?;
+
+    info!(
+        "Added finalizer {} to {} (full set: {:?})",
+        finalizer_to_add, name, finalizers
+    );
+    Ok(())
 }
 
 /// Remove the operator's finalizer from a Kubernetes resource while preserving
@@ -143,5 +207,32 @@ mod tests {
         ];
         let filtered = filter_finalizers(&current, OPERATOR);
         assert_eq!(filtered, vec![FOREGROUND.to_string()]);
+    }
+
+    #[test]
+    fn append_to_empty_yields_single_finalizer() {
+        let current: Vec<String> = Vec::new();
+        let appended = append_finalizer(&current, OPERATOR);
+        assert_eq!(appended, Some(vec![OPERATOR.to_string()]));
+    }
+
+    #[test]
+    fn append_preserves_existing_finalizers() {
+        let current = vec![FOREGROUND.to_string(), CUSTOM.to_string()];
+        let appended = append_finalizer(&current, OPERATOR);
+        assert_eq!(
+            appended,
+            Some(vec![
+                FOREGROUND.to_string(),
+                CUSTOM.to_string(),
+                OPERATOR.to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn append_is_noop_when_already_present() {
+        let current = vec![FOREGROUND.to_string(), OPERATOR.to_string()];
+        assert_eq!(append_finalizer(&current, OPERATOR), None);
     }
 }

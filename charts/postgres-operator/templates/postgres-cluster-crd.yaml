@@ -31,7 +31,12 @@ spec:
         status: {}
         scale:
           specReplicasPath: .spec.replicas
-          statusReplicasPath: .status.replicas
+          # Actual (ready) replicas, not the desired count — HPA scales
+          # relative to the current state.
+          statusReplicasPath: .status.readyReplicas
+          # Required for HPA/VPA: exposes the pod label selector through the
+          # /scale subresource so the autoscaler can find the pods to measure.
+          labelSelectorPath: .status.selector
       additionalPrinterColumns:
         - name: Version
           type: string
@@ -776,6 +781,9 @@ spec:
                 replicas:
                   type: integer
                   description: Total replica count observed in the StatefulSet.
+                selector:
+                  type: string
+                  description: Serialized label selector for this cluster's PostgreSQL pods, exposed via the scale subresource's labelSelectorPath so HPA/VPA can discover the pods backing this cluster.
                 primaryPod:
                   type: string
                   description: Name of the pod currently holding the Patroni leader lease.

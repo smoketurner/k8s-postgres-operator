@@ -489,3 +489,26 @@ spec:
     timeoutSeconds: 10
     type: ValidatingAdmissionWebhook
     webhookPath: /validate
+  - admissionReviewVersions:
+    - v1
+    containerPort: 443
+    deploymentName: postgres-operator
+    failurePolicy: Fail
+    generateName: validate.postgresupgrade.postgres-operator.smoketurner.com
+    matchPolicy: Equivalent
+    rules:
+    - apiGroups:
+      - postgres-operator.smoketurner.com
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - postgresupgrades
+      scope: Namespaced
+    sideEffects: None
+    targetPort: 8443
+    timeoutSeconds: 10
+    type: ValidatingAdmissionWebhook
+    webhookPath: /validate-upgrade

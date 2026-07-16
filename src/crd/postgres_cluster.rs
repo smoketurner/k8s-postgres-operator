@@ -87,7 +87,7 @@ impl PostgresVersion {
     category = "databases",
     category = "postgresql",
     category = "all",
-    scale = r#"{"specReplicasPath": ".spec.replicas", "statusReplicasPath": ".status.replicas"}"#,
+    scale = r#"{"specReplicasPath": ".spec.replicas", "statusReplicasPath": ".status.readyReplicas", "labelSelectorPath": ".status.selector"}"#,
     printcolumn = r#"{"name":"Version", "type":"string", "jsonPath":".spec.version"}"#,
     printcolumn = r#"{"name":"Replicas", "type":"integer", "jsonPath":".spec.replicas"}"#,
     printcolumn = r#"{"name":"Phase", "type":"string", "jsonPath":".status.phase"}"#,
@@ -1280,6 +1280,12 @@ pub struct PostgresClusterStatus {
     /// Total desired replicas
     #[serde(default)]
     pub replicas: i32,
+
+    /// Serialized label selector for this cluster's PostgreSQL pods, exposed
+    /// via the scale subresource's `labelSelectorPath` so HPA/VPA can discover
+    /// the pods backing this cluster. Set on every status update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
 
     /// Name of the current primary pod
     #[serde(default, skip_serializing_if = "Option::is_none")]
