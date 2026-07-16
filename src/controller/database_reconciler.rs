@@ -17,7 +17,7 @@ use tracing::{debug, error, info, instrument, warn};
 use crate::controller::cleanup::{cleanup_stuck_resource, is_namespace_not_found_error};
 use crate::controller::conditions::{new_condition, set_status_condition, status as cond_status};
 use crate::controller::events;
-use crate::controller::finalizer::remove_operator_finalizer;
+use crate::controller::finalizer::{add_operator_finalizer, remove_operator_finalizer};
 use crate::crd::{
     ClusterPhase, Condition, DatabaseConditionType, DatabaseConnectionInfo, DatabasePhase,
     GrantSpec, PostgresCluster, PostgresDatabase, PostgresDatabaseStatus, RoleSpec,
@@ -712,7 +712,7 @@ fn has_finalizer(db: &PostgresDatabase) -> bool {
         .unwrap_or(false)
 }
 
-/// Add finalizer to the resource
+/// Add finalizer to the resource, preserving any existing finalizers
 async fn add_finalizer(
     db: &PostgresDatabase,
     ctx: &DatabaseContext,
@@ -721,19 +721,13 @@ async fn add_finalizer(
     let name = db.name_any();
     let databases: Api<PostgresDatabase> = Api::namespaced(ctx.client.clone(), namespace);
 
-    let patch = serde_json::json!({
-        "metadata": {
-            "finalizers": [DATABASE_FINALIZER]
-        }
-    });
-
-    databases
-        .patch(
-            &name,
-            &PatchParams::apply("postgres-operator"),
-            &Patch::Merge(&patch),
-        )
-        .await?;
+    add_operator_finalizer(
+        &databases,
+        &name,
+        db.metadata.finalizers.as_ref(),
+        DATABASE_FINALIZER,
+    )
+    .await?;
 
     Ok(Action::requeue(Duration::from_secs(1)))
 }

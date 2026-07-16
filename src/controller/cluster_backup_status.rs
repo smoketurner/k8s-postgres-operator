@@ -95,6 +95,29 @@ struct PgStatArchiver {
     last_failed_time: Option<String>,
 }
 
+/// Determine WAL archiving health from `pg_stat_archiver` timestamps.
+///
+/// `last_failed_time` is a cumulative statistic: PostgreSQL keeps it set after
+/// the archiver recovers (it only clears on `pg_stat_reset_shared('archiver')`),
+/// so "no failure ever" must not be the health criterion. Archiving is healthy
+/// when at least one WAL has been archived and the most recent success is newer
+/// than the most recent failure.
+///
+/// Both timestamps are rendered by the same query with the fixed-width format
+/// `YYYY-MM-DD"T"HH24:MI:SS"Z"`, so lexicographic comparison is chronological.
+fn wal_archiving_is_healthy(
+    last_archived_time: Option<&str>,
+    last_failed_time: Option<&str>,
+) -> bool {
+    match (last_archived_time, last_failed_time) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        // Equal timestamps (failure and success within the same second) are
+        // treated as unhealthy; the next successful archive clears it.
+        (Some(archived), Some(failed)) => archived > failed,
+    }
+}
+
 /// Backup status collector
 pub(crate) struct BackupStatusCollector {
     client: Client,
@@ -181,9 +204,10 @@ impl BackupStatusCollector {
                 status.last_wal_archived = archiver.last_archived_wal;
                 status.last_wal_archive_time = archiver.last_archived_time.clone();
 
-                // Check if archiving is healthy (archived recently and no recent failures)
-                let is_healthy =
-                    archiver.last_archived_time.is_some() && archiver.last_failed_time.is_none();
+                let is_healthy = wal_archiving_is_healthy(
+                    archiver.last_archived_time.as_deref(),
+                    archiver.last_failed_time.as_deref(),
+                );
                 status.wal_archiving_healthy = Some(is_healthy);
 
                 // Update recovery window end to last archived WAL time
@@ -663,5 +687,51 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, BackupEvent::WALArchivingHealthy))
         );
+    }
+
+    // --- wal_archiving_is_healthy (#178) ----------------------------------
+    //
+    // pg_stat_archiver.last_failed_time is cumulative: it stays set after
+    // recovery. Health must compare recency, not require "never failed".
+
+    #[test]
+    fn test_wal_health_never_archived_is_unhealthy() {
+        assert!(!wal_archiving_is_healthy(None, None));
+        assert!(!wal_archiving_is_healthy(
+            None,
+            Some("2025-01-10T10:15:00Z")
+        ));
+    }
+
+    #[test]
+    fn test_wal_health_archived_never_failed_is_healthy() {
+        assert!(wal_archiving_is_healthy(Some("2025-01-10T14:30:45Z"), None));
+    }
+
+    #[test]
+    fn test_wal_health_recovered_after_failure_is_healthy() {
+        // Failure at 10:15, later success at 14:30 -> archiving recovered.
+        assert!(wal_archiving_is_healthy(
+            Some("2025-01-10T14:30:45Z"),
+            Some("2025-01-10T10:15:00Z"),
+        ));
+    }
+
+    #[test]
+    fn test_wal_health_failure_after_success_is_unhealthy() {
+        // Success at 10:15, later failure at 14:30 -> currently failing.
+        assert!(!wal_archiving_is_healthy(
+            Some("2025-01-10T10:15:00Z"),
+            Some("2025-01-10T14:30:45Z"),
+        ));
+    }
+
+    #[test]
+    fn test_wal_health_same_second_is_unhealthy() {
+        // Conservative tie-break: identical timestamps read as unhealthy.
+        assert!(!wal_archiving_is_healthy(
+            Some("2025-01-10T10:15:00Z"),
+            Some("2025-01-10T10:15:00Z"),
+        ));
     }
 }

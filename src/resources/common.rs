@@ -93,6 +93,21 @@ pub fn cluster_labels(cluster: &PostgresCluster) -> BTreeMap<String, String> {
     labels
 }
 
+/// Serialized label selector for this cluster's PostgreSQL pods, published in
+/// `.status.selector` for the scale subresource (HPA/VPA read it via
+/// `labelSelectorPath` to find the pods to measure).
+///
+/// Uses only protected labels (see `PROTECTED_LABELS` in `cluster_labels`) so
+/// user-supplied `spec.labels` cannot change which pods it matches, and the
+/// `component=postgresql` term excludes PgBouncer pooler pods, which share the
+/// cluster label.
+pub fn scale_selector(cluster_name: &str) -> String {
+    format!(
+        "app.kubernetes.io/component=postgresql,postgres-operator.smoketurner.com/cluster={}",
+        cluster_name
+    )
+}
+
 /// Generate labels for Patroni-managed resources
 ///
 /// This includes the `application: spilo` label which is required by

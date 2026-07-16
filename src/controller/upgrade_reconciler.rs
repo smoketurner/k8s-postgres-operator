@@ -30,7 +30,7 @@ use tracing::{debug, error, info, instrument, warn};
 use crate::controller::cleanup::{cleanup_stuck_resource, is_namespace_not_found_error};
 use crate::controller::conditions::{new_condition, set_status_condition, status as cond_status};
 use crate::controller::events;
-use crate::controller::finalizer::remove_operator_finalizer;
+use crate::controller::finalizer::{add_operator_finalizer, remove_operator_finalizer};
 use crate::controller::upgrade_error::{UpgradeBackoffConfig, UpgradeError, UpgradeResult};
 use crate::controller::upgrade_preflight;
 use crate::controller::upgrade_state_machine::{
@@ -2570,27 +2570,22 @@ fn has_finalizer(upgrade: &PostgresUpgrade) -> bool {
         .is_some_and(|f| f.contains(&UPGRADE_FINALIZER.to_string()))
 }
 
-/// Add finalizer to upgrade
+/// Add finalizer to upgrade, preserving any existing finalizers
 async fn add_finalizer(
     upgrade: &PostgresUpgrade,
     ctx: &UpgradeContext,
     ns: &str,
 ) -> UpgradeResult<()> {
     let api: Api<PostgresUpgrade> = Api::namespaced(ctx.client.clone(), ns);
-    let patch = serde_json::json!({
-        "metadata": {
-            "finalizers": [UPGRADE_FINALIZER]
-        }
-    });
 
-    api.patch(
+    add_operator_finalizer(
+        &api,
         &upgrade.name_any(),
-        &PatchParams::default(),
-        &Patch::Merge(&patch),
+        upgrade.metadata.finalizers.as_ref(),
+        UPGRADE_FINALIZER,
     )
     .await?;
 
-    info!("Added finalizer to upgrade {}", upgrade.name_any());
     Ok(())
 }
 

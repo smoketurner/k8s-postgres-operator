@@ -265,9 +265,14 @@ impl<'a> StatusManager<'a> {
     }
 
     /// Update the cluster status with full status object
-    pub async fn update(&self, status: PostgresClusterStatus) -> Result<()> {
+    pub async fn update(&self, mut status: PostgresClusterStatus) -> Result<()> {
         let api: Api<PostgresCluster> = Api::namespaced(self.ctx.client.clone(), self.ns);
         let name = self.cluster.name_any();
+
+        // Publish the pod label selector on every status write so the scale
+        // subresource's labelSelectorPath (.status.selector) is always
+        // populated for HPA/VPA.
+        status.selector = Some(crate::resources::common::scale_selector(&name));
 
         let patch = serde_json::json!({
             "status": status
@@ -399,6 +404,8 @@ impl<'a> StatusManager<'a> {
             phase: ClusterPhase::Running,
             ready_replicas,
             replicas: total_replicas,
+            // Overwritten in update() with the scale-subresource selector.
+            selector: None,
             primary_pod,
             replica_pods,
             backup: final_backup_status,
@@ -492,6 +499,8 @@ impl<'a> StatusManager<'a> {
             phase: ClusterPhase::Creating,
             ready_replicas,
             replicas: total_replicas,
+            // Overwritten in update() with the scale-subresource selector.
+            selector: None,
             primary_pod,
             replica_pods: vec![],
             backup: self.get_backup_status(),
@@ -591,6 +600,8 @@ impl<'a> StatusManager<'a> {
             phase: ClusterPhase::Updating,
             ready_replicas,
             replicas: total_replicas,
+            // Overwritten in update() with the scale-subresource selector.
+            selector: None,
             primary_pod,
             replica_pods,
             backup: self.get_backup_status(),
@@ -613,6 +624,125 @@ impl<'a> StatusManager<'a> {
             tls_enabled: Some(self.cluster.spec.tls.enabled),
             pgbouncer_enabled: self.cluster.spec.pgbouncer.as_ref().map(|p| p.enabled),
             pgbouncer_ready_replicas: None,
+            // Kubernetes 1.35+ pod tracking and resize status
+            pods: self
+                .cluster
+                .status
+                .as_ref()
+                .map(|s| s.pods.clone())
+                .unwrap_or_default(),
+            resize_status: self
+                .cluster
+                .status
+                .as_ref()
+                .map(|s| s.resize_status.clone())
+                .unwrap_or_default(),
+            all_pods_synced: self.cluster.status.as_ref().and_then(|s| s.all_pods_synced),
+            // Preserve restore status
+            restored_from: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.restored_from.clone()),
+            // Replication lag tracking (preserved from existing status)
+            replication_lag: self
+                .cluster
+                .status
+                .as_ref()
+                .map(|s| s.replication_lag.clone())
+                .unwrap_or_default(),
+            max_replication_lag_bytes: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.max_replication_lag_bytes),
+            replicas_lagging: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.replicas_lagging),
+            connection_info: self.get_connection_info(),
+            // Preserve upgrade lineage (set by upgrade_reconciler)
+            successor: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.successor.clone()),
+            origin: self.cluster.status.as_ref().and_then(|s| s.origin.clone()),
+            // Preserve the drift-repair timestamp across status-only updates.
+            last_full_reconcile: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.last_full_reconcile.clone()),
+        };
+
+        self.update(status).await
+    }
+
+    /// Update status for a degraded cluster (some replicas unavailable but
+    /// the cluster is still serving). Writes `phase: Degraded` with a true
+    /// Degraded condition so the API reflects the FSM's decision instead of
+    /// masquerading as a routine update.
+    pub async fn set_degraded(
+        &self,
+        ready_replicas: i32,
+        total_replicas: i32,
+        primary_pod: Option<String>,
+        replica_pods: Vec<String>,
+        reason: &str,
+        message: &str,
+    ) -> Result<()> {
+        let generation = self.cluster.metadata.generation;
+        let existing_conditions = self
+            .cluster
+            .status
+            .as_ref()
+            .map(|s| s.conditions.clone())
+            .unwrap_or_default();
+
+        let conditions = ConditionBuilder::from_existing(existing_conditions, generation)
+            .ready(false, reason, message)
+            .progressing(false, "Degraded", message)
+            .degraded(true, reason, message)
+            .config_valid(true, "SpecValid", "Cluster specification is valid")
+            .build();
+
+        // Track when we entered this phase
+        let phase_started_at = self.get_phase_started_at(ClusterPhase::Degraded);
+
+        let status = PostgresClusterStatus {
+            phase: ClusterPhase::Degraded,
+            ready_replicas,
+            replicas: total_replicas,
+            // Overwritten in update() with the scale-subresource selector.
+            selector: None,
+            primary_pod,
+            replica_pods,
+            backup: self.get_backup_status(),
+            observed_generation: generation,
+            conditions,
+            reason: Some(reason.to_string()),
+            message: Some(message.to_string()),
+            retry_count: self.cluster.status.as_ref().and_then(|s| s.retry_count),
+            last_error: None,
+            last_error_time: None,
+            previous_replicas: self.cluster.status.as_ref().map(|s| s.replicas),
+            phase_started_at,
+            // Preserve existing version while degraded
+            current_version: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.current_version.clone()),
+            // TLS and PgBouncer status
+            tls_enabled: Some(self.cluster.spec.tls.enabled),
+            pgbouncer_enabled: self.cluster.spec.pgbouncer.as_ref().map(|p| p.enabled),
+            pgbouncer_ready_replicas: self
+                .cluster
+                .status
+                .as_ref()
+                .and_then(|s| s.pgbouncer_ready_replicas),
             // Kubernetes 1.35+ pod tracking and resize status
             pods: self
                 .cluster
@@ -693,6 +823,8 @@ impl<'a> StatusManager<'a> {
             phase: ClusterPhase::Failed,
             ready_replicas: existing_status.map(|s| s.ready_replicas).unwrap_or(0),
             replicas: self.cluster.spec.replicas,
+            // Overwritten in update() with the scale-subresource selector.
+            selector: None,
             primary_pod: existing_status.and_then(|s| s.primary_pod.clone()),
             replica_pods: existing_status
                 .map(|s| s.replica_pods.clone())
@@ -765,6 +897,8 @@ impl<'a> StatusManager<'a> {
             phase: ClusterPhase::Deleting,
             ready_replicas: 0,
             replicas: 0,
+            // Overwritten in update() with the scale-subresource selector.
+            selector: None,
             primary_pod: None,
             replica_pods: vec![],
             backup: self.get_backup_status(),

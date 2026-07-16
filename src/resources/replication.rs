@@ -662,9 +662,20 @@ pub async fn sync_sequences(
         };
 
         // Set the sequence value on target
-        // Add a buffer to avoid conflicts with in-flight transactions
+        // Add a buffer to avoid conflicts with in-flight transactions.
+        // Saturate rather than overflow: a sequence near i64::MAX would
+        // otherwise panic in debug builds or wrap negative in release, and
+        // PostgreSQL rejects negative setval targets.
         let buffer = 1000i64;
-        let target_value: i64 = last_value.unwrap_or(0) + buffer;
+        let last = last_value.unwrap_or(0);
+        let target_value: i64 = last.saturating_add(buffer);
+        if target_value == i64::MAX && last < i64::MAX {
+            warn!(
+                sequence = %seq_name,
+                last_value = last,
+                "Sequence value near i64::MAX, clamping buffered target to maximum"
+            );
+        }
 
         // setval requires the sequence name as a regclass, use format for the identifier
         let set_sql = format!(
