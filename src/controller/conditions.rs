@@ -61,17 +61,6 @@ pub fn set_status_condition(conditions: &mut Vec<Condition>, new: Condition) {
     }
 }
 
-/// Find a condition by type. Mirrors `meta.FindStatusCondition`.
-pub fn find_condition<'a>(conditions: &'a [Condition], type_: &str) -> Option<&'a Condition> {
-    conditions.iter().find(|c| c.type_ == type_)
-}
-
-/// Return true when the condition exists with `status == "True"`.
-/// Mirrors `meta.IsStatusConditionTrue`.
-pub fn is_condition_true(conditions: &[Condition], type_: &str) -> bool {
-    find_condition(conditions, type_).is_some_and(|c| c.status == status::TRUE)
-}
-
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -133,23 +122,5 @@ mod tests {
 
         assert_eq!(conditions[0].status, status::FALSE);
         assert_ne!(conditions[0].last_transition_time, original_ts);
-    }
-
-    #[test]
-    fn find_condition_returns_match_or_none() {
-        let conditions = vec![cond("Ready", status::TRUE, "2024-01-01T00:00:00Z", None)];
-        assert!(find_condition(&conditions, "Ready").is_some());
-        assert!(find_condition(&conditions, "Missing").is_none());
-    }
-
-    #[test]
-    fn is_condition_true_checks_status() {
-        let conditions = vec![
-            cond("Ready", status::TRUE, "2024-01-01T00:00:00Z", None),
-            cond("Degraded", status::FALSE, "2024-01-01T00:00:00Z", None),
-        ];
-        assert!(is_condition_true(&conditions, "Ready"));
-        assert!(!is_condition_true(&conditions, "Degraded"));
-        assert!(!is_condition_true(&conditions, "Missing"));
     }
 }
