@@ -45,6 +45,21 @@ fn pgbouncer_labels(cluster_name: &str) -> BTreeMap<String, String> {
     labels
 }
 
+/// Generate labels for primary PgBouncer pods
+///
+/// Adds `pooler-type=primary` so the primary pooler Service selects only
+/// primary pooler pods. Replica pooler pods carry a strict superset of
+/// `pgbouncer_labels`, so selecting on the base labels alone would also
+/// match replica poolers and route write traffic to read-only replicas.
+fn pgbouncer_primary_labels(cluster_name: &str) -> BTreeMap<String, String> {
+    let mut labels = pgbouncer_labels(cluster_name);
+    labels.insert(
+        "postgres-operator.smoketurner.com/pooler-type".to_string(),
+        "primary".to_string(),
+    );
+    labels
+}
+
 /// Generate labels for replica PgBouncer resources
 fn pgbouncer_replica_labels(cluster_name: &str) -> BTreeMap<String, String> {
     let mut labels = pgbouncer_labels(cluster_name);
@@ -253,7 +268,7 @@ pub fn generate_pgbouncer_deployment(
     let name = format!("{}-pooler", cluster.name_any());
     let cluster_name = cluster.name_any();
     let ns = cluster.namespace();
-    let labels = pgbouncer_labels(&cluster_name);
+    let labels = pgbouncer_primary_labels(&cluster_name);
 
     let pgbouncer_spec = cluster.spec.pgbouncer.as_ref();
     let replicas = pgbouncer_spec.map(|s| s.replicas).unwrap_or(2);
@@ -529,8 +544,12 @@ pub fn generate_pgbouncer_deployment(
         },
         spec: Some(DeploymentSpec {
             replicas: Some(replicas),
+            // Selector keeps the historical base labels (without pooler-type):
+            // Deployment selectors are immutable, and a subset of the pod
+            // template labels is valid. Cross-Deployment pod adoption is
+            // prevented by pod-template-hash.
             selector: LabelSelector {
-                match_labels: Some(labels.clone()),
+                match_labels: Some(pgbouncer_labels(&cluster_name)),
                 ..Default::default()
             },
             strategy: Some(DeploymentStrategy {
@@ -892,7 +911,10 @@ pub fn generate_pgbouncer_service(cluster: &PostgresCluster) -> Service {
     let name = format!("{}-pooler", cluster.name_any());
     let cluster_name = cluster.name_any();
     let ns = cluster.namespace();
-    let labels = pgbouncer_labels(&cluster_name);
+    // Select on the primary-specific labels so this write Service never
+    // matches replica pooler pods (whose labels are a superset of the base
+    // pgbouncer labels and point at read-only replicas).
+    let labels = pgbouncer_primary_labels(&cluster_name);
 
     // Get service configuration from cluster spec
     let service_spec = cluster.spec.service.as_ref();

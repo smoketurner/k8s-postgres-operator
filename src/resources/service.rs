@@ -181,8 +181,14 @@ pub fn generate_headless_service(cluster: &PostgresCluster) -> Service {
 
     let labels = standard_labels(&cluster_name);
 
+    // component=postgresql excludes PgBouncer pooler pods, which share the
+    // name/cluster labels and would otherwise become endpoints here.
     let selector = BTreeMap::from([
         ("app.kubernetes.io/name".to_string(), cluster_name.clone()),
+        (
+            "app.kubernetes.io/component".to_string(),
+            "postgresql".to_string(),
+        ),
         (
             "postgres-operator.smoketurner.com/cluster".to_string(),
             cluster_name,
@@ -248,8 +254,15 @@ pub fn generate_metrics_service(cluster: &PostgresCluster) -> Option<Service> {
         "metrics".to_string(),
     );
 
+    // component=postgresql excludes PgBouncer pooler pods: the metrics
+    // exporter sidecar runs in the Spilo pods, and pooler pods don't listen
+    // on the metrics port, so including them yields failed scrapes.
     let selector = BTreeMap::from([
         ("app.kubernetes.io/name".to_string(), cluster_name.clone()),
+        (
+            "app.kubernetes.io/component".to_string(),
+            "postgresql".to_string(),
+        ),
         (
             "postgres-operator.smoketurner.com/cluster".to_string(),
             cluster_name,

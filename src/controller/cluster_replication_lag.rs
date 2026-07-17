@@ -285,11 +285,15 @@ impl ReplicationLagCollector {
 
     /// Query the Patroni /cluster endpoint via direct HTTP
     async fn query_patroni_cluster(&self, pod_ip: &str) -> Result<PatroniClusterResponse> {
-        let addr: SocketAddr = format!("{}:{}", pod_ip, PATRONI_PORT)
+        // Parse the IP first and let SocketAddr handle the formatting:
+        // "{ip}:{port}" string concatenation is not parseable for IPv6
+        // literals, which require brackets ("[fd00::1]:8008").
+        let ip: std::net::IpAddr = pod_ip
             .parse()
             .map_err(|e| ReplicationLagError::ConnectionError(format!("Invalid address: {}", e)))?;
+        let addr = SocketAddr::new(ip, PATRONI_PORT);
 
-        let host_header = format!("{}:{}", pod_ip, PATRONI_PORT);
+        let host_header = addr.to_string();
         let body = fetch_cluster_endpoint(addr, &host_header).await?;
 
         let body_str = String::from_utf8_lossy(&body);

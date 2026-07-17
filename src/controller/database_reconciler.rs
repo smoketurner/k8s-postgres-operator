@@ -103,6 +103,9 @@ pub enum DatabaseError {
 
     #[error("PostgreSQL client error: {0}")]
     PostgresClientError(#[from] crate::resources::postgres_client::PostgresClientError),
+
+    #[error("Validation failed: {0}")]
+    ValidationError(String),
 }
 
 /// Result type for database reconciliation
@@ -602,8 +605,18 @@ async fn apply_grant(conn: &PostgresConnection, grant: &GrantSpec) -> Result<()>
         .map(|p| p.as_sql().to_string())
         .collect();
 
-    if !privileges.is_empty() && grant.all_tables {
-        grant_privileges(conn, &grant.role, &grant.schema, &privileges, true).await?;
+    if !privileges.is_empty() {
+        // Table privileges can only be applied via the ALL TABLES IN SCHEMA
+        // form; silently ignoring them when allTables is false would leave
+        // the role without the requested access. Fail fast so the
+        // misconfiguration is visible in status instead.
+        if !grant.all_tables {
+            return Err(DatabaseError::ValidationError(format!(
+                "grant for role \"{}\" on schema \"{}\" specifies table privileges but allTables is false; set allTables: true to apply them",
+                grant.role, grant.schema
+            )));
+        }
+        grant_privileges(conn, &grant.role, &grant.schema, &privileges).await?;
     }
 
     // Grant USAGE on schema

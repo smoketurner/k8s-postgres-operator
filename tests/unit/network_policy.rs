@@ -593,6 +593,67 @@ mod egress_rules_tests {
     }
 
     #[test]
+    fn test_patroni_api_egress_to_cluster_pods_allowed() {
+        // Regression: ingress allowed 8008 from cluster peers but egress did
+        // not, so peer-to-peer Patroni REST calls (failover coordination)
+        // were dropped at the initiating pod.
+        let cluster = create_test_cluster(None);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
+
+        let spec = np.spec.unwrap();
+        let egress = spec.egress.unwrap();
+
+        let patroni_egress = egress.iter().any(|rule| {
+            let to_cluster_pods = rule.to.as_ref().is_some_and(|peers| {
+                peers.iter().any(|peer| {
+                    peer.pod_selector.as_ref().is_some_and(|sel| {
+                        sel.match_labels.as_ref().is_some_and(|labels| {
+                            labels.get("postgres-operator.smoketurner.com/cluster")
+                                == Some(&"test-cluster".to_string())
+                        })
+                    })
+                })
+            });
+            let has_patroni_port = rule.ports.as_ref().is_some_and(|ports| {
+                ports.iter().any(|port| {
+                    port.port
+                        == Some(
+                            k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(8008),
+                        )
+                        && port.protocol == Some("TCP".to_string())
+                })
+            });
+            to_cluster_pods && has_patroni_port
+        });
+
+        assert!(
+            patroni_egress,
+            "Patroni REST API egress (8008/TCP) to cluster pods should be allowed"
+        );
+    }
+
+    #[test]
+    fn test_dns_tcp_egress_allowed() {
+        let cluster = create_test_cluster(None);
+        let np = generate_network_policy(&cluster, "postgres-operator-system");
+
+        let spec = np.spec.unwrap();
+        let egress = spec.egress.unwrap();
+
+        let dns_tcp = egress.iter().any(|rule| {
+            rule.ports.as_ref().is_some_and(|ports| {
+                ports.iter().any(|port| {
+                    port.port
+                        == Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(53))
+                        && port.protocol == Some("TCP".to_string())
+                })
+            })
+        });
+
+        assert!(dns_tcp, "DNS over TCP egress should be allowed");
+    }
+
+    #[test]
     fn test_dns_egress_allowed() {
         let cluster = create_test_cluster(None);
         let np = generate_network_policy(&cluster, "postgres-operator-system");

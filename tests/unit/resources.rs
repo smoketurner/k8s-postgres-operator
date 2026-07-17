@@ -338,6 +338,21 @@ mod service_tests {
     }
 
     #[test]
+    fn test_headless_service_selector_excludes_pooler_pods() {
+        // Regression: PgBouncer pods carry the name/cluster labels, so a
+        // selector without component=postgresql also picks up pooler pods.
+        let cluster = create_test_cluster("my-cluster", "default", 3);
+        let svc = service::generate_headless_service(&cluster);
+
+        let selector = svc.spec.as_ref().unwrap().selector.as_ref().unwrap();
+        assert_eq!(
+            selector.get("app.kubernetes.io/component"),
+            Some(&"postgresql".to_string()),
+            "headless selector must exclude PgBouncer pooler pods"
+        );
+    }
+
+    #[test]
     fn metrics_service_absent_without_metrics_spec() {
         let cluster = create_test_cluster("my-cluster", "default", 1);
         assert!(service::generate_metrics_service(&cluster).is_none());
@@ -387,6 +402,15 @@ mod service_tests {
                 .get("postgres-operator.smoketurner.com/cluster")
                 .map(String::as_str),
             Some("my-cluster")
+        );
+        // Regression: the exporter sidecar runs in the Spilo pods; without
+        // component=postgresql the pooler pods become (failing) scrape targets.
+        assert_eq!(
+            selector
+                .get("app.kubernetes.io/component")
+                .map(String::as_str),
+            Some("postgresql"),
+            "metrics selector must exclude PgBouncer pooler pods"
         );
     }
 }
@@ -946,6 +970,95 @@ mod pgbouncer_service_tests {
         assert_eq!(
             selector.get("postgres-operator.smoketurner.com/pooler"),
             Some(&"true".to_string())
+        );
+    }
+
+    #[test]
+    fn test_pgbouncer_service_selector_excludes_replica_pooler_pods() {
+        // Regression: replica pooler pod labels are a strict superset of the
+        // base pgbouncer labels. Selecting on the base labels alone made the
+        // write Service also route to poolers backed by read-only replicas.
+        let cluster = create_test_cluster_with_pgbouncer_replica("my-cluster", "default", 3);
+        let primary_svc = pgbouncer::generate_pgbouncer_service(&cluster);
+        let replica_deployment = pgbouncer::generate_pgbouncer_replica_deployment(&cluster, false);
+
+        let selector = primary_svc
+            .spec
+            .as_ref()
+            .unwrap()
+            .selector
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            selector.get("postgres-operator.smoketurner.com/pooler-type"),
+            Some(&"primary".to_string())
+        );
+
+        let replica_pod_labels = replica_deployment
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .metadata
+            .as_ref()
+            .unwrap()
+            .labels
+            .as_ref()
+            .unwrap();
+        let matches_replica_pods = selector
+            .iter()
+            .all(|(k, v)| replica_pod_labels.get(k) == Some(v));
+        assert!(
+            !matches_replica_pods,
+            "primary pooler Service selector must not match replica pooler pods"
+        );
+    }
+
+    #[test]
+    fn test_pgbouncer_primary_pods_match_service_and_deployment_selectors() {
+        let cluster = create_test_cluster_with_pgbouncer("my-cluster", "default", 3);
+        let deployment = pgbouncer::generate_pgbouncer_deployment(&cluster, false);
+        let svc = pgbouncer::generate_pgbouncer_service(&cluster);
+
+        let pod_labels = deployment
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .metadata
+            .as_ref()
+            .unwrap()
+            .labels
+            .as_ref()
+            .unwrap();
+
+        let svc_selector = svc.spec.as_ref().unwrap().selector.as_ref().unwrap();
+        assert!(
+            svc_selector
+                .iter()
+                .all(|(k, v)| pod_labels.get(k) == Some(v)),
+            "primary pooler pods must match the primary Service selector"
+        );
+
+        let dep_selector = deployment
+            .spec
+            .as_ref()
+            .unwrap()
+            .selector
+            .match_labels
+            .as_ref()
+            .unwrap();
+        assert!(
+            dep_selector
+                .iter()
+                .all(|(k, v)| pod_labels.get(k) == Some(v)),
+            "pod template labels must satisfy the Deployment selector"
+        );
+        // Deployment selectors are immutable on live objects; keep the
+        // historical base labels there so upgrades don't require recreation.
+        assert!(
+            !dep_selector.contains_key("postgres-operator.smoketurner.com/pooler-type"),
+            "Deployment selector must not include pooler-type"
         );
     }
 }
