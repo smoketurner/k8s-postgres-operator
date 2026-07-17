@@ -512,7 +512,11 @@ async fn build_transition_context(
             ));
         }
         Err(e) => {
-            tc.error_message = Some(format!("Failed to get source cluster: {}", e));
+            // A transient API error (timeout, 5xx) must not become an
+            // ErrorOccurred event: the FSM maps that to terminal Failed from
+            // every phase. Propagate instead so the upgrade error policy
+            // retries with backoff.
+            return Err(e.into());
         }
     }
 
@@ -3088,7 +3092,9 @@ fn is_phase_timeout_elapsed(upgrade: &PostgresUpgrade) -> bool {
         .map(|s| &s.phase)
         .unwrap_or(&UpgradePhase::Pending);
 
-    let timeout = get_phase_timeout(upgrade, current_phase);
+    let Some(timeout) = get_phase_timeout(upgrade, current_phase) else {
+        return false;
+    };
     let now_secs = Timestamp::now().as_second();
     let started_secs = started.as_second();
     let elapsed_secs = now_secs.saturating_sub(started_secs);
@@ -3096,18 +3102,35 @@ fn is_phase_timeout_elapsed(upgrade: &PostgresUpgrade) -> bool {
     elapsed_secs > timeout.as_secs()
 }
 
-/// Get timeout for a specific phase
-fn get_phase_timeout(upgrade: &PostgresUpgrade, phase: &UpgradePhase) -> SignedDuration {
+/// Get timeout for a specific phase.
+///
+/// Returns `None` for phases that have no `TimeoutOccurred` transition in
+/// the upgrade state machine (`Pending`, `ReadyForCutover`,
+/// `WaitingForManualCutover`, and terminal phases). For those phases a
+/// timeout event would be rejected as an invalid transition on every
+/// reconcile while short-circuiting the phase's real event forever — e.g.
+/// a manual cutover annotation applied more than an hour after entering
+/// `WaitingForManualCutover` would never be observed.
+fn get_phase_timeout(upgrade: &PostgresUpgrade, phase: &UpgradePhase) -> Option<SignedDuration> {
     let timeouts = &upgrade.spec.strategy.timeouts;
 
     let duration_str = match phase {
         UpgradePhase::CreatingTarget => &timeouts.target_cluster_ready,
         UpgradePhase::Replicating => &timeouts.initial_sync,
         UpgradePhase::Verifying => &timeouts.verification,
-        _ => return SignedDuration::from_hours(1), // Default timeout
+        UpgradePhase::ConfiguringReplication
+        | UpgradePhase::SyncingSequences
+        | UpgradePhase::CuttingOver
+        | UpgradePhase::HealthChecking => return Some(SignedDuration::from_hours(1)),
+        UpgradePhase::Pending
+        | UpgradePhase::ReadyForCutover
+        | UpgradePhase::WaitingForManualCutover
+        | UpgradePhase::Completed
+        | UpgradePhase::Failed
+        | UpgradePhase::RolledBack => return None,
     };
 
-    parse_duration(duration_str).unwrap_or_else(|| SignedDuration::from_hours(1))
+    Some(parse_duration(duration_str).unwrap_or_else(|| SignedDuration::from_hours(1)))
 }
 
 /// Parse a duration string (e.g., "30m", "1h", "24h")
@@ -3469,5 +3492,100 @@ mod tests {
                 phase
             );
         }
+    }
+
+    fn make_test_upgrade(phase: UpgradePhase, phase_started_at: Option<String>) -> PostgresUpgrade {
+        use crate::crd::{
+            ClusterReference, PostgresUpgradeSpec, PostgresUpgradeStatus, PostgresVersion,
+            UpgradeStrategy,
+        };
+
+        PostgresUpgrade {
+            metadata: kube::core::ObjectMeta {
+                name: Some("test-upgrade".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: PostgresUpgradeSpec {
+                source_cluster: ClusterReference {
+                    name: "src".to_string(),
+                    namespace: None,
+                },
+                target_version: PostgresVersion::V17,
+                target_cluster_overrides: None,
+                strategy: UpgradeStrategy::default(),
+            },
+            status: Some(PostgresUpgradeStatus {
+                phase,
+                phase_started_at,
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn test_phase_timeout_none_for_phases_without_fsm_timeout_transition() {
+        // These phases have no TimeoutOccurred transition in the FSM.
+        // Emitting a timeout event there is an invalid transition on every
+        // reconcile and permanently masks the phase's real event (e.g. the
+        // manual cutover annotation).
+        let upgrade = make_test_upgrade(UpgradePhase::Pending, None);
+        for phase in [
+            UpgradePhase::Pending,
+            UpgradePhase::ReadyForCutover,
+            UpgradePhase::WaitingForManualCutover,
+            UpgradePhase::Completed,
+            UpgradePhase::Failed,
+            UpgradePhase::RolledBack,
+        ] {
+            assert!(
+                get_phase_timeout(&upgrade, &phase).is_none(),
+                "phase {:?} must not have a timeout",
+                phase
+            );
+        }
+    }
+
+    #[test]
+    fn test_phase_timeout_some_for_phases_with_fsm_timeout_transition() {
+        let upgrade = make_test_upgrade(UpgradePhase::Pending, None);
+        for phase in [
+            UpgradePhase::CreatingTarget,
+            UpgradePhase::ConfiguringReplication,
+            UpgradePhase::Replicating,
+            UpgradePhase::Verifying,
+            UpgradePhase::SyncingSequences,
+            UpgradePhase::CuttingOver,
+            UpgradePhase::HealthChecking,
+        ] {
+            assert!(
+                get_phase_timeout(&upgrade, &phase).is_some(),
+                "phase {:?} should have a timeout",
+                phase
+            );
+        }
+    }
+
+    #[test]
+    fn test_manual_cutover_wait_never_times_out() {
+        // Regression: after 1h in WaitingForManualCutover the timeout
+        // short-circuit made the cutover annotation unreachable forever.
+        let two_hours_ago = Timestamp::now()
+            .checked_sub(SignedDuration::from_hours(2))
+            .map(|ts| ts.to_string())
+            .ok();
+        let upgrade = make_test_upgrade(UpgradePhase::WaitingForManualCutover, two_hours_ago);
+        assert!(!is_phase_timeout_elapsed(&upgrade));
+    }
+
+    #[test]
+    fn test_replicating_phase_still_times_out() {
+        // Phases with an FSM timeout transition keep timing out as before.
+        let long_ago = Timestamp::now()
+            .checked_sub(SignedDuration::from_hours(1000))
+            .map(|ts| ts.to_string())
+            .ok();
+        let upgrade = make_test_upgrade(UpgradePhase::Replicating, long_ago);
+        assert!(is_phase_timeout_elapsed(&upgrade));
     }
 }

@@ -525,7 +525,11 @@ pub(crate) async fn drop_database(conn: &PostgresConnection, database_name: &str
     Ok(())
 }
 
-/// Grant table privileges
+/// Grant table privileges on all tables in a schema
+///
+/// Table privileges (SELECT, INSERT, ...) are only valid with a table
+/// target; `GRANT SELECT ON SCHEMA ...` is rejected by PostgreSQL, so the
+/// ALL TABLES IN SCHEMA form is the only one offered here.
 ///
 /// Note: GRANT doesn't support parameterized queries for identifiers.
 pub(crate) async fn grant_privileges(
@@ -533,23 +537,16 @@ pub(crate) async fn grant_privileges(
     role: &str,
     schema: &str,
     privileges: &[String],
-    all_tables: bool,
 ) -> SqlResult<()> {
     if privileges.is_empty() {
         return Ok(());
     }
 
     let privs = privileges.join(", ");
-    let target = if all_tables {
-        format!("ALL TABLES IN SCHEMA {}", quote_identifier(schema))
-    } else {
-        format!("SCHEMA {}", quote_identifier(schema))
-    };
-
     let sql = format!(
-        "GRANT {} ON {} TO {}",
+        "GRANT {} ON ALL TABLES IN SCHEMA {} TO {}",
         privs,
-        target,
+        quote_identifier(schema),
         quote_identifier(role)
     );
 

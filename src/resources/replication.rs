@@ -450,7 +450,7 @@ pub async fn get_replication_lag(
             SELECT
                 pg_current_wal_lsn()::text as source_lsn,
                 COALESCE(confirmed_flush_lsn::text, '0/0') as target_lsn,
-                COALESCE(pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn), 0)::bigint as lag_bytes
+                pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)::bigint as lag_bytes
             FROM pg_replication_slots
             WHERE slot_name = $1
             "#,
@@ -463,12 +463,14 @@ pub async fn get_replication_lag(
 
     let source_lsn_str: String = row.get("source_lsn");
     let target_lsn_str: String = row.get("target_lsn");
-    let lag_bytes: i64 = row.get("lag_bytes");
+    let lag_bytes: Option<i64> = row.get("lag_bytes");
 
     let source_lsn = crate::resources::lsn::Lsn::parse(&source_lsn_str)
         .map_err(|e| ReplicationError::InvalidLsn(format!("source_lsn={source_lsn_str:?}: {e}")))?;
     let target_lsn = crate::resources::lsn::Lsn::parse(&target_lsn_str)
         .map_err(|e| ReplicationError::InvalidLsn(format!("target_lsn={target_lsn_str:?}: {e}")))?;
+
+    let lag_bytes = effective_lag_bytes(lag_bytes, source_lsn);
 
     // Estimate lag in seconds based on typical write rate (rough estimate)
     let lag_seconds = if lag_bytes > 0 {
@@ -484,6 +486,16 @@ pub async fn get_replication_lag(
         target_lsn,
         in_sync: lag_bytes == 0,
     })
+}
+
+/// Resolve the reported lag for a replication slot.
+///
+/// A NULL `confirmed_flush_lsn` (surfaced here as `None`) means the
+/// subscriber has confirmed nothing yet — that is maximal lag, not zero.
+/// Report the full distance from `0/0` so cutover-readiness gates
+/// (`lag == 0` / `in_sync`) can never pass on an unconfirmed slot.
+fn effective_lag_bytes(lag_bytes: Option<i64>, source_lsn: crate::resources::lsn::Lsn) -> i64 {
+    lag_bytes.unwrap_or_else(|| i64::try_from(source_lsn.as_u64()).unwrap_or(i64::MAX))
 }
 
 // =============================================================================
@@ -626,12 +638,16 @@ pub async fn sync_sequences(
     source_conn: &PostgresConnection,
     target_conn: &PostgresConnection,
 ) -> ReplicationResult<SequenceSyncResult> {
-    // Get all sequences and their current values from source
+    // Get all sequences and their current values from source.
+    // Keep schemaname and sequencename as separate columns: concatenating
+    // and re-splitting on '.' corrupts names that legitimately contain a
+    // dot, pointing setval at the wrong sequence.
     let rows = source_conn
         .query(
             r#"
             SELECT
-                schemaname || '.' || sequencename as seq_name,
+                schemaname,
+                sequencename,
                 last_value
             FROM pg_sequences
             WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
@@ -645,21 +661,12 @@ pub async fn sync_sequences(
     let mut failures = Vec::new();
 
     for row in rows {
-        let seq_name: String = row.get("seq_name");
+        let schema: String = row.get("schemaname");
+        let sequence: String = row.get("sequencename");
         let last_value: Option<i64> = row.get("last_value");
+        let seq_name = format!("{}.{}", schema, sequence);
 
         total_sequences += 1;
-
-        // Parse schema and sequence name
-        let name_parts: Vec<&str> = seq_name.split('.').collect();
-        let (schema, sequence) = if name_parts.len() == 2 {
-            (
-                name_parts.first().copied().unwrap_or("public"),
-                name_parts.get(1).copied().unwrap_or(&seq_name),
-            )
-        } else {
-            ("public", seq_name.as_str())
-        };
 
         // Set the sequence value on target
         // Add a buffer to avoid conflicts with in-flight transactions.
@@ -944,6 +951,33 @@ mod tests {
         assert!(SubscriptionState::CatchingUp.is_syncing());
         assert!(!SubscriptionState::Streaming.is_syncing());
         assert!(!SubscriptionState::Disabled.is_syncing());
+    }
+
+    #[test]
+    fn test_effective_lag_bytes_null_confirmed_flush_is_not_in_sync() {
+        use crate::resources::lsn::Lsn;
+        // Regression: a NULL confirmed_flush_lsn (subscriber confirmed
+        // nothing) used to be coalesced to 0 lag, satisfying the
+        // cutover-readiness gate on a target with no data.
+        let source = Lsn::parse("16/B374D848").unwrap();
+        let lag = effective_lag_bytes(None, source);
+        assert!(lag > 0, "unconfirmed slot must report non-zero lag");
+        assert_eq!(u64::try_from(lag).unwrap(), source.as_u64());
+    }
+
+    #[test]
+    fn test_effective_lag_bytes_passes_through_known_lag() {
+        use crate::resources::lsn::Lsn;
+        let source = Lsn::parse("0/1000000").unwrap();
+        assert_eq!(effective_lag_bytes(Some(0), source), 0);
+        assert_eq!(effective_lag_bytes(Some(4096), source), 4096);
+    }
+
+    #[test]
+    fn test_effective_lag_bytes_saturates_huge_source_lsn() {
+        use crate::resources::lsn::Lsn;
+        let source = Lsn::from_u64(u64::MAX);
+        assert_eq!(effective_lag_bytes(None, source), i64::MAX);
     }
 
     #[test]

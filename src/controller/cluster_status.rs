@@ -1033,13 +1033,7 @@ impl<'a> StatusManager<'a> {
             Some(pods.iter().all(|p| p.spec_applied))
         };
 
-        let patch = serde_json::json!({
-            "status": {
-                "pods": pods,
-                "resize_status": resize_status,
-                "all_pods_synced": all_synced
-            }
-        });
+        let patch = build_pod_tracking_patch(&pods, &resize_status, all_synced);
 
         api.patch_status(
             &name,
@@ -1076,6 +1070,26 @@ impl<'a> StatusManager<'a> {
 
         Ok(())
     }
+}
+
+/// Build the status merge patch for pod tracking fields.
+///
+/// Keys must be the camelCase names produced by
+/// `#[serde(rename_all = "camelCase")]` on `PostgresClusterStatus`:
+/// snake_case keys are unknown to the structural CRD schema and get
+/// silently pruned by the API server, so the fields would never persist.
+fn build_pod_tracking_patch(
+    pods: &[crate::crd::PodInfo],
+    resize_status: &[crate::crd::PodResourceResizeStatus],
+    all_pods_synced: Option<bool>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "status": {
+            "pods": pods,
+            "resizeStatus": resize_status,
+            "allPodsSynced": all_pods_synced
+        }
+    })
 }
 
 /// Check if the cluster spec has changed by comparing observed generation
@@ -1211,6 +1225,60 @@ mod tests {
         let conditions = build_running_conditions(Vec::new(), Some(7), &progress).build();
         for condition in &conditions {
             assert_eq!(condition.observed_generation, Some(7));
+        }
+    }
+
+    #[test]
+    fn pod_tracking_patch_keys_match_status_schema() {
+        // Regression: the patch used snake_case keys (resize_status,
+        // all_pods_synced), which the structural CRD schema pruned — the
+        // fields were never persisted. Every key in the patch must be a
+        // field name PostgresClusterStatus actually serializes.
+        let pod_info = crate::crd::PodInfo {
+            name: "test-0".to_string(),
+            generation: Some(1),
+            observed_generation: Some(1),
+            spec_applied: true,
+            role: None,
+            ready: true,
+        };
+        let resize = crate::crd::PodResourceResizeStatus {
+            pod_name: "test-0".to_string(),
+            status: crate::crd::PodResizeStatus::NoResize,
+            allocated_resources: None,
+            last_transition_time: None,
+            message: None,
+        };
+        let status = crate::crd::PostgresClusterStatus {
+            pods: vec![pod_info.clone()],
+            resize_status: vec![resize.clone()],
+            all_pods_synced: Some(true),
+            ..Default::default()
+        };
+        let known_keys: std::collections::HashSet<String> = serde_json::to_value(&status)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+
+        let patch = build_pod_tracking_patch(&[pod_info], &[resize], Some(true));
+        let patch_keys = patch
+            .get("status")
+            .and_then(|s| s.as_object())
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+
+        assert!(!patch_keys.is_empty());
+        for key in patch_keys {
+            assert!(
+                known_keys.contains(&key),
+                "patch key {key:?} is not a serialized PostgresClusterStatus field; \
+                 the API server would prune it"
+            );
         }
     }
 }

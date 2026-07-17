@@ -215,7 +215,11 @@ pub fn generate_network_policy(
 
     // Build egress rules
     let egress_rules = vec![
-        // Allow replication to other cluster pods
+        // Allow replication (5432) and Patroni REST API (8008) to other
+        // cluster pods. Patroni members call each other's REST API during
+        // failover coordination; egress must allow it in addition to the
+        // ingress rule above, or peer-to-peer calls are dropped at the
+        // initiating pod.
         NetworkPolicyEgressRule {
             to: Some(vec![NetworkPolicyPeer {
                 pod_selector: Some(LabelSelector {
@@ -227,20 +231,35 @@ pub fn generate_network_policy(
                 }),
                 ..Default::default()
             }]),
-            ports: Some(vec![NetworkPolicyPort {
-                port: Some(IntOrString::Int(5432)),
-                protocol: Some("TCP".to_string()),
-                ..Default::default()
-            }]),
+            ports: Some(vec![
+                NetworkPolicyPort {
+                    port: Some(IntOrString::Int(5432)),
+                    protocol: Some("TCP".to_string()),
+                    ..Default::default()
+                },
+                NetworkPolicyPort {
+                    port: Some(IntOrString::Int(8008)),
+                    protocol: Some("TCP".to_string()),
+                    ..Default::default()
+                },
+            ]),
         },
-        // Allow DNS (required for service discovery)
+        // Allow DNS (required for service discovery). TCP is used for
+        // responses that exceed the UDP size limit and by some resolvers.
         NetworkPolicyEgressRule {
             to: None, // Allow to any destination
-            ports: Some(vec![NetworkPolicyPort {
-                port: Some(IntOrString::Int(53)),
-                protocol: Some("UDP".to_string()),
-                ..Default::default()
-            }]),
+            ports: Some(vec![
+                NetworkPolicyPort {
+                    port: Some(IntOrString::Int(53)),
+                    protocol: Some("UDP".to_string()),
+                    ..Default::default()
+                },
+                NetworkPolicyPort {
+                    port: Some(IntOrString::Int(53)),
+                    protocol: Some("TCP".to_string()),
+                    ..Default::default()
+                },
+            ]),
         },
         // Allow Kubernetes API (required for Patroni DCS)
         NetworkPolicyEgressRule {
