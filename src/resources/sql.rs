@@ -598,22 +598,6 @@ fn escape_sql_string(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-/// Generate a secure random password
-pub fn generate_password() -> String {
-    use rand::RngExt;
-    const CHARSET: &[u8] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
-    const PASSWORD_LEN: usize = 24;
-
-    let mut rng = rand::rng();
-    (0..PASSWORD_LEN)
-        .filter_map(|_| {
-            let idx = rng.random_range(0..CHARSET.len());
-            CHARSET.get(idx).map(|&c| c as char)
-        })
-        .collect()
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
@@ -640,15 +624,6 @@ mod tests {
         assert_eq!(escape_sql_string("日本語"), "日本語");
         // Backslashes are not escaped (standard_conforming_strings=on).
         assert_eq!(escape_sql_string("path\\to\\file"), "path\\to\\file");
-    }
-
-    #[test]
-    fn test_generate_password() {
-        let password = generate_password();
-        assert_eq!(password.len(), 24);
-        // Should be different each time
-        let password2 = generate_password();
-        assert_ne!(password, password2);
     }
 
     #[test]

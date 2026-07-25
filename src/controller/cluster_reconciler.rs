@@ -35,7 +35,10 @@ use crate::controller::cluster_state_machine::{
 use crate::controller::cluster_status::{RunningProgress, StatusManager, spec_changed};
 use crate::controller::context::Context;
 use crate::controller::finalizer::{add_operator_finalizer, remove_operator_finalizer};
-use crate::crd::{ClusterPhase, PostgresCluster, annotations as upgrade_annotations};
+use crate::crd::{
+    ClusterPhase, PodInfo, PodResourceResizeStatus, PostgresCluster, PostgresClusterStatus,
+    annotations as upgrade_annotations,
+};
 use crate::resources::{
     backup, certificate, logical_backup, network_policy, patroni, pdb, pgbouncer, scaled_object,
     secret, service, service_monitor,
@@ -720,6 +723,27 @@ async fn check_and_update_status(
             .await?;
     }
 
+    // Refresh pod tracking so status.resizeStatus/pods/allPodsSynced agree with
+    // the conditions just written. set_running_full carries these fields over
+    // from the incoming status, so without this a completed resize keeps
+    // reporting InProgress while the conditions report Stable.
+    //
+    // Guarded on an actual change: this is the 30s steady-state path for every
+    // cluster, and an unconditional second patch_status per cycle is pure write
+    // amplification once the fleet grows.
+    if pod_tracking_is_stale(cluster.status.as_ref(), &pod_infos, &resize_statuses)
+        && let Err(e) = status_manager
+            .update_pod_tracking(pod_infos, resize_statuses)
+            .await
+    {
+        // Log but don't fail the reconciliation - this is supplementary status data
+        debug!(
+            cluster = %name,
+            error = %e,
+            "Failed to update pod tracking status (non-fatal)"
+        );
+    }
+
     // Apply KEDA scaling resources if configured (also needed in status-only path)
     // This ensures KEDA resources are created even for running clusters
     if let Err(e) = reconcile_keda_resources(cluster, ctx, ns).await {
@@ -1156,85 +1180,7 @@ async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -
         apply_resource(ctx, ns, &headless_svc).await?;
     }
 
-    // Apply PgBouncer resources if enabled
-    if pgbouncer::is_pgbouncer_enabled(cluster) {
-        info!("PgBouncer is enabled for cluster {}", name);
-
-        // Apply PgBouncer TLS certificate if TLS is enabled
-        // This must be done before the deployment so the secret is ready
-        if let Some(cert) = certificate::generate_pgbouncer_certificate(cluster) {
-            apply_certificate(ctx, ns, &cert).await?;
-            debug!(
-                "Applied cert-manager Certificate for PgBouncer pooler {}",
-                name
-            );
-        }
-
-        // Apply PgBouncer ConfigMap
-        let pgbouncer_config = pgbouncer::generate_pgbouncer_configmap(cluster);
-        apply_resource(ctx, ns, &pgbouncer_config).await?;
-
-        // Apply PgBouncer Deployment with resize policy for Kubernetes 1.35+
-        let pgbouncer_restart_on_resize = cluster
-            .spec
-            .pgbouncer
-            .as_ref()
-            .and_then(|p| p.resources.as_ref())
-            .and_then(|r| r.restart_on_resize)
-            .unwrap_or(false);
-        let pgbouncer_deployment =
-            pgbouncer::generate_pgbouncer_deployment(cluster, pgbouncer_restart_on_resize);
-        apply_resource(ctx, ns, &pgbouncer_deployment).await?;
-
-        // Apply PgBouncer Service — same Superseded guard as Patroni
-        // Services. After cutover the pooler service selector may be
-        // flipped to route traffic to the target cluster's pooler, and
-        // regenerating the source-named Service would revert the flip.
-        if current_phase == ClusterPhase::Superseded {
-            debug!(
-                "Skipping PgBouncer Service reconciliation for Superseded cluster {}: \
-                 services are managed by the successor cluster",
-                name
-            );
-        } else {
-            let pgbouncer_svc = pgbouncer::generate_pgbouncer_service(cluster);
-            apply_resource(ctx, ns, &pgbouncer_svc).await?;
-        }
-
-        // Apply replica pooler if enabled
-        if pgbouncer::is_replica_pooler_enabled(cluster) {
-            info!("Replica PgBouncer pooler is enabled for cluster {}", name);
-
-            // Apply replica PgBouncer TLS certificate if TLS is enabled
-            if let Some(cert) = certificate::generate_pgbouncer_replica_certificate(cluster) {
-                apply_certificate(ctx, ns, &cert).await?;
-                debug!(
-                    "Applied cert-manager Certificate for PgBouncer replica pooler {}",
-                    name
-                );
-            }
-
-            let pgbouncer_replica_config = pgbouncer::generate_pgbouncer_replica_configmap(cluster);
-            apply_resource(ctx, ns, &pgbouncer_replica_config).await?;
-
-            let pgbouncer_replica_deployment = pgbouncer::generate_pgbouncer_replica_deployment(
-                cluster,
-                pgbouncer_restart_on_resize,
-            );
-            apply_resource(ctx, ns, &pgbouncer_replica_deployment).await?;
-
-            if current_phase == ClusterPhase::Superseded {
-                debug!(
-                    "Skipping PgBouncer replica Service reconciliation for Superseded cluster {}: \
-                     services are managed by the successor cluster",
-                    name
-                );
-            } else {
-                let pgbouncer_replica_svc = pgbouncer::generate_pgbouncer_replica_service(cluster);
-                apply_resource(ctx, ns, &pgbouncer_replica_svc).await?;
-            }
-        }
-    }
+    reconcile_pgbouncer(cluster, ctx, ns, current_phase).await?;
 
     // Apply KEDA scaling resources if configured
     // This is a no-op if scaling is not configured or KEDA is not installed
@@ -2228,6 +2174,302 @@ async fn reconcile_logical_backup(
     Ok(())
 }
 
+/// Whether the stored pod-tracking status differs from freshly-observed pod
+/// state, i.e. whether a status patch would actually change anything.
+///
+/// `all_pods_synced` derivation mirrors [`StatusManager::update_pod_tracking`]:
+/// `None` when no pods were observed, otherwise whether every pod has applied
+/// its spec.
+fn pod_tracking_is_stale(
+    status: Option<&PostgresClusterStatus>,
+    pod_infos: &[PodInfo],
+    resize_statuses: &[PodResourceResizeStatus],
+) -> bool {
+    let Some(status) = status else {
+        // Nothing recorded yet: a patch is worthwhile only if there is data.
+        return !pod_infos.is_empty() || !resize_statuses.is_empty();
+    };
+
+    let all_synced = if pod_infos.is_empty() {
+        None
+    } else {
+        Some(pod_infos.iter().all(|p| p.spec_applied))
+    };
+
+    status.pods != pod_infos
+        || status.resize_status != resize_statuses
+        || status.all_pods_synced != all_synced
+}
+
+/// Names of every resource the PgBouncer reconcile path can create, split into
+/// the primary pooler set and the replica pooler set.
+///
+/// Kept as one list so the delete-on-disable path cannot drift from the apply
+/// path — everything created here must be named here.
+struct PoolerResourceNames {
+    configmap: String,
+    deployment: String,
+    service: String,
+    certificate: String,
+}
+
+impl PoolerResourceNames {
+    fn primary(cluster_name: &str) -> Self {
+        Self {
+            configmap: format!("{cluster_name}-pgbouncer-config"),
+            deployment: format!("{cluster_name}-pooler"),
+            service: format!("{cluster_name}-pooler"),
+            certificate: format!("{cluster_name}-pooler-tls"),
+        }
+    }
+
+    fn replica(cluster_name: &str) -> Self {
+        Self {
+            configmap: format!("{cluster_name}-pgbouncer-replica-config"),
+            deployment: format!("{cluster_name}-pooler-repl"),
+            service: format!("{cluster_name}-pooler-repl"),
+            certificate: format!("{cluster_name}-pooler-repl-tls"),
+        }
+    }
+}
+
+/// Reconcile the optional PgBouncer connection poolers. Applies them when
+/// `spec.pgbouncer.enabled` is true; deletes previously-managed pooler
+/// resources otherwise.
+///
+/// Owner references do not cover the disable case: they point at the
+/// PostgresCluster, which still exists, so garbage collection never fires and
+/// the pooler Deployments would keep running indefinitely.
+async fn reconcile_pgbouncer(
+    cluster: &PostgresCluster,
+    ctx: &Context,
+    ns: &str,
+    current_phase: ClusterPhase,
+) -> Result<()> {
+    let name = cluster.name_any();
+
+    if !pgbouncer::is_pgbouncer_enabled(cluster) {
+        delete_pooler_resources(ctx, ns, &PoolerResourceNames::primary(&name), current_phase)
+            .await?;
+        delete_pooler_resources(ctx, ns, &PoolerResourceNames::replica(&name), current_phase)
+            .await?;
+        return Ok(());
+    }
+
+    info!("PgBouncer is enabled for cluster {}", name);
+
+    // Apply PgBouncer TLS certificate if TLS is enabled
+    // This must be done before the deployment so the secret is ready
+    if let Some(cert) = certificate::generate_pgbouncer_certificate(cluster) {
+        apply_certificate(ctx, ns, &cert).await?;
+        debug!(
+            "Applied cert-manager Certificate for PgBouncer pooler {}",
+            name
+        );
+    }
+
+    // Apply PgBouncer ConfigMap
+    let pgbouncer_config = pgbouncer::generate_pgbouncer_configmap(cluster);
+    apply_resource(ctx, ns, &pgbouncer_config).await?;
+
+    // Apply PgBouncer Deployment with resize policy for Kubernetes 1.35+
+    let pgbouncer_restart_on_resize = cluster
+        .spec
+        .pgbouncer
+        .as_ref()
+        .and_then(|p| p.resources.as_ref())
+        .and_then(|r| r.restart_on_resize)
+        .unwrap_or(false);
+    let pgbouncer_deployment =
+        pgbouncer::generate_pgbouncer_deployment(cluster, pgbouncer_restart_on_resize);
+    apply_resource(ctx, ns, &pgbouncer_deployment).await?;
+
+    // Apply PgBouncer Service — same Superseded guard as Patroni
+    // Services. After cutover the pooler service selector may be
+    // flipped to route traffic to the target cluster's pooler, and
+    // regenerating the source-named Service would revert the flip.
+    if current_phase == ClusterPhase::Superseded {
+        debug!(
+            "Skipping PgBouncer Service reconciliation for Superseded cluster {}: \
+             services are managed by the successor cluster",
+            name
+        );
+    } else {
+        ensure_primary_pooler_pod_labels(ctx, ns, &name).await;
+        let pgbouncer_svc = pgbouncer::generate_pgbouncer_service(cluster);
+        apply_resource(ctx, ns, &pgbouncer_svc).await?;
+    }
+
+    // Apply replica pooler if enabled
+    if pgbouncer::is_replica_pooler_enabled(cluster) {
+        info!("Replica PgBouncer pooler is enabled for cluster {}", name);
+
+        // Apply replica PgBouncer TLS certificate if TLS is enabled
+        if let Some(cert) = certificate::generate_pgbouncer_replica_certificate(cluster) {
+            apply_certificate(ctx, ns, &cert).await?;
+            debug!(
+                "Applied cert-manager Certificate for PgBouncer replica pooler {}",
+                name
+            );
+        }
+
+        let pgbouncer_replica_config = pgbouncer::generate_pgbouncer_replica_configmap(cluster);
+        apply_resource(ctx, ns, &pgbouncer_replica_config).await?;
+
+        let pgbouncer_replica_deployment =
+            pgbouncer::generate_pgbouncer_replica_deployment(cluster, pgbouncer_restart_on_resize);
+        apply_resource(ctx, ns, &pgbouncer_replica_deployment).await?;
+
+        if current_phase == ClusterPhase::Superseded {
+            debug!(
+                "Skipping PgBouncer replica Service reconciliation for Superseded cluster {}: \
+                 services are managed by the successor cluster",
+                name
+            );
+        } else {
+            let pgbouncer_replica_svc = pgbouncer::generate_pgbouncer_replica_service(cluster);
+            apply_resource(ctx, ns, &pgbouncer_replica_svc).await?;
+        }
+    } else {
+        delete_pooler_resources(ctx, ns, &PoolerResourceNames::replica(&name), current_phase)
+            .await?;
+    }
+
+    Ok(())
+}
+
+/// Delete a pooler resource set, tolerating resources that were never created.
+///
+/// Services are left alone for a `Superseded` cluster: after cutover they are
+/// owned by the successor and deleting them would break the switched routing.
+async fn delete_pooler_resources(
+    ctx: &Context,
+    ns: &str,
+    names: &PoolerResourceNames,
+    current_phase: ClusterPhase,
+) -> Result<()> {
+    delete_if_exists::<Deployment>(ctx, ns, &names.deployment).await?;
+    delete_if_exists::<ConfigMap>(ctx, ns, &names.configmap).await?;
+    delete_certificate_if_exists(ctx, ns, &names.certificate).await?;
+
+    if current_phase == ClusterPhase::Superseded {
+        debug!(
+            "Skipping PgBouncer Service deletion for Superseded cluster: \
+             service {} is managed by the successor cluster",
+            names.service
+        );
+    } else {
+        delete_if_exists::<Service>(ctx, ns, &names.service).await?;
+    }
+
+    Ok(())
+}
+
+/// Delete a namespaced resource, treating 404 as success.
+async fn delete_if_exists<K>(ctx: &Context, ns: &str, name: &str) -> Result<()>
+where
+    K: kube::Resource<Scope = kube::core::NamespaceResourceScope>
+        + Clone
+        + std::fmt::Debug
+        + serde::de::DeserializeOwned,
+    K::DynamicType: Default,
+{
+    let api: Api<K> = Api::namespaced(ctx.client.clone(), ns);
+    match api.delete(name, &DeleteParams::default()).await {
+        Ok(_) => {
+            info!("Deleted {} (feature disabled)", name);
+            Ok(())
+        }
+        Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(()),
+        Err(e) => Err(Error::KubeError(e)),
+    }
+}
+
+/// Delete a cert-manager Certificate, treating 404 as success.
+///
+/// A missing cert-manager CRD (404 on the resource path) is also tolerated:
+/// TLS may have been disabled, or cert-manager may not be installed at all.
+async fn delete_certificate_if_exists(ctx: &Context, ns: &str, name: &str) -> Result<()> {
+    use kube::api::{ApiResource, DynamicObject, GroupVersionKind};
+
+    let gvk = GroupVersionKind::gvk("cert-manager.io", "v1", "Certificate");
+    let ar = ApiResource::from_gvk(&gvk);
+    let api: Api<DynamicObject> = Api::namespaced_with(ctx.client.clone(), ns, &ar);
+
+    match api.delete(name, &DeleteParams::default()).await {
+        Ok(_) => {
+            info!("Deleted Certificate {} (feature disabled)", name);
+            Ok(())
+        }
+        Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(()),
+        Err(e) => Err(Error::KubeError(e)),
+    }
+}
+
+/// Add `pooler-type=primary` to primary pooler pods that predate the label.
+///
+/// The primary pooler Service selects on `pooler-type=primary`, but a
+/// `core/v1` selector is equality-only and cannot be written to also match the
+/// unlabeled pods an older operator created. Applying the Service without
+/// relabelling first drops every running pod out of the endpoint set until the
+/// rolling update produces a Ready replacement — a write outage on the pooled
+/// path. Patching the live pods closes that window immediately.
+///
+/// Safe with respect to the Deployment: its `.spec.selector` is deliberately
+/// the base pooler labels, so an extra label does not orphan the pod. Once
+/// every pod carries the label this is a no-op.
+///
+/// Best-effort: a failure here costs the pre-existing endpoint gap, not
+/// correctness, so it must not fail the reconcile.
+async fn ensure_primary_pooler_pod_labels(ctx: &Context, ns: &str, cluster_name: &str) {
+    let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
+    let selector = pgbouncer::primary_pooler_pod_selector(cluster_name);
+
+    let pod_list = match pods.list(&ListParams::default().labels(&selector)).await {
+        Ok(list) => list,
+        Err(e) => {
+            warn!(
+                cluster = %cluster_name,
+                error = %e,
+                "Could not list pooler pods to backfill the pooler-type label"
+            );
+            return;
+        }
+    };
+
+    let patch = Patch::Merge(serde_json::json!({
+        "metadata": { "labels": { pgbouncer::POOLER_TYPE_LABEL: "primary" } }
+    }));
+
+    for pod in pod_list {
+        let has_label = pod
+            .metadata
+            .labels
+            .as_ref()
+            .is_some_and(|l| l.contains_key(pgbouncer::POOLER_TYPE_LABEL));
+        if has_label {
+            continue;
+        }
+
+        let pod_name = pod.name_any();
+        match pods
+            .patch(&pod_name, &PatchParams::apply("postgres-operator"), &patch)
+            .await
+        {
+            Ok(_) => info!(
+                pod = %pod_name,
+                "Backfilled pooler-type=primary so the pooler Service keeps selecting this pod"
+            ),
+            Err(e) => warn!(
+                pod = %pod_name,
+                error = %e,
+                "Failed to backfill pooler-type label; the pooler Service may briefly \
+                 have no endpoints for this pod"
+            ),
+        }
+    }
+}
+
 /// Check if the finalizer is present
 fn has_finalizer(cluster: &PostgresCluster) -> bool {
     cluster
@@ -3157,5 +3399,114 @@ mod tests {
     fn connection_string_missing_key_reads_none() {
         let secret = Secret::default();
         assert_eq!(current_connection_string(&secret), None);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+mod pooler_and_tracking_tests {
+    use super::{PodInfo, PodResourceResizeStatus, PoolerResourceNames, pod_tracking_is_stale};
+    use crate::crd::{PodResizeStatus, PostgresClusterStatus};
+
+    fn pod(name: &str, spec_applied: bool) -> PodInfo {
+        PodInfo {
+            name: name.to_string(),
+            generation: Some(1),
+            observed_generation: Some(1),
+            spec_applied,
+            role: Some("master".to_string()),
+            ready: true,
+        }
+    }
+
+    fn resize(pod_name: &str, status: PodResizeStatus) -> PodResourceResizeStatus {
+        PodResourceResizeStatus {
+            pod_name: pod_name.to_string(),
+            status,
+            allocated_resources: None,
+            last_transition_time: None,
+            message: None,
+        }
+    }
+
+    // --- #196: delete-on-disable must cover everything the apply path creates -
+
+    #[test]
+    fn pooler_resource_names_cover_both_sets() {
+        let primary = PoolerResourceNames::primary("db");
+        assert_eq!(primary.configmap, "db-pgbouncer-config");
+        assert_eq!(primary.deployment, "db-pooler");
+        assert_eq!(primary.service, "db-pooler");
+        assert_eq!(primary.certificate, "db-pooler-tls");
+
+        let replica = PoolerResourceNames::replica("db");
+        assert_eq!(replica.configmap, "db-pgbouncer-replica-config");
+        assert_eq!(replica.deployment, "db-pooler-repl");
+        assert_eq!(replica.service, "db-pooler-repl");
+        assert_eq!(replica.certificate, "db-pooler-repl-tls");
+    }
+
+    // --- #197: stale pod tracking on the status-only path --------------------
+
+    #[test]
+    fn pod_tracking_stale_when_resize_completed_but_status_says_in_progress() {
+        // The exact reported symptom: kubelet finished the resize, but the
+        // stored status still reads InProgress.
+        let status = PostgresClusterStatus {
+            pods: vec![pod("db-0", true)],
+            resize_status: vec![resize("db-0", PodResizeStatus::InProgress)],
+            all_pods_synced: Some(true),
+            ..Default::default()
+        };
+
+        assert!(pod_tracking_is_stale(
+            Some(&status),
+            &[pod("db-0", true)],
+            &[resize("db-0", PodResizeStatus::NoResize)],
+        ));
+    }
+
+    #[test]
+    fn pod_tracking_not_stale_when_identical() {
+        // Steady state: no patch, or every cluster writes status twice per cycle.
+        let status = PostgresClusterStatus {
+            pods: vec![pod("db-0", true)],
+            resize_status: vec![resize("db-0", PodResizeStatus::NoResize)],
+            all_pods_synced: Some(true),
+            ..Default::default()
+        };
+
+        assert!(!pod_tracking_is_stale(
+            Some(&status),
+            &[pod("db-0", true)],
+            &[resize("db-0", PodResizeStatus::NoResize)],
+        ));
+    }
+
+    #[test]
+    fn pod_tracking_stale_when_all_pods_synced_changes() {
+        let status = PostgresClusterStatus {
+            pods: vec![pod("db-0", true)],
+            resize_status: vec![],
+            all_pods_synced: Some(true),
+            ..Default::default()
+        };
+
+        // Same pod name, but kubelet has not applied the new spec yet.
+        assert!(pod_tracking_is_stale(
+            Some(&status),
+            &[pod("db-0", false)],
+            &[]
+        ));
+    }
+
+    #[test]
+    fn pod_tracking_not_stale_when_no_status_and_no_pods() {
+        assert!(!pod_tracking_is_stale(None, &[], &[]));
+    }
+
+    #[test]
+    fn pod_tracking_stale_when_no_status_but_pods_observed() {
+        assert!(pod_tracking_is_stale(None, &[pod("db-0", true)], &[]));
     }
 }

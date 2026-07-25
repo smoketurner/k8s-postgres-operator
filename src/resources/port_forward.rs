@@ -207,13 +207,7 @@ async fn resolve_service_to_pod(
             cluster_name
         )
     } else if service_name.ends_with("-pooler") {
-        // Primary PgBouncer pooler. Pods carry pooler-type=primary; the
-        // inequality also matches older pods created before that label
-        // existed, while still excluding replica poolers.
-        format!(
-            "postgres-operator.smoketurner.com/cluster={},app.kubernetes.io/component=pgbouncer,postgres-operator.smoketurner.com/pooler-type!=replica",
-            cluster_name
-        )
+        crate::resources::pgbouncer::primary_pooler_pod_selector(cluster_name)
     } else {
         format!("postgres-operator.smoketurner.com/cluster={}", cluster_name)
     };

@@ -195,7 +195,7 @@ spec:
               Observed provisioning state of the database. `phase` is the
               coarse lifecycle position; `conditions[]` carries the
               detailed `ClusterReady` / `DatabaseCreated` / `RolesCreated`
-              / `SecretsCreated` / `Ready` breakdown.
+              / `GrantsApplied` / `SecretsCreated` / `Ready` breakdown.
             properties:
               conditions:
                 description: Standard Kubernetes status conditions (metav1.Condition)

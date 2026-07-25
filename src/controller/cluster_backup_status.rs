@@ -488,18 +488,24 @@ pub(crate) fn detect_backup_events(
         }
     }
 
-    // Detect backup errors (new error that wasn't there before)
-    if let Some(ref error) = current.last_error {
-        let prev_error = previous.and_then(|p| p.last_error.as_ref());
-        let prev_error_time = previous.and_then(|p| p.last_error_time.as_ref());
-        let current_error_time = current.last_error_time.as_ref();
-
-        // Only emit if error is new (different error or different timestamp)
-        if prev_error != Some(error) || prev_error_time != current_error_time {
+    // Detect backup errors on state transition only. `last_error_time` is
+    // restamped with `Timestamp::now()` on every collect(), so comparing it
+    // would re-emit the same failure on every reconcile (~120 events/hour).
+    match (
+        previous.and_then(|p| p.last_error.as_ref()),
+        current.last_error.as_ref(),
+    ) {
+        (None, Some(error)) => {
             events.push(BackupEvent::BackupFailed {
                 error: error.clone(),
             });
         }
+        (Some(prev), Some(error)) if prev != error => {
+            events.push(BackupEvent::BackupFailed {
+                error: error.clone(),
+            });
+        }
+        _ => {}
     }
 
     // Detect WAL archiving status changes
@@ -628,6 +634,77 @@ mod tests {
             &events[0],
             BackupEvent::BackupFailed { error } if error == "Connection failed"
         ));
+    }
+
+    #[test]
+    fn test_detect_persistent_error_emits_once() {
+        // collect() restamps last_error_time on every call, so an unchanged
+        // error must not re-emit just because the timestamp moved.
+        let previous = BackupStatus {
+            enabled: true,
+            last_error: Some("Connection refused".to_string()),
+            last_error_time: Some("2025-01-10T12:00:00Z".to_string()),
+            ..Default::default()
+        };
+
+        let current = BackupStatus {
+            enabled: true,
+            last_error: Some("Connection refused".to_string()),
+            last_error_time: Some("2025-01-10T12:00:30Z".to_string()),
+            ..Default::default()
+        };
+
+        let events = detect_backup_events(Some(&previous), &current);
+
+        assert!(
+            events.is_empty(),
+            "persistent same error should not re-emit, got {events:?}",
+        );
+    }
+
+    #[test]
+    fn test_detect_changed_error_emits_again() {
+        let previous = BackupStatus {
+            enabled: true,
+            last_error: Some("Connection refused".to_string()),
+            last_error_time: Some("2025-01-10T12:00:00Z".to_string()),
+            ..Default::default()
+        };
+
+        let current = BackupStatus {
+            enabled: true,
+            last_error: Some("Access denied".to_string()),
+            last_error_time: Some("2025-01-10T12:00:30Z".to_string()),
+            ..Default::default()
+        };
+
+        let events = detect_backup_events(Some(&previous), &current);
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            BackupEvent::BackupFailed { error } if error == "Access denied"
+        ));
+    }
+
+    #[test]
+    fn test_detect_error_after_recovery_emits_again() {
+        // Error cleared, then returned with the same text: still a transition.
+        let previous = BackupStatus {
+            enabled: true,
+            ..Default::default()
+        };
+
+        let current = BackupStatus {
+            enabled: true,
+            last_error: Some("Connection refused".to_string()),
+            last_error_time: Some("2025-01-10T12:05:00Z".to_string()),
+            ..Default::default()
+        };
+
+        let events = detect_backup_events(Some(&previous), &current);
+
+        assert_eq!(events.len(), 1);
     }
 
     #[test]

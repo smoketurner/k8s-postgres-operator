@@ -31,6 +31,23 @@ const DEFAULT_PGBOUNCER_IMAGE: &str = "public.ecr.aws/bitnami/pgbouncer:latest";
 /// PgBouncer listen port
 const PGBOUNCER_PORT: i32 = 6432;
 
+/// Label distinguishing primary pooler pods from replica pooler pods.
+pub const POOLER_TYPE_LABEL: &str = "postgres-operator.smoketurner.com/pooler-type";
+
+/// List-selector matching the primary pooler pods of `cluster_name`.
+///
+/// Uses `pooler-type!=replica` rather than `pooler-type=primary` so it also
+/// matches pods created before the label existed, while still excluding replica
+/// poolers. A `core/v1` Service selector is equality-only and cannot express
+/// this, which is why the reconciler relabels legacy pods instead
+/// (`ensure_primary_pooler_pod_labels`).
+pub fn primary_pooler_pod_selector(cluster_name: &str) -> String {
+    format!(
+        "postgres-operator.smoketurner.com/cluster={cluster_name},\
+         app.kubernetes.io/component=pgbouncer,{POOLER_TYPE_LABEL}!=replica"
+    )
+}
+
 /// Generate labels for PgBouncer resources
 fn pgbouncer_labels(cluster_name: &str) -> BTreeMap<String, String> {
     let mut labels = standard_labels(cluster_name);

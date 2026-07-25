@@ -8,8 +8,14 @@ use rand::RngExt;
 use crate::crd::PostgresCluster;
 use crate::resources::common::{owner_reference, standard_labels};
 
-/// Generate a secure random password
-fn generate_password(len: usize) -> String {
+/// Generate a secure random password.
+///
+/// The charset is deliberately alphanumeric. Generated passwords are embedded
+/// in libpq URIs, JDBC query strings, and libpq keyword/value conninfo, and
+/// characters with reserved meaning in those formats (`@`, `&`, `%`, `#`,
+/// whitespace) corrupt the result. URI builders percent-encode defensively, but
+/// keeping the charset unambiguous removes the hazard at the source.
+pub fn generate_password(len: usize) -> String {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     let mut rng = rand::rng();
     (0..len)
