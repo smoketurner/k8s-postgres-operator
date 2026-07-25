@@ -25,6 +25,10 @@ use crate::resources::common::{owner_reference, standard_labels};
 
 /// Generate a `CronJob` that runs `pg_dumpall` to S3, or `None` if logical
 /// backups are not enabled in the spec.
+#[expect(
+    clippy::too_many_lines,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 pub fn generate_logical_backup_cronjob(cluster: &PostgresCluster) -> Option<CronJob> {
     let backup = cluster.spec.backup.as_ref()?;
     let logical = backup.logical.as_ref()?;

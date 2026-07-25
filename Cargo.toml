@@ -87,6 +87,13 @@ indexing_slicing = "deny"
 # String slicing can panic on non-UTF8 boundaries
 string_slice = "warn"
 
+# Complexity limits. Thresholds live in .clippy.toml
+# (too-many-lines-threshold = 150, cognitive-complexity-threshold = 30).
+# These lints are in the pedantic/nursery groups, so they must be enabled
+# explicitly or the configured thresholds never apply.
+too_many_lines = "warn"
+cognitive_complexity = "warn"
+
 [lints.rust]
 # Unsafe code restrictions
 unsafe_code = "deny"

@@ -183,6 +183,10 @@ impl Default for ClusterStateMachine {
 
 impl ClusterStateMachine {
     /// Create a new state machine with the defined transition table
+    #[expect(
+        clippy::too_many_lines,
+        reason = "pre-existing complexity debt; decomposition tracked separately"
+    )]
     pub fn new() -> Self {
         Self {
             transitions: vec![

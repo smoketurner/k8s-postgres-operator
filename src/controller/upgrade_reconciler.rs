@@ -117,6 +117,10 @@ impl UpgradeContext {
 
 /// Main reconciliation function for PostgresUpgrade
 #[instrument(skip(upgrade, ctx), fields(name = %upgrade.name_any(), namespace = upgrade.namespace().unwrap_or_default()))]
+#[expect(
+    clippy::too_many_lines,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 pub async fn reconcile_upgrade(
     upgrade: Arc<PostgresUpgrade>,
     ctx: Arc<UpgradeContext>,
@@ -391,6 +395,10 @@ pub async fn reconcile_upgrade(
 }
 
 /// Error policy for the upgrade controller
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 pub fn upgrade_error_policy(
     upgrade: Arc<PostgresUpgrade>,
     error: &UpgradeError,
@@ -595,6 +603,10 @@ fn health_check_event_for_target_phase(target_phase: Option<ClusterPhase>) -> Op
 }
 
 /// Determine the appropriate event for the current phase
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 async fn determine_event_for_phase(
     upgrade: &PostgresUpgrade,
     ctx: &UpgradeContext,
@@ -1040,6 +1052,10 @@ fn build_target_spec(source: &PostgresCluster, upgrade: &PostgresUpgrade) -> Pos
 }
 
 /// Set up logical replication between source and target
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 async fn setup_replication(
     upgrade: &PostgresUpgrade,
     ctx: &UpgradeContext,
@@ -2202,6 +2218,10 @@ fn condition_annotation_key() -> &'static str {
 }
 
 /// Clean up replication after successful upgrade
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 async fn cleanup_replication(
     upgrade: &PostgresUpgrade,
     ctx: &UpgradeContext,
@@ -2345,6 +2365,10 @@ async fn set_target_origin(
 }
 
 /// Handle rollback request
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 async fn handle_rollback(
     upgrade: &PostgresUpgrade,
     ctx: &UpgradeContext,
@@ -2514,6 +2538,10 @@ async fn handle_rollback(
 }
 
 /// Handle deletion of the upgrade resource
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 async fn handle_deletion(
     upgrade: &PostgresUpgrade,
     ctx: &UpgradeContext,

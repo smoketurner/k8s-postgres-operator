@@ -239,6 +239,10 @@ async fn resolve_service_to_pod(
 ///
 /// The listener is bound by `PortForward::start()` so that bind errors reach
 /// the caller; this loop only accepts connections and forwards them.
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 async fn run_port_forward(
     client: Client,
     namespace: &str,

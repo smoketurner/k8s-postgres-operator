@@ -6,6 +6,9 @@
     clippy::panic,
     clippy::string_slice
 )]
+// End-to-end tests drive a long linear sequence of cluster steps; splitting them
+// would obscure the scenario rather than clarify it.
+#![allow(clippy::too_many_lines)]
 
 //! Integration tests for postgres-operator
 //!

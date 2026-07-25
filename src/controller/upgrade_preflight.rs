@@ -204,6 +204,10 @@ impl PreflightOutcome {
 /// be created with (typically inherited from the source spec). It is
 /// compared against the source's actual data size for the
 /// `InsufficientTargetStorage` check.
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 pub async fn run_preflight_checks(
     client: &Client,
     source_ns: &str,

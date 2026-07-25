@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Allows release.yml to gate publishing on a full CI pass.
+  workflow_call:
 
 permissions:
   contents: read
@@ -41,7 +43,7 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
-    name: Unit Tests
+    name: Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -51,7 +53,9 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: cargo test --test unit
+      # Runs the lib, unit, proptest and integration targets. Invoke via `make`
+      # so CI and local runs cannot drift apart.
+      - run: make test
 
   helm:
     name: Helm Chart Validation

@@ -149,6 +149,10 @@ fn merge_condition(
 
 /// Reconcile a PostgresDatabase resource
 #[instrument(skip(db, ctx), fields(name = %db.name_any(), namespace = db.namespace().unwrap_or_default()))]
+#[expect(
+    clippy::too_many_lines,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 pub async fn reconcile_database(
     db: Arc<PostgresDatabase>,
     ctx: Arc<DatabaseContext>,
@@ -411,6 +415,10 @@ pub async fn reconcile_database(
 }
 
 /// Provision the database, roles, grants, and extensions
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 async fn provision_database(
     db: &PostgresDatabase,
     ctx: &DatabaseContext,
@@ -675,6 +683,10 @@ async fn apply_grant(conn: &PostgresConnection, grant: &GrantSpec) -> Result<()>
 }
 
 /// Handle deletion of a PostgresDatabase resource
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 async fn handle_deletion(
     db: &PostgresDatabase,
     ctx: &DatabaseContext,

@@ -431,6 +431,10 @@ pub fn generate_trigger_auth(cluster: &PostgresCluster) -> Option<DynamicObject>
 /// * `Ok(Some(false))` - Scale-out was resumed (unpaused)
 /// * `Ok(None)` - No change was needed (ScaledObject doesn't exist or already in desired state)
 /// * `Err(_)` - Failed to update the ScaledObject
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 pub async fn update_scaling_pause_state(
     client: Client,
     cluster: &PostgresCluster,

@@ -65,6 +65,10 @@ fn convert_label_selector(config: &LabelSelectorConfig) -> LabelSelector {
 /// - Operator namespace: Always allowed (prevents lockout)
 /// - Cluster pods: Can communicate internally (replication, Patroni API)
 /// - External access: Only if `allowExternalAccess: true` (dev/test only)
+#[expect(
+    clippy::too_many_lines,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 pub fn generate_network_policy(
     cluster: &PostgresCluster,
     operator_namespace: &str,

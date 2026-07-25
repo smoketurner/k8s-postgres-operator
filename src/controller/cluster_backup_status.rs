@@ -140,6 +140,10 @@ impl BackupStatusCollector {
     /// This executes commands in the pod to gather:
     /// - Backup list from `wal-g backup-list --json`
     /// - WAL archiving status from `pg_stat_archiver`
+    #[expect(
+        clippy::cognitive_complexity,
+        reason = "pre-existing complexity debt; decomposition tracked separately"
+    )]
     pub async fn collect(&self, cluster: &PostgresCluster) -> Result<BackupStatus> {
         // Start with configuration-based status
         let mut status = self.get_config_status(cluster);

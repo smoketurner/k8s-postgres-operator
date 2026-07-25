@@ -68,6 +68,10 @@ fn parse_duration_to_days(duration: &str) -> Option<i32> {
 ///
 /// Returns a vector of environment variables to add to the StatefulSet pod spec.
 /// These configure WAL-G for continuous archiving and scheduled base backups.
+#[expect(
+    clippy::too_many_lines,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 pub fn generate_backup_env_vars(cluster: &PostgresCluster) -> Vec<EnvVar> {
     let Some(ref backup) = cluster.spec.backup else {
         return Vec::new();

@@ -278,6 +278,10 @@ fn generate_pgbouncer_anti_affinity(cluster_name: &str) -> Affinity {
 }
 
 /// Generate the PgBouncer Deployment for primary connections
+#[expect(
+    clippy::too_many_lines,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 pub fn generate_pgbouncer_deployment(
     cluster: &PostgresCluster,
     restart_on_resize: bool,
@@ -603,6 +607,10 @@ pub fn generate_pgbouncer_deployment(
 }
 
 /// Generate the PgBouncer Deployment for replica connections
+#[expect(
+    clippy::too_many_lines,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 pub fn generate_pgbouncer_replica_deployment(
     cluster: &PostgresCluster,
     restart_on_resize: bool,

@@ -38,6 +38,10 @@ pub(crate) fn create_webhook_router(state: Arc<WebhookState>) -> Router {
 }
 
 /// Validate PostgresCluster admission webhook handler
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 pub(crate) async fn validate_postgres_cluster(
     State(state): State<Arc<WebhookState>>,
     Json(review): Json<AdmissionReview<PostgresCluster>>,
@@ -336,6 +340,10 @@ fn check_cluster_superseded(cluster: &PostgresCluster) -> Option<(String, String
 }
 
 /// Validate PostgresUpgrade admission webhook handler
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 pub(crate) async fn validate_postgres_upgrade(
     State(state): State<Arc<WebhookState>>,
     Json(review): Json<AdmissionReview<PostgresUpgrade>>,
