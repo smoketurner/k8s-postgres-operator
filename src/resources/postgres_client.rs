@@ -10,6 +10,7 @@
 use crate::resources::port_forward::{PortForward, PortForwardError, PortForwardTarget};
 use k8s_openapi::api::core::v1::Secret;
 use kube::{Api, Client};
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName};
 use std::sync::Arc;
 use std::time::Duration;
@@ -440,9 +441,8 @@ impl PostgresConnection {
 /// Parse PEM-encoded certificates into DER format
 fn parse_pem_certificates(pem_data: &str) -> PostgresClientResult<Vec<CertificateDer<'static>>> {
     let mut certs = Vec::new();
-    let mut reader = std::io::BufReader::new(pem_data.as_bytes());
 
-    for cert in rustls_pemfile::certs(&mut reader) {
+    for cert in CertificateDer::pem_slice_iter(pem_data.as_bytes()) {
         match cert {
             Ok(cert) => certs.push(cert),
             Err(e) => {
@@ -574,4 +574,129 @@ pub const DEFAULT_CLUSTER_ISSUER: &str = "selfsigned-issuer";
 /// Returns the value of TEST_CLUSTER_ISSUER env var, or "selfsigned-issuer" as default.
 pub fn get_test_cluster_issuer() -> String {
     std::env::var(TEST_CLUSTER_ISSUER_ENV).unwrap_or_else(|_| DEFAULT_CLUSTER_ISSUER.to_string())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+mod tests {
+    use super::parse_pem_certificates;
+
+    const CERT_A: &str = "\
+-----BEGIN CERTIFICATE-----
+MIIDCTCCAfGgAwIBAgIUR75kqHNOemfd6MuPVhVGYP3jLIAwDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJdGVzdC1jYS0xMB4XDTI2MDcyNTE5NTEwMloXDTI3MDcy
+NTE5NTEwMlowFDESMBAGA1UEAwwJdGVzdC1jYS0xMIIBIjANBgkqhkiG9w0BAQEF
+AAOCAQ8AMIIBCgKCAQEAqClV0XhN+meYeXqocKaYbWZx6hN91QXxiKNHkuM/wNR7
+61f6ULUCvvlgffL+D0HSYM6LQ9RCqy8iuZctZbjgC4KvY2yF8tcjEAYtNR6IK5Bk
+0C79+Mx6AKulCNnT9nCGZXRHNwWJD52JNUkqgD0i+ZJHP7a4/BCo0L+DQq5Y997K
+up0E1JVh73Fxgi87hpmze3xqspYf6jLbvi1t/FrvUkE0iX4/McKJG04XlndW1IVa
+VAME5/A3f+BkstAFiniodHU54HEBSm6IJKeV6UaMJJZcmjnk9Jj1BHQA8M1GbU5y
+mPKUkUovCUtHz6zlV7Z6hY/FibTOj5Ep0gTEWbYpfQIDAQABo1MwUTAdBgNVHQ4E
+FgQUIZvmpFI040oyfDt+BKw4KEuTvGswHwYDVR0jBBgwFoAUIZvmpFI040oyfDt+
+BKw4KEuTvGswDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAk/4U
+ouDHyeSuerbjnAf0/paI0p1PQdH44TXNUslfQT2uqFvCkeEdnlVONV/G7uh1W5u+
+G1zjcNkVwEUM1AUMmPIlhiDy/xDXz1sMrYBHz4joEFAXrmXc3pvRHMCqh/J73KEM
+YqAKvyiNoqoMN8Yr0B3CL2nHQ2WDT23812moJUV5oHw3UDmVQkEXcu5wzRWGa677
+oK/Dy+YIgEv014ihPvxuXwu7CGhq8kQ/uAZNls2kS0ggAysOViR+J5kANhOX7fsJ
++jnDc7E6Wep2xQeXaYmQu4+kh0ccFEEG7eAowSUl5j/r1ipdsia1yxAoIATPsG0X
+BZVTZBaptUrfElRk4w==
+-----END CERTIFICATE-----
+";
+
+    const CERT_B: &str = "\
+-----BEGIN CERTIFICATE-----
+MIIDCTCCAfGgAwIBAgIUdl9eK/c2Xz5TMUI6nc+w0z9mJ50wDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJdGVzdC1jYS0yMB4XDTI2MDcyNTE5NTEwMloXDTI3MDcy
+NTE5NTEwMlowFDESMBAGA1UEAwwJdGVzdC1jYS0yMIIBIjANBgkqhkiG9w0BAQEF
+AAOCAQ8AMIIBCgKCAQEA1NwqVz9mCV4wMTjNbVz/3gwOwgv5nhMG6ePHx1Wm8aTs
+hafe4xhAcSG7hbJ2eniu2cC8QZhA8MJBEbC0Pku1dBM6AkV3rpozqNhLlMQMWcKh
+9fV7VkV2h8B00aA41NUyHD0TbiGuhCZ3nSGbyru4mGQbR3SwmJcN3kE1EJ6A6X+J
+wBLKCfREfqyeEMuLrbZ6mN1RPBsBjDmvWgN8UlIwmbWRgECXWiRZ/cexIpgOphfR
+rj2icD1qRkAlUrYZ/pW0qbP5C8emFUDBGwfC31Sjc42zfCEKS5QYjPGDi/thDzhf
+ljHosD9N2bFYIHPtJpePpFPHs7V2VaUNJC9vyTHSsQIDAQABo1MwUTAdBgNVHQ4E
+FgQUdfYG/dYq/rALC5+1bG9BtuN+Pu0wHwYDVR0jBBgwFoAUdfYG/dYq/rALC5+1
+bG9BtuN+Pu0wDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAcRUV
+8yF7xEdrMv1uEqF+EEryzi+ISniELXwvbZSjWkKh4ZncsLkouADogbHwrGjdqUYZ
+qCIGPcxWSGM1bt/iy0331b3bY2UvbyXD9s0D0RSm/XDV4g4xhSzlVPAzaz0OhBhG
+JueXihXcWfl5BEzRD8IklIDF6+way5fuQ8vL6O80nJifnsxn5rvSiJh8ILraGEBs
+PpQbnHmCzNCPcBl7bO/wVs5O1mDEDQxMyKP7Y9C/Krn8RVIqH0ZEY8OdSUVg2zm9
+461vCBy/OMfKFlKTdsK0gVVD+OcIimbBqIZ5VbG+uauVC5q3H+XFPlb59F2u7sxI
+THo3aCm/GoIp54OATA==
+-----END CERTIFICATE-----
+";
+
+    const PRIVATE_KEY: &str = "\
+-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCoKVXReE36Z5h5
+eqhwpphtZnHqE33VBfGIo0eS4z/A1HvrV/pQtQK++WB98v4PQdJgzotD1EKrLyK5
+ly1luOALgq9jbIXy1yMQBi01HogrkGTQLv34zHoAq6UI2dP2cIZldEc3BYkPnYk1
+SSqAPSL5kkc/trj8EKjQv4NCrlj33sq6nQTUlWHvcXGCLzuGmbN7fGqylh/qMtu+
+LW38Wu9SQTSJfj8xwokbTheWd1bUhVpUAwTn8Dd/4GSy0AWKeKh0dTngcQFKbogk
+p5XpRowkllyaOeT0mPUEdADwzUZtTnKY8pSRSi8JS0fPrOVXtnqFj8WJtM6PkSnS
+BMRZtil9AgMBAAECggEACcxCwk4yqOzhTu6tIscqKXGnIH7bPY63mID++hmAjPE0
+eS1qmco6Kztnel8um1/37IkMRzr2WXgJG2wqCnu/nhwSsQXRNil/0v6xIp+xSmyC
+2zhpttXfI+vcVUwv0/OReRbR0WxipITGylKFhexJ/eWefiFc3N7xnxwRf1CeQW7i
+62c2n02+SAwz5PafoYCAAu2pdkoTxoCitqL6HUw8F4zXspo/RquIbQudXV+JGpQH
+d5IOIw8PAnCyyOFQhOGDCxMZ7fnw8KOoYX1//CtpblkPhzXSN3HsgwNhzCws1PIs
+4yamSMfBEnjwV8atX2nvHVdBAokgrx5XY4RundlmJwKBgQDmveRGQWyvto3ZXeCa
+uq5ZKoQseF4UNbGw/mnXdmwnDb4tkRmTu98Di1XnXI4Pl6lqEP0C3U24aJkOcQH5
+qmXJuq7Sg7OMmUsMdFpmbj1evAsRXrtUTT7m7ax6ajfdN/GQ4xZFqxTaXYE4HXmH
+jlVtY6xLUvjueWyX/tkW/ZIrxwKBgQC6kb9Hgc3ZOJ83HvFMnetz1KDtnNXKkYO7
+z04Uegr7GZNnAv1VJkFw8RO/qdg3tboc3yEc0TM8UTBku50UNXuyALq0Y2teU/om
+gHmaO9J23ni7RmYZgI781HLMC23jr6WiKot1uKaTGwLkTjTDpqF6DqgFaDw2a419
+a4kf8w0YmwKBgQDPMsGjnOheOQ3TnQstpmkdRKJ/1G6Ws0im6S5d/sdLonmeLWfM
+U64FXr97DI+8zLGivzKTueoqqDKY1z2w1iSlK3AFNaKrpJPR0UHELUYKpc1CgdCx
++NN9RvvUyUD082GGe4TqdqA5HjIFE+KnqVZo7lIvKYjDjGHJc1252WXCzQKBgGLB
+NyCgotdyU0SYCl3l0XXUfQKJW9kHwVUuXEQWfa2AUjfaq0HhKA6ibTOssZh7hvI1
+YY+hZJ9u0lDfxjumO71zCWDmpzSc+vJaWwO62qK1C+8FSpIBLK7Dvagn/Jjipqf6
+ISvE+9cuGw/CHcfacerryyBhlk2wDIrw2vqgarQ1AoGBAIt9AoGFPhA1XNXexIYk
++qstwkZdTJKoISViFesmfDtXUPZz7OAjQ9+sDm/Z/5zJ+qqGRWEXYwbz/LbcelS0
+sAtLPdNGIBChXbaW531wpNVYlW5C87mxHlMJJNr9fo7mcE69tteg+tUmrGk67RZt
+s1ufyiNAw0tbJIegkWF7X19Y
+-----END PRIVATE KEY-----
+";
+
+    #[test]
+    fn parses_single_certificate() {
+        let certs = parse_pem_certificates(CERT_A).unwrap();
+        assert_eq!(certs.len(), 1);
+    }
+
+    #[test]
+    fn parses_certificate_chain() {
+        let chain = format!("{CERT_A}{CERT_B}");
+        let certs = parse_pem_certificates(&chain).unwrap();
+        assert_eq!(certs.len(), 2);
+    }
+
+    #[test]
+    fn skips_non_certificate_sections() {
+        let bundle = format!("{PRIVATE_KEY}{CERT_A}");
+        let certs = parse_pem_certificates(&bundle).unwrap();
+        assert_eq!(certs.len(), 1);
+    }
+
+    #[test]
+    fn rejects_pem_without_certificates() {
+        for input in [PRIVATE_KEY, "", "not a pem at all\n"] {
+            let err = parse_pem_certificates(input).unwrap_err();
+            assert!(
+                matches!(err, super::PostgresClientError::InvalidCertificate(ref m)
+                    if m.contains("No certificates found")),
+                "expected no-certificates error for {input:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_truncated_certificate() {
+        // Header plus body, with the END marker cut off.
+        let truncated: String = CERT_A.lines().take(3).map(|l| format!("{l}\n")).collect();
+        let err = parse_pem_certificates(&truncated).unwrap_err();
+        assert!(
+            matches!(err, super::PostgresClientError::InvalidCertificate(ref m)
+                if m.contains("Failed to parse certificate")),
+            "expected parse failure, got {err:?}"
+        );
+    }
 }

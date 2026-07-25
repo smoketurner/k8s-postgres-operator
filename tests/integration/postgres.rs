@@ -413,10 +413,11 @@ pub async fn verify_connection_tls(
 fn parse_pem_certificates(
     pem_data: &str,
 ) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, PostgresError> {
-    let mut certs = Vec::new();
-    let mut reader = std::io::BufReader::new(pem_data.as_bytes());
+    use rustls::pki_types::pem::PemObject;
 
-    for cert in rustls_pemfile::certs(&mut reader) {
+    let mut certs = Vec::new();
+
+    for cert in rustls::pki_types::CertificateDer::pem_slice_iter(pem_data.as_bytes()) {
         match cert {
             Ok(cert) => certs.push(cert),
             Err(e) => {
