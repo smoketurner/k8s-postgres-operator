@@ -78,8 +78,12 @@ pub fn validate_backup(ctx: &ValidationContext) -> ValidationResult {
     }
 
     // The logical backup schedule feeds a Kubernetes CronJob, which supports
-    // a narrower macro set than Spilo's crontab (no @reboot).
-    if let Some(logical) = &backup.logical {
+    // a narrower macro set than Spilo's crontab (no @reboot). Only validate it
+    // when logical backups are enabled: a disabled section never reaches
+    // generate_logical_backup_cronjob, so its schedule is unused.
+    if let Some(logical) = &backup.logical
+        && logical.enabled
+    {
         return validate_schedule(
             &logical.schedule,
             "spec.backup.logical.schedule",
@@ -526,6 +530,21 @@ mod tests {
         let result = validate(backup_with_logical_schedule("every day at 3"));
         assert!(!result.allowed);
         assert_eq!(result.reason.as_deref(), Some("BackupScheduleInvalid"));
+    }
+
+    #[test]
+    fn test_logical_schedule_not_validated_when_disabled() {
+        // A disabled logical section never reaches generate_logical_backup_cronjob,
+        // so its schedule is unused and must not block the update.
+        let mut backup = backup_with_logical_schedule("not a cron");
+        if let Some(logical) = backup.logical.as_mut() {
+            logical.enabled = false;
+        }
+        let result = validate(backup);
+        assert!(
+            result.allowed,
+            "expected allowed when logical backups are disabled, got {result:?}",
+        );
     }
 
     #[test]

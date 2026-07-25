@@ -38,8 +38,8 @@ use crate::controller::upgrade_state_machine::{
 };
 use crate::crd::{
     ClusterPhase, Condition, CutoverMode, PostgresCluster, PostgresClusterSpec, PostgresUpgrade,
-    ReplicationStatus, SequenceSyncStatus, UpgradeLineageRef, UpgradePhase, VerificationStatus,
-    condition_types,
+    PostgresUpgradeStatus, ReplicationStatus, SequenceSyncStatus, UpgradeLineageRef, UpgradePhase,
+    VerificationStatus, condition_types,
 };
 use crate::resources::ddl_audit;
 use crate::resources::postgres_client::PostgresConnection;
@@ -2362,7 +2362,16 @@ async fn handle_rollback(
     // accepted writes that the source does not have. Rolling back at that
     // point would silently drop data; recovery requires PITR from a
     // pre-upgrade backup.
-    if !current_phase.can_rollback() {
+    // `Failed` is phase-eligible for rollback, but it is also reachable from
+    // CuttingOver and HealthChecking. Consult the status so a post-cutover
+    // failure — where the source is already Superseded and the Services point
+    // at the target — is refused like any other post-cutover phase.
+    let rollback_allowed = upgrade
+        .status
+        .as_ref()
+        .is_some_and(PostgresUpgradeStatus::rollback_allowed);
+
+    if !rollback_allowed {
         warn!(
             "Rollback refused for upgrade {} in phase {:?}: rollback is not supported \
              after CuttingOver begins. See docs/upgrades.md for post-cutover recovery.",
@@ -2522,6 +2531,60 @@ async fn handle_deletion(
         // Clean up replication resources
         if let Err(e) = cleanup_replication(upgrade, ctx, ns).await {
             warn!("Failed to clean up replication during deletion: {}", e);
+        }
+
+        // Hand writes back to the source. The operator makes the source
+        // read-only during Verifying and nothing else undoes that, so deleting
+        // an in-flight upgrade would otherwise leave the still-production
+        // source permanently unable to accept writes.
+        //
+        // Skipped once cutover has run: at that point the Services point at
+        // the target and the source is Superseded, so making it writable would
+        // invite divergent writes on a cluster no traffic reaches. Best-effort
+        // like the rest of this function — an unreachable source must not wedge
+        // the finalizer.
+        if upgrade
+            .status
+            .as_ref()
+            .is_some_and(PostgresUpgradeStatus::source_needs_readwrite_restore)
+        {
+            let source_name = &upgrade.spec.source_cluster.name;
+            let source_ns = upgrade
+                .spec
+                .source_cluster
+                .namespace
+                .as_deref()
+                .unwrap_or(ns);
+
+            match PostgresConnection::connect_primary(&ctx.client, source_ns, source_name).await {
+                Ok(source_conn) => match replication::set_source_readwrite(&source_conn).await {
+                    Ok(()) => {
+                        info!(
+                            "Restored source cluster {} to read-write during deletion of upgrade {}",
+                            source_name,
+                            upgrade.name_any()
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to set source {} read-write during deletion: {}. \
+                             The source may remain read-only; run \
+                             'ALTER SYSTEM SET default_transaction_read_only = off' \
+                             followed by 'SELECT pg_reload_conf()' to recover.",
+                            source_name, e
+                        );
+                    }
+                },
+                Err(e) => {
+                    warn!(
+                        "Could not connect to source {} to restore read-write during deletion: {}. \
+                         The source may remain read-only; run \
+                         'ALTER SYSTEM SET default_transaction_read_only = off' \
+                         followed by 'SELECT pg_reload_conf()' to recover.",
+                        source_name, e
+                    );
+                }
+            }
         }
     }
 

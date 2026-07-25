@@ -10,7 +10,11 @@ use postgres_operator::crd::{
     ClusterRef, DatabaseConditionType, DatabasePhase, DatabaseSpec, GrantSpec, PostgresDatabase,
     PostgresDatabaseSpec, PostgresDatabaseStatus, RolePrivilege, RoleSpec, TablePrivilege,
 };
-use postgres_operator::resources::sql::{generate_password, quote_identifier_pub};
+use postgres_operator::resources::secret::generate_password;
+use postgres_operator::resources::sql::quote_identifier_pub;
+
+/// Length used for PostgresDatabase role passwords (`ROLE_PASSWORD_LEN`).
+const ROLE_PASSWORD_LEN: usize = 24;
 
 // =============================================================================
 // PostgresDatabase CRD Tests
@@ -212,14 +216,24 @@ mod status_tests {
     }
 
     #[test]
-    fn test_condition_types() {
-        // Verify all condition types exist
-        let _ = DatabaseConditionType::ClusterReady;
-        let _ = DatabaseConditionType::DatabaseCreated;
-        let _ = DatabaseConditionType::RolesCreated;
-        let _ = DatabaseConditionType::GrantsApplied;
-        let _ = DatabaseConditionType::SecretsCreated;
-        let _ = DatabaseConditionType::Ready;
+    fn test_condition_types_serialize_to_documented_names() {
+        // These strings land in `status.conditions[].type` and are documented in
+        // config/crd/postgres-database.yaml; renaming one is an API break.
+        assert_eq!(DatabaseConditionType::ClusterReady.as_str(), "ClusterReady");
+        assert_eq!(
+            DatabaseConditionType::DatabaseCreated.as_str(),
+            "DatabaseCreated"
+        );
+        assert_eq!(DatabaseConditionType::RolesCreated.as_str(), "RolesCreated");
+        assert_eq!(
+            DatabaseConditionType::GrantsApplied.as_str(),
+            "GrantsApplied"
+        );
+        assert_eq!(
+            DatabaseConditionType::SecretsCreated.as_str(),
+            "SecretsCreated"
+        );
+        assert_eq!(DatabaseConditionType::Ready.as_str(), "Ready");
     }
 }
 
@@ -374,13 +388,15 @@ mod password_generation_tests {
 
     #[test]
     fn test_password_length() {
-        let password = generate_password();
-        assert_eq!(password.len(), 24);
+        let password = generate_password(ROLE_PASSWORD_LEN);
+        assert_eq!(password.len(), ROLE_PASSWORD_LEN);
     }
 
     #[test]
     fn test_password_uniqueness() {
-        let passwords: Vec<String> = (0..100).map(|_| generate_password()).collect();
+        let passwords: Vec<String> = (0..100)
+            .map(|_| generate_password(ROLE_PASSWORD_LEN))
+            .collect();
 
         // All passwords should be unique
         let mut unique = passwords.clone();
@@ -394,25 +410,27 @@ mod password_generation_tests {
     }
 
     #[test]
-    fn test_password_character_set() {
-        let password = generate_password();
-
-        // Should only contain allowed characters
-        let allowed_chars =
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
-        for c in password.chars() {
-            assert!(
-                allowed_chars.contains(c),
-                "Password contains invalid character: {}",
-                c
-            );
+    fn test_password_character_set_is_uri_safe() {
+        // Passwords are embedded in libpq URIs, JDBC query strings and libpq
+        // conninfo. Anything outside [A-Za-z0-9] has reserved meaning in at
+        // least one of those, so the charset must stay alphanumeric.
+        let allowed_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        for _ in 0..100 {
+            let password = generate_password(ROLE_PASSWORD_LEN);
+            for c in password.chars() {
+                assert!(
+                    allowed_chars.contains(c),
+                    "Password contains non-URI-safe character: {}",
+                    c
+                );
+            }
         }
     }
 
     #[test]
     fn test_password_has_variety() {
         // Generate multiple passwords and check for character variety
-        let password = generate_password();
+        let password = generate_password(ROLE_PASSWORD_LEN);
 
         let has_upper = password.chars().any(|c| c.is_ascii_uppercase());
         let has_lower = password.chars().any(|c| c.is_ascii_lowercase());

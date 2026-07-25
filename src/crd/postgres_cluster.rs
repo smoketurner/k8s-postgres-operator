@@ -1546,7 +1546,10 @@ impl std::fmt::Display for ClusterPhase {
 }
 
 /// Detailed pod information including generation tracking (Kubernetes 1.35+)
-#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+///
+/// `PartialEq` lets the status-only reconcile path skip a status patch when the
+/// live pod state already matches what is stored.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PodInfo {
     /// Pod name
@@ -1590,7 +1593,7 @@ pub enum PodResizeStatus {
 }
 
 /// Resource resize status for a single pod (Kubernetes 1.35+)
-#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PodResourceResizeStatus {
     /// Pod name

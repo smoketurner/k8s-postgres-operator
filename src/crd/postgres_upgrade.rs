@@ -538,6 +538,12 @@ impl UpgradePhase {
     /// does not have, so rolling back would silently drop data. Recovery from
     /// a bad target post-cutover is a manual PITR operation from a backup
     /// taken prior to the upgrade.
+    ///
+    /// `Failed` is phase-eligible because it is reachable from every
+    /// pre-cutover phase, but `Failed` is *also* reachable from `CuttingOver`
+    /// and `HealthChecking`. Callers must use
+    /// [`PostgresUpgradeStatus::rollback_allowed`], which additionally rejects
+    /// a `Failed` upgrade whose cutover already ran.
     pub fn can_rollback(&self) -> bool {
         !matches!(
             self,
@@ -547,6 +553,27 @@ impl UpgradePhase {
                 | UpgradePhase::Completed
                 | UpgradePhase::RolledBack
         )
+    }
+}
+
+impl PostgresUpgradeStatus {
+    /// Returns true if a rollback request should be honored.
+    ///
+    /// Extends [`UpgradePhase::can_rollback`] with the post-cutover check the
+    /// phase alone cannot express. `HealthChecking` failures land in `Failed`
+    /// *after* `mark_source_superseded` has flipped the Services to the target
+    /// and marked the source `Superseded` — a state the cluster reconciler
+    /// never exits. Rolling back from there would make the source writable
+    /// again while all traffic still routes to the target.
+    pub fn rollback_allowed(&self) -> bool {
+        self.phase.can_rollback() && self.cutover_started_at.is_none()
+    }
+
+    /// Returns true if the operator has put the source into read-only mode and
+    /// cutover has not run, i.e. terminating the upgrade now must hand writes
+    /// back to the source.
+    pub fn source_needs_readwrite_restore(&self) -> bool {
+        self.source_read_only_at.is_some() && self.cutover_started_at.is_none()
     }
 }
 
@@ -754,6 +781,8 @@ mod tests {
         assert!(UpgradePhase::Verifying.can_rollback());
         assert!(UpgradePhase::SyncingSequences.can_rollback());
         assert!(UpgradePhase::ReadyForCutover.can_rollback());
+        // Failed is phase-eligible; whether a *particular* Failed upgrade may
+        // roll back depends on cutoverStartedAt — see rollback_allowed below.
         assert!(UpgradePhase::Failed.can_rollback());
 
         // Cutover and post-cutover phases do not support rollback
@@ -762,6 +791,81 @@ mod tests {
         assert!(!UpgradePhase::HealthChecking.can_rollback());
         assert!(!UpgradePhase::Completed.can_rollback());
         assert!(!UpgradePhase::RolledBack.can_rollback());
+    }
+
+    #[test]
+    fn test_rollback_allowed_rejects_post_cutover_failure() {
+        // HealthChecking -> Failed leaves the source Superseded with Services
+        // already pointed at the target. Rolling back there would make the
+        // source writable while no traffic reaches it.
+        let status = PostgresUpgradeStatus {
+            phase: UpgradePhase::Failed,
+            cutover_started_at: Some("2026-07-25T12:00:00Z".to_string()),
+            ..Default::default()
+        };
+
+        assert!(status.phase.can_rollback(), "phase alone still permits it");
+        assert!(
+            !status.rollback_allowed(),
+            "cutoverStartedAt must veto the rollback"
+        );
+    }
+
+    #[test]
+    fn test_rollback_allowed_permits_pre_cutover_failure() {
+        let status = PostgresUpgradeStatus {
+            phase: UpgradePhase::Failed,
+            ..Default::default()
+        };
+
+        assert!(status.rollback_allowed());
+    }
+
+    #[test]
+    fn test_rollback_allowed_respects_phase() {
+        for phase in [
+            UpgradePhase::Pending,
+            UpgradePhase::CuttingOver,
+            UpgradePhase::HealthChecking,
+            UpgradePhase::Completed,
+            UpgradePhase::RolledBack,
+        ] {
+            let status = PostgresUpgradeStatus {
+                phase,
+                ..Default::default()
+            };
+            assert!(
+                !status.rollback_allowed(),
+                "{phase:?} must not be rollback-eligible"
+            );
+        }
+    }
+
+    #[test]
+    fn test_source_needs_readwrite_restore() {
+        // Read-only, cutover not started: deleting must hand writes back.
+        let pre_cutover = PostgresUpgradeStatus {
+            phase: UpgradePhase::ReadyForCutover,
+            source_read_only_at: Some("2026-07-25T12:00:00Z".to_string()),
+            ..Default::default()
+        };
+        assert!(pre_cutover.source_needs_readwrite_restore());
+
+        // Cutover ran: the source is Superseded, leave it read-only.
+        let post_cutover = PostgresUpgradeStatus {
+            phase: UpgradePhase::Failed,
+            source_read_only_at: Some("2026-07-25T12:00:00Z".to_string()),
+            cutover_started_at: Some("2026-07-25T12:05:00Z".to_string()),
+            ..Default::default()
+        };
+        assert!(!post_cutover.source_needs_readwrite_restore());
+
+        // Never promoted to read-only: nothing to undo.
+        let never_readonly = PostgresUpgradeStatus {
+            phase: UpgradePhase::Replicating,
+            ..Default::default()
+        };
+        assert!(!never_readonly.source_needs_readwrite_restore());
     }
 
     #[test]

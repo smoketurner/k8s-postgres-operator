@@ -156,6 +156,25 @@ DROP FUNCTION IF EXISTS public.postgres_operator_log_ddl();
 DROP TABLE IF EXISTS public.postgres_operator_ddl_audit;
 ```
 
+### Deleting an in-progress upgrade
+
+Deleting a `PostgresUpgrade` before cutover returns the source to read-write.
+The operator sets the source read-only during `Verifying`, so an upgrade
+deleted in `Verifying`, `SyncingSequences`, `ReadyForCutover`, or
+`WaitingForManualCutover` would otherwise leave the production database unable
+to accept writes.
+
+Restoration is best-effort: if the source is unreachable at deletion time the
+finalizer is still removed and a warning is logged. Recover manually with:
+
+```sql
+ALTER SYSTEM SET default_transaction_read_only = off;
+SELECT pg_reload_conf();
+```
+
+After cutover the source is deliberately left read-only — the target is the
+active primary and Services no longer route to the source.
+
 #### `spec.strategy.acknowledgeDDL` (escape hatch)
 
 There are legitimate reasons to make schema changes on both source and target

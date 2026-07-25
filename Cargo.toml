@@ -45,6 +45,7 @@ bytes = { version = "=1.12.1", default-features = false }
 base64 = { version = "=0.22.1", default-features = false }
 cron = { version = "=0.17.0", default-features = false }
 jiff = { version = "=0.2.32", default-features = false, features = ["std"] }
+percent-encoding = { version = "=2.3.2", default-features = false, features = ["std"] }
 rand = { version = "=0.10.2", default-features = false }
 
 # TLS crypto backend for rustls

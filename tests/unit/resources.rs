@@ -974,6 +974,28 @@ mod pgbouncer_service_tests {
     }
 
     #[test]
+    fn test_primary_pooler_pod_selector_matches_pods_predating_the_label() {
+        // The Service selector requires pooler-type=primary, which pods created
+        // by an older operator do not carry. The reconciler backfills that label
+        // before applying the Service, and it finds those pods with this
+        // selector — so it must use the != form, not an equality on `primary`.
+        let selector = pgbouncer::primary_pooler_pod_selector("my-cluster");
+
+        assert!(
+            selector.contains("postgres-operator.smoketurner.com/pooler-type!=replica"),
+            "selector must exclude replica poolers without requiring the \
+             primary label; got {selector}"
+        );
+        assert!(
+            !selector.contains("pooler-type=primary"),
+            "an equality on pooler-type=primary would miss unlabelled legacy \
+             pods, defeating the backfill; got {selector}"
+        );
+        assert!(selector.contains("postgres-operator.smoketurner.com/cluster=my-cluster"));
+        assert!(selector.contains("app.kubernetes.io/component=pgbouncer"));
+    }
+
+    #[test]
     fn test_pgbouncer_service_selector_excludes_replica_pooler_pods() {
         // Regression: replica pooler pod labels are a strict superset of the
         // base pgbouncer labels. Selecting on the base labels alone made the

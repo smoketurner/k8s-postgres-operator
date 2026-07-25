@@ -1749,6 +1749,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "kube-leader-election",
+ "percent-encoding",
  "prometheus-client",
  "proptest",
  "rand 0.10.2",

@@ -12,6 +12,7 @@ use kube::api::{Api, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::runtime::events::{EventType, Reporter};
 use kube::{Client, Resource, ResourceExt};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::controller::cleanup::{cleanup_stuck_resource, is_namespace_not_found_error};
@@ -23,10 +24,14 @@ use crate::crd::{
     GrantSpec, PostgresCluster, PostgresDatabase, PostgresDatabaseStatus, RoleSpec,
 };
 use crate::resources::postgres_client::PostgresConnection;
+use crate::resources::secret::generate_password;
 use crate::resources::sql::{
     self, SqlError, create_extension, drop_database, drop_role, ensure_database, ensure_role,
-    generate_password, grant_privileges,
+    grant_privileges,
 };
+
+/// Length of generated role passwords.
+const ROLE_PASSWORD_LEN: usize = 24;
 
 /// Context for the database reconciler
 pub struct DatabaseContext {
@@ -300,6 +305,11 @@ pub async fn reconcile_database(
                     "Roles have been provisioned",
                 ),
                 (
+                    DatabaseConditionType::GrantsApplied,
+                    "GrantsApplied",
+                    "Grants have been applied",
+                ),
+                (
                     DatabaseConditionType::SecretsCreated,
                     "SecretsCreated",
                     "Credential secrets have been created",
@@ -426,7 +436,7 @@ async fn provision_database(
     let owner_exists = sql::role_exists(&conn, owner).await?;
     if !owner_exists {
         debug!(role = %owner, "Creating owner role");
-        let temp_password = generate_password();
+        let temp_password = generate_password(ROLE_PASSWORD_LEN);
         sql::create_role(&conn, owner, &temp_password, &[], None, true).await?;
     }
 
@@ -495,7 +505,7 @@ async fn create_role_with_secret(
     };
 
     // Use existing password or generate new one
-    let password = existing_password.unwrap_or_else(generate_password);
+    let password = existing_password.unwrap_or_else(|| generate_password(ROLE_PASSWORD_LEN));
 
     // Build privileges list
     let privileges: Vec<String> = role_spec
@@ -517,17 +527,10 @@ async fn create_role_with_secret(
 
     // Create or update the credential secret
     let host = format!("{}-primary.{}.svc", cluster_name, namespace);
-    let port = 5432;
+    let port: u16 = 5432;
 
-    let connection_string = format!(
-        "postgresql://{}:{}@{}:{}/{}?sslmode=require",
-        role_name, password, host, port, db_name
-    );
-
-    let jdbc_url = format!(
-        "jdbc:postgresql://{}:{}/{}?user={}&password={}&ssl=true",
-        host, port, db_name, role_name, password
-    );
+    let connection_string = build_connection_string(role_name, &password, &host, port, db_name);
+    let jdbc_url = build_jdbc_url(role_name, &password, &host, port, db_name);
 
     let secret = Secret {
         metadata: kube::api::ObjectMeta {
@@ -595,6 +598,47 @@ async fn create_role_with_secret(
 
     info!(secret = %secret_name, role = %role_name, "Created credential secret");
     Ok(secret_name.clone())
+}
+
+/// Percent-encode a password for embedding in a URI.
+///
+/// Passwords generated today are alphanumeric, but secrets provisioned by older
+/// operator versions can contain `@`, `&`, `%` and friends: `@` makes the libpq
+/// URI's userinfo/host split ambiguous and `&` truncates the JDBC password at a
+/// query-parameter boundary. `NON_ALPHANUMERIC` also encodes `+`, which JDBC
+/// would otherwise decode as a space.
+fn encode_password(password: &str) -> String {
+    utf8_percent_encode(password, NON_ALPHANUMERIC).to_string()
+}
+
+/// Build the libpq URI stored in the credentials Secret's `connection-string` key.
+fn build_connection_string(
+    role_name: &str,
+    password: &str,
+    host: &str,
+    port: u16,
+    db_name: &str,
+) -> String {
+    format!(
+        "postgresql://{}:{}@{}:{}/{}?sslmode=require",
+        role_name,
+        encode_password(password),
+        host,
+        port,
+        db_name
+    )
+}
+
+/// Build the JDBC URL stored in the credentials Secret's `jdbc-url` key.
+fn build_jdbc_url(role_name: &str, password: &str, host: &str, port: u16, db_name: &str) -> String {
+    format!(
+        "jdbc:postgresql://{}:{}/{}?user={}&password={}&ssl=true",
+        host,
+        port,
+        db_name,
+        role_name,
+        encode_password(password)
+    )
 }
 
 /// Apply a grant specification
@@ -845,4 +889,63 @@ pub fn database_error_policy(
 
     // Exponential backoff for errors
     Action::requeue(Duration::from_secs(30))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+mod tests {
+    use super::{build_connection_string, build_jdbc_url};
+
+    /// A password from a secret provisioned before the charset was narrowed.
+    const LEGACY_PASSWORD: &str = "k3X@qR7m&p%1#z";
+
+    #[test]
+    fn connection_string_encodes_reserved_characters() {
+        let uri =
+            build_connection_string("myrole", LEGACY_PASSWORD, "db-primary.ns.svc", 5432, "mydb");
+
+        assert_eq!(
+            uri,
+            "postgresql://myrole:k3X%40qR7m%26p%251%23z@db-primary.ns.svc:5432/mydb?sslmode=require"
+        );
+        // Exactly one `@` may remain: the userinfo/host delimiter. A raw `@` in
+        // the password would make the authority ambiguous.
+        assert_eq!(uri.matches('@').count(), 1);
+    }
+
+    #[test]
+    fn jdbc_url_encodes_reserved_characters() {
+        let url = build_jdbc_url("myrole", LEGACY_PASSWORD, "db-primary.ns.svc", 5432, "mydb");
+
+        assert_eq!(
+            url,
+            "jdbc:postgresql://db-primary.ns.svc:5432/mydb\
+             ?user=myrole&password=k3X%40qR7m%26p%251%23z&ssl=true"
+        );
+        // Only the two separators the operator emits; a raw `&` in the password
+        // would truncate it at a query-parameter boundary.
+        assert_eq!(url.matches('&').count(), 2);
+    }
+
+    #[test]
+    fn alphanumeric_password_is_unchanged() {
+        // Passwords generated today need no escaping, so the stored values stay
+        // readable and byte-identical to the `password` key.
+        let password = "aB3xY9zQ7mN2pK5vR8tL4wJ6";
+
+        assert_eq!(
+            build_connection_string("myrole", password, "db-primary.ns.svc", 5432, "mydb"),
+            format!("postgresql://myrole:{password}@db-primary.ns.svc:5432/mydb?sslmode=require")
+        );
+        assert!(
+            build_jdbc_url("myrole", password, "db-primary.ns.svc", 5432, "mydb")
+                .contains(&format!("password={password}&"))
+        );
+    }
+
+    #[test]
+    fn plus_is_encoded_so_jdbc_does_not_read_it_as_space() {
+        let uri = build_connection_string("myrole", "a+b", "h", 5432, "d");
+        assert!(uri.contains("myrole:a%2Bb@"), "got {uri}");
+    }
 }

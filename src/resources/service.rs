@@ -10,11 +10,12 @@
 //! updates the service selectors to point to the new cluster.
 
 use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec as K8sServiceSpec};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{Api, Patch, PatchParams};
 use kube::core::ObjectMeta;
 use kube::{Client, ResourceExt};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use thiserror::Error;
 
@@ -368,23 +369,12 @@ pub async fn switch_services_to_target(
     let owner_ref = owner_reference(target_cluster);
     let owner_refs = vec![owner_ref];
 
-    // Patch the primary service
-    let primary_patch = json!({
-        "metadata": {
-            "ownerReferences": owner_refs,
-            "annotations": {
-                "postgres-operator.smoketurner.com/switched-from": source_name,
-                "postgres-operator.smoketurner.com/switched-at": jiff::Timestamp::now().to_string()
-            }
-        },
-        "spec": {
-            "selector": {
-                "app.kubernetes.io/name": target_name,
-                "postgres-operator.smoketurner.com/cluster": target_name,
-                "spilo-role": "master"
-            }
-        }
-    });
+    // One timestamp for both services and the result, so the recorded cutover
+    // instant is identical everywhere it appears.
+    let switched_at = jiff::Timestamp::now();
+
+    let primary_patch =
+        service_switch_patch(source_name, target_name, "master", &owner_refs, switched_at);
 
     services
         .patch(
@@ -398,23 +388,13 @@ pub async fn switch_services_to_target(
             source: e,
         })?;
 
-    // Patch the replica service
-    let replica_patch = json!({
-        "metadata": {
-            "ownerReferences": owner_refs,
-            "annotations": {
-                "postgres-operator.smoketurner.com/switched-from": source_name,
-                "postgres-operator.smoketurner.com/switched-at": jiff::Timestamp::now().to_string()
-            }
-        },
-        "spec": {
-            "selector": {
-                "app.kubernetes.io/name": target_name,
-                "postgres-operator.smoketurner.com/cluster": target_name,
-                "spilo-role": "replica"
-            }
-        }
-    });
+    let replica_patch = service_switch_patch(
+        source_name,
+        target_name,
+        "replica",
+        &owner_refs,
+        switched_at,
+    );
 
     // Single-replica clusters skip the `-repl` service entirely
     // (cluster_reconciler only creates it when replicas > 1). Treat a
@@ -445,13 +425,52 @@ pub async fn switch_services_to_target(
         } else {
             String::new()
         },
-        switched_at: jiff::Timestamp::now(),
+        switched_at,
         previous_cluster: source_name.to_string(),
         new_cluster: target_name.to_string(),
     })
 }
 
+/// Build the cutover patch that re-points a source-named Service at the target
+/// cluster.
+///
+/// Applied as a JSON Merge Patch (RFC 7396), whose objects merge key-by-key:
+/// `metadata.annotations` gains the two operator keys and every other
+/// annotation on the Service — external-dns hostnames, cloud load-balancer
+/// settings — is left untouched, because merge patch only visits keys present
+/// in the patch document. `spec.selector` merges the same way; the three keys
+/// here are the full set `generate_primary_service`/`generate_replicas_service`
+/// emit.
+///
+/// `ownerReferences` is an array, so merge patch replaces it wholesale. That is
+/// the intent: after cutover the Service belongs to the target cluster.
+fn service_switch_patch(
+    source_name: &str,
+    target_name: &str,
+    spilo_role: &str,
+    owner_refs: &[OwnerReference],
+    switched_at: jiff::Timestamp,
+) -> Value {
+    json!({
+        "metadata": {
+            "ownerReferences": owner_refs,
+            "annotations": {
+                "postgres-operator.smoketurner.com/switched-from": source_name,
+                "postgres-operator.smoketurner.com/switched-at": switched_at.to_string()
+            }
+        },
+        "spec": {
+            "selector": {
+                "app.kubernetes.io/name": target_name,
+                "postgres-operator.smoketurner.com/cluster": target_name,
+                "spilo-role": spilo_role
+            }
+        }
+    })
+}
+
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
@@ -472,5 +491,88 @@ mod tests {
 
         assert_eq!(primary_name, "my-cluster-primary");
         assert_eq!(replica_name, "my-cluster-repl");
+    }
+
+    /// Apply RFC 7396 JSON Merge Patch to `target`.
+    ///
+    /// Verbatim from the RFC's reference algorithm: objects merge key-by-key,
+    /// `null` deletes, everything else replaces.
+    fn merge_patch(target: &mut Value, patch: &Value) {
+        let Some(patch_map) = patch.as_object() else {
+            *target = patch.clone();
+            return;
+        };
+        if !target.is_object() {
+            *target = json!({});
+        }
+        let Some(target_map) = target.as_object_mut() else {
+            return;
+        };
+        for (key, value) in patch_map {
+            if value.is_null() {
+                target_map.remove(key);
+            } else {
+                merge_patch(target_map.entry(key).or_insert(Value::Null), value);
+            }
+        }
+    }
+
+    #[test]
+    fn cutover_patch_preserves_unrelated_service_annotations() {
+        // Merge patch merges nested objects key-by-key, so annotations the
+        // patch does not name survive the cutover untouched.
+        let mut service = json!({
+            "metadata": {
+                "annotations": {
+                    "external-dns.alpha.kubernetes.io/hostname": "db.example.com",
+                    "service.beta.kubernetes.io/aws-load-balancer-internal": "true"
+                }
+            },
+            "spec": {
+                "selector": {
+                    "app.kubernetes.io/name": "old",
+                    "postgres-operator.smoketurner.com/cluster": "old",
+                    "spilo-role": "master"
+                }
+            }
+        });
+
+        let patch = service_switch_patch("old", "new", "master", &[], jiff::Timestamp::UNIX_EPOCH);
+        merge_patch(&mut service, &patch);
+
+        let annotations = &service["metadata"]["annotations"];
+        assert_eq!(
+            annotations["external-dns.alpha.kubernetes.io/hostname"],
+            "db.example.com"
+        );
+        assert_eq!(
+            annotations["service.beta.kubernetes.io/aws-load-balancer-internal"],
+            "true"
+        );
+        assert_eq!(
+            annotations["postgres-operator.smoketurner.com/switched-from"],
+            "old"
+        );
+
+        // And the selector actually moved to the target.
+        let selector = &service["spec"]["selector"];
+        assert_eq!(selector["app.kubernetes.io/name"], "new");
+        assert_eq!(selector["postgres-operator.smoketurner.com/cluster"], "new");
+        assert_eq!(selector["spilo-role"], "master");
+    }
+
+    #[test]
+    fn cutover_patch_uses_one_timestamp_for_both_services() {
+        let at = jiff::Timestamp::UNIX_EPOCH;
+        let primary = service_switch_patch("old", "new", "master", &[], at);
+        let replica = service_switch_patch("old", "new", "replica", &[], at);
+
+        let key = "postgres-operator.smoketurner.com/switched-at";
+        assert_eq!(
+            primary["metadata"]["annotations"][key],
+            replica["metadata"]["annotations"][key]
+        );
+        assert_eq!(primary["spec"]["selector"]["spilo-role"], "master");
+        assert_eq!(replica["spec"]["selector"]["spilo-role"], "replica");
     }
 }
