@@ -16,9 +16,17 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # Gate: a tag must not publish an image that no test has run against.
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   build:
     name: Build and Push (${{ matrix.platform }})
     if: github.repository_owner == 'smoketurner'
+    needs: ci
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false

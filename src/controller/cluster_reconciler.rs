@@ -457,6 +457,11 @@ pub fn error_policy(cluster: Arc<PostgresCluster>, error: &Error, _ctx: Arc<Cont
 }
 
 /// Check and update status without full reconciliation
+#[expect(
+    clippy::cognitive_complexity,
+    clippy::too_many_lines,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 async fn check_and_update_status(
     cluster: &PostgresCluster,
     ctx: &Context,
@@ -818,6 +823,11 @@ async fn check_and_update_status(
 /// - Split-brain prevention
 ///
 /// Reference: https://github.com/patroni/patroni
+#[expect(
+    clippy::cognitive_complexity,
+    clippy::too_many_lines,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 async fn reconcile_cluster(cluster: &PostgresCluster, ctx: &Context, ns: &str) -> Result<Action> {
     let name = cluster.name_any();
     let status_manager = StatusManager::new(cluster, ctx, ns);
@@ -1980,6 +1990,10 @@ fn has_cpu_scaling(cluster: &PostgresCluster) -> bool {
 }
 
 /// Apply or clean up KEDA scaling resources based on cluster configuration
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 async fn reconcile_keda_resources(
     cluster: &PostgresCluster,
     ctx: &Context,
@@ -2240,6 +2254,10 @@ impl PoolerResourceNames {
 /// Owner references do not cover the disable case: they point at the
 /// PostgresCluster, which still exists, so garbage collection never fires and
 /// the pooler Deployments would keep running indefinitely.
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 async fn reconcile_pgbouncer(
     cluster: &PostgresCluster,
     ctx: &Context,
@@ -2507,6 +2525,10 @@ const DELETION_POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// 4. Remove finalizer
 ///
 /// This is idempotent - each phase checks preconditions before proceeding.
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 async fn handle_deletion(cluster: &PostgresCluster, ctx: &Context, ns: &str) -> Result<Action> {
     let name = cluster.name_any();
     info!("Handling deletion of {}", name);
@@ -2862,6 +2884,10 @@ async fn emit_backup_event(ctx: &Context, cluster: &PostgresCluster, event: &Bac
 ///
 /// This function also checks if a previously triggered "running" backup has completed
 /// by comparing the current backup list with the trigger timestamp.
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 async fn check_and_trigger_manual_backup(
     cluster: &PostgresCluster,
     ctx: &Context,

@@ -20,6 +20,10 @@ const LEASE_RENEW_INTERVAL_SECS: u64 = 5;
 const SHUTDOWN_GRACE_PERIOD_SECS: u64 = 5;
 
 #[tokio::main]
+#[expect(
+    clippy::too_many_lines,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Install the TLS crypto provider before any TLS operations
     // Note: install_default() may fail if called multiple times (e.g., in tests),

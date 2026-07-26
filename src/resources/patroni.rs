@@ -431,6 +431,10 @@ fn generate_anti_affinity(cluster_name: &str) -> Affinity {
 /// When `keda_managed` is true, the replicas field is not set, allowing KEDA to manage
 /// the replica count via ScaledObject/HPA. This prevents conflicts between the operator
 /// and KEDA's autoscaling decisions.
+#[expect(
+    clippy::too_many_lines,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 pub fn generate_patroni_statefulset(
     cluster: &PostgresCluster,
     keda_managed: bool,

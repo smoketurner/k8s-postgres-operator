@@ -55,6 +55,10 @@ pub fn is_namespace_not_found_error(e: &kube::Error) -> bool {
 ///     cleanup_stuck_resource::<PostgresCluster>(client, "my-cluster", "my-namespace", FINALIZER).await?;
 /// }
 /// ```
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "pre-existing complexity debt; decomposition tracked separately"
+)]
 pub async fn cleanup_stuck_resource<K>(
     client: Client,
     resource_name: &str,
