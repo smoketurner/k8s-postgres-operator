@@ -42,7 +42,7 @@ bytes = { version = "=1.12.1", default-features = false }
 
 # Utilities
 cron = { version = "=0.17.0", default-features = false }
-jiff = { version = "=0.2.34", default-features = false, features = ["std"] }
+jiff = { version = "=0.2.35", default-features = false, features = ["std"] }
 percent-encoding = { version = "=2.3.2", default-features = false, features = ["std"] }
 rand = { version = "=0.10.2", default-features = false }
 
