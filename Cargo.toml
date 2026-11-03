@@ -47,7 +47,7 @@ percent-encoding = { version = "=2.3.2", default-features = false, features = ["
 rand = { version = "=0.10.2", default-features = false }
 
 # TLS crypto backend for rustls
-rustls = { version = "=0.23.42", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
 
 # PostgreSQL client for direct SQL connections
 tokio-postgres = { version = "=0.7.18", default-features = false, features = ["runtime"] }
